@@ -1,7 +1,45 @@
-pytest>=8.1
-ruff>=0.6.8
-mypy>=1.11
-toml-sort>=0.23
+# =====================================================================
+# 📦 SpectraMind V50 — Development Dependencies
+# ---------------------------------------------------------------------
+# Purpose:
+#   Extra dev/test/lint/type-checking dependencies beyond runtime.
+#   Used locally and in CI for code quality, reproducibility, and safety.
+#
+# Notes:
+#   • Versions pinned for stability (Kaggle/CI reproducibility).
+#   • Keep in sync with pyproject.toml / setup.cfg.
+#   • Runtime deps (torch, numpy, etc.) live in requirements.txt.
+# =====================================================================
+
+# --- Testing ----------------------------------------------------------
+pytest>=8.1           # unit/integration tests
+pytest-cov>=5.0       # coverage reporting (optional but common)
+
+# --- Linting & Style --------------------------------------------------
+ruff>=0.6.8           # fast linter (replaces flake8/isort/black)
+toml-sort>=0.23       # keep pyproject.toml sorted/stable
+
+# --- Type Checking ----------------------------------------------------
+mypy>=1.11            # static type checking
+types-PyYAML          # type hints for PyYAML
+types-requests        # type hints if requests used
+
+# --- JSON / Schema Validation ----------------------------------------
 check-jsonschema>=0.28
 jsonschema>=4.22
-pandas>=2.2
+
+# --- Data Science Utils (dev convenience) -----------------------------
+pandas>=2.2           # ensure latest DataFrame API during dev
+polars>=1.5           # optional faster DataFrame engine for CI checks
+
+# --- CLI / Rich Output ------------------------------------------------
+rich>=13.7            # colored logs, better CLI UX
+
+# --- Docs / Diagrams --------------------------------------------------
+mkdocs>=1.6
+mkdocs-material>=9.5
+pymdown-extensions>=10.8
+
+# --- Security / SBOM (optional for CI) -------------------------------
+pip-audit>=2.7
+cyclonedx-bom>=4.3
