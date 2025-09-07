@@ -28,6 +28,11 @@ TAG_MSG      ?= "Release $(TAG)"
 export PYTHONHASHSEED = 0
 ARTIFACTS_DIR := artifacts
 
+# Kaggle bundle
+SUBMISSION_DIR    ?= $(ARTIFACTS_DIR)
+SUBMISSION_ZIP    ?= $(SUBMISSION_DIR)/submission.zip
+SUBMISSION_SCHEMA ?= schemas/submission.schema.json
+
 .DEFAULT_GOAL := help
 
 # -----------------------------------------------------------------------------
@@ -37,8 +42,9 @@ ARTIFACTS_DIR := artifacts
         train calibrate predict submit \
         dvc-setup dvc-repro dvc-push dvc-pull \
         sbom pip-audit trivy scan \
+        kaggle-package kaggle-verify kaggle-clean kaggle \
         tag push-tag release bump \
-        clean distclean
+        clean distclean ci
 
 # -----------------------------------------------------------------------------
 # Help
@@ -93,7 +99,7 @@ calibrate: ## Calibrate sensors/data
 predict: ## Run predictions
 	$(PYTHON) -m $(PKG) predict --config-name predict
 
-submit: ## Build submission artifacts
+submit: ## Build submission artifacts (CLI submit command)
 	$(PYTHON) -m $(PKG) submit --config-name submit
 
 # -----------------------------------------------------------------------------
@@ -130,12 +136,71 @@ pip-audit: ## Audit Python deps (pip-audit)
 trivy: ## Scan repo & Dockerfile (Trivy; requires Docker + Trivy)
 	if command -v trivy >/dev/null 2>&1; then \
 	  trivy fs --exit-code 0 --severity HIGH,CRITICAL . || true; \
-	  if [ -f Dockerfile ]; then trivy config --exit-code 0 . || true; fi \
+	  if [ -f Dockerfile ]; then trivy config --exit-code 0 . || true; fi; \
 	else \
 	  echo "Trivy not installed; skipping scan."; \
 	fi
 
 scan: pip-audit sbom trivy ## Run all local security scans
+
+# -----------------------------------------------------------------------------
+# Kaggle packaging (submission.zip -> artifacts/submission.zip)
+# -----------------------------------------------------------------------------
+kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
+	mkdir -p "$(SUBMISSION_DIR)"
+	if [ -x scripts/package_submission.sh ]; then \
+	  echo ">> Using project packaging script"; \
+	  bash scripts/package_submission.sh || exit 1; \
+	else \
+	  echo ">> Fallback packaging: looking for outputs"; \
+	  set -euo pipefail; \
+	  files=""; \
+	  for f in outputs/*.csv outputs/*.parquet predictions/*.csv predictions/*.parquet; do \
+	    [ -e "$$f" ] && files="$$files $$f"; \
+	  done; \
+	  if [ -z "$$files" ]; then \
+	    echo "::error::No output files found for Kaggle bundle. Provide scripts/package_submission.sh or ensure outputs exist."; \
+	    exit 1; \
+	  fi; \
+	  zip -j -r "$(SUBMISSION_ZIP)" $$files; \
+	fi
+	@if [ ! -f "$(SUBMISSION_ZIP)" ]; then \
+	  echo "::error::Expected bundle missing: $(SUBMISSION_ZIP)"; exit 1; \
+	else \
+	  echo "::notice::Kaggle bundle created: $(SUBMISSION_ZIP)"; \
+	fi
+
+kaggle-verify: ## Verify submission bundle integrity (schema if present)
+	@if [ ! -f "$(SUBMISSION_ZIP)" ]; then \
+	  echo "::error::Bundle not found: $(SUBMISSION_ZIP). Run 'make kaggle-package' first."; exit 1; \
+	fi
+	@if command -v unzip >/dev/null 2>&1; then \
+	  echo ">> Inspecting archive:"; unzip -l "$(SUBMISSION_ZIP)"; \
+	else \
+	  echo ">> 'unzip' not found; skipping listing."; \
+	fi
+	@if [ -f "$(SUBMISSION_SCHEMA)" ]; then \
+	  echo ">> Schema detected: $(SUBMISSION_SCHEMA)"; \
+	  if [ -x "$(VENV_BIN)/check-jsonschema" ]; then \
+	    tmpdir="$$(mktemp -d)"; \
+	    unzip -q "$(SUBMISSION_ZIP)" -d "$$tmpdir"; \
+	    for j in $$(find "$$tmpdir" -type f -name '*.json'); do \
+	      echo "  - Validating $$j"; \
+	      "$(VENV_BIN)/check-jsonschema" --schemafile "$(SUBMISSION_SCHEMA)" "$$j" || exit 1; \
+	    done; \
+	    rm -rf "$$tmpdir"; \
+	  else \
+	    echo "::warning::check-jsonschema not available; skipping schema validation."; \
+	  fi; \
+	else \
+	  echo ">> No schema provided; basic verification only."; \
+	fi
+	@echo "::notice::Kaggle bundle verified."
+
+kaggle-clean: ## Remove local Kaggle bundle
+	rm -f "$(SUBMISSION_ZIP)"
+
+kaggle: kaggle-package kaggle-verify ## Package + verify submission
 
 # -----------------------------------------------------------------------------
 # Releases (pairs with .github/workflows/release.yml)
