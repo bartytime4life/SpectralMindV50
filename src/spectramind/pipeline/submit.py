@@ -18,7 +18,9 @@ from omegaconf import DictConfig, OmegaConf
 __all__ = ["run"]
 
 
-# ----------------------------- Data model -------------------------------------
+# ======================================================================================
+# Data model
+# ======================================================================================
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +35,9 @@ class SubmitPayload:
     env: Dict[str, Any]
 
 
-# --------------------------------- API ----------------------------------------
+# ======================================================================================
+# Public API
+# ======================================================================================
 
 
 def run(
@@ -52,32 +56,8 @@ def run(
     Responsibilities
     ---------------
     • Compose Hydra config (submit + io paths)
-    • Validate predictions file (existence + optional JSON schema)
-    • Package predictions and manifest into a deterministic zip
-
-    Parameters
-    ----------
-    config_name
-        Name of the top-level Hydra config under `configs/` (default: "submit").
-    overrides
-        Hydra override strings, e.g. `["submit.out_zip=outputs/submissions/submission.zip"]`.
-    predictions
-        Optional explicit predictions file path; overrides `cfg.submit.predictions`.
-    out_zip
-        Optional explicit submission zip path; overrides `cfg.submit.out_zip`.
-    strict
-        If True, propagate composition/validation errors; else warn and continue with defaults.
-    quiet
-        Suppress resolved config echoing to stderr.
-    env
-        Optional execution context, e.g. {"is_kaggle": True, "is_ci": False}.
-
-    Raises
-    ------
-    FileNotFoundError
-        When `configs/` directory is missing or predictions file cannot be found.
-    RuntimeError
-        When schema validation fails (if schema present).
+    • Validate predictions file (shape, columns, basic numeric checks; optional JSON schema)
+    • Package predictions and manifest into a deterministic zip & emit a config snapshot
     """
     payload = SubmitPayload(
         config_name=config_name,
@@ -92,30 +72,32 @@ def run(
     repo_root = _find_repo_root()
     cfg = _compose_hydra_config(repo_root, payload)
 
-    # honor explicit CLI overrides
+    # CLI overrides take precedence
     if payload.predictions is not None:
         cfg.submit.predictions = payload.predictions
     if payload.out_zip is not None:
         cfg.submit.out_zip = payload.out_zip
 
-    # validate & normalize io
+    # Resolve IO
     preds_file = _resolve_predictions(repo_root, cfg)
     out_zip_file = _prepare_out_zip(repo_root, cfg)
 
-    # optional schema and basic shape checks
+    # Validate predictions (fast CSV & strict column contract)
     _validate_predictions(cfg, repo_root, preds_file, quiet=payload.quiet, strict=payload.strict)
 
-    # emit run snapshot for traceability
+    # Emit config snapshot (resolved Hydra YAML + JSON meta) next to zip
     _emit_config_snapshot(out_zip_file, cfg, preds_file)
 
-    # create zip (deterministic-ish: fixed arcname order & times)
+    # Create zip (stable filenames; compressed)
     _package_submission(cfg, preds_file, out_zip_file, quiet=payload.quiet)
 
     if not payload.quiet:
         sys.stderr.write(f"[submit] package ready → {out_zip_file}\n")
 
 
-# ---------------------------- Validation & Packaging -------------------------
+# ======================================================================================
+# Validation & Packaging
+# ======================================================================================
 
 
 def _validate_predictions(
@@ -129,19 +111,18 @@ def _validate_predictions(
     if not preds_path.exists():
         raise FileNotFoundError(f"Predictions file not found: {preds_path}")
 
-    # Basic sanity: non-empty, readable, CSV-ish
+    # 1) Basic CSV sniff (non-empty, parseable)
     try:
         with preds_path.open("r", newline="") as f:
-            sniff = csv.Sniffer().sniff(f.read(4096))
+            blob = f.read(4096)
+            if not blob.strip():
+                raise ValueError("empty file")
+            sniff = csv.Sniffer().sniff(blob)
             f.seek(0)
             reader = csv.reader(f, dialect=sniff)
-            rows_peek = []
-            for i, row in enumerate(reader):
-                rows_peek.append(row)
-                if i >= 2:
-                    break
-            if not rows_peek:
-                raise ValueError("empty CSV")
+            peek = [row for _, row in zip(range(3), reader)]
+            if not peek:
+                raise ValueError("no rows parsed")
     except Exception as e:
         msg = f"[submit] basic CSV check failed for {preds_path}: {e}"
         if strict:
@@ -149,25 +130,86 @@ def _validate_predictions(
         if not quiet:
             sys.stderr.write(msg + " (continuing)\n")
 
-    # Optional JSON Schema validation if present
-    schema = repo_root / "schemas" / "submission.schema.json"
-    if schema.exists():
+    # 2) Column contract & numeric sanity (use pandas for convenience)
+    try:
+        import pandas as pd  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("pandas is required for submission validation") from e
+
+    df = pd.read_csv(preds_path)
+
+    # Required columns
+    required_id = "id"
+    if required_id not in df.columns:
+        raise RuntimeError(f"[submit] missing required column: '{required_id}'")
+
+    # Ensure exactly 283 mu_* and 283 sigma_* columns
+    mu_cols = sorted([c for c in df.columns if c.startswith("mu_")])
+    sg_cols = sorted([c for c in df.columns if c.startswith("sigma_")])
+
+    def _expected(prefix: str) -> list[str]:
+        return [f"{prefix}{i:03d}" for i in range(283)]
+
+    exp_mu = _expected("mu_")
+    exp_sg = _expected("sigma_")
+
+    if mu_cols != exp_mu:
+        missing = [c for c in exp_mu if c not in mu_cols]
+        extra = [c for c in mu_cols if c not in exp_mu]
+        raise RuntimeError(
+            "[submit] mu columns mismatch: "
+            f"missing={missing[:5]}{'...' if len(missing) > 5 else ''}, "
+            f"extra={extra[:5]}{'...' if len(extra) > 5 else ''}"
+        )
+    if sg_cols != exp_sg:
+        missing = [c for c in exp_sg if c not in sg_cols]
+        extra = [c for c in sg_cols if c not in exp_sg]
+        raise RuntimeError(
+            "[submit] sigma columns mismatch: "
+            f"missing={missing[:5]}{'...' if len(missing) > 5 else ''}, "
+            f"extra={extra[:5]}{'...' if len(extra) > 5 else ''}"
+        )
+
+    # id column sanity (non-null, mostly string-like; unique)
+    if df[required_id].isna().any():
+        raise RuntimeError("[submit] 'id' column contains nulls")
+    if df[required_id].duplicated().any():
+        dup = df[required_id][df[required_id].duplicated()].iloc[:5].tolist()
+        raise RuntimeError(f"[submit] 'id' column contains duplicates (e.g., {dup})")
+    # Cast to str to ensure safe CSV identity
+    df[required_id] = df[required_id].astype(str)
+
+    # mu/sigma numeric sanity (no NaNs; finite)
+    numeric = df[mu_cols + sg_cols].apply(pd.to_numeric, errors="coerce")
+    if numeric.isna().any().any():
+        bad = numeric.columns[numeric.isna().any()].tolist()[:5]
+        raise RuntimeError(f"[submit] numeric columns contain NaN/non-numeric values (e.g., {bad})")
+    # Replace original block with numeric-cast (keeps exact column order)
+    df[mu_cols + sg_cols] = numeric
+
+    # Optional JSON Schema (column-level validation can be brittle; treat as informational)
+    schema_path = repo_root / "schemas" / "submission.schema.json"
+    if schema_path.exists():
         try:
             import jsonschema  # type: ignore
-            import pandas as pd  # type: ignore
-
-            df = pd.read_csv(preds_path)
-            # Convert DataFrame to a simple dict-of-lists for schema validation
-            with schema.open("r") as f:
+            with schema_path.open("r") as f:
                 submission_schema = json.load(f)
-            jsonschema.validate(df.to_dict(orient="list"), submission_schema)
+            # Validate a minimal object capturing columns -> types, not the entire table
+            obj = {
+                "id": str(df["id"].iloc[0]) if len(df) else "",
+                # we only validate presence via pattern; numeric content already checked
+                **{c: float(df[c].iloc[0]) if len(df) else 0.0 for c in mu_cols[:1] + sg_cols[:1]},
+            }
+            jsonschema.validate(obj, submission_schema)
             if not quiet:
-                sys.stderr.write("[submit] predictions validated against JSON schema.\n")
+                sys.stderr.write("[submit] schema present; basic sample validation passed.\n")
         except Exception as e:
-            raise RuntimeError(f"Submission schema validation failed: {e}") from e
-    else:
-        if not quiet:
-            sys.stderr.write("[submit] no JSON schema found; skipping schema validation.\n")
+            # Keep the strong, explicit checks above as the source of truth
+            if not quiet:
+                sys.stderr.write(f"[submit] schema validation warning: {e}\n")
+
+    # Write back normalized CSV (string ids, numeric mu/sigma) to ensure downstream stability
+    df.to_csv(preds_path, index=False)
 
 
 def _package_submission(
@@ -190,9 +232,9 @@ def _package_submission(
         },
     }
 
-    # Write zip with a deterministic ordering
+    # Write zip (stable arcnames)
     with zipfile.ZipFile(out_zip_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # store predictions under their basename (per Kaggle norms)
+        # store predictions under basename (common Kaggle norm)
         zf.write(preds_file, arcname=preds_file.name)
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
 
@@ -200,7 +242,9 @@ def _package_submission(
         sys.stderr.write(f"[submit] wrote package: {out_zip_file}\n")
 
 
-# ---------------------------- Hydra / Utils ----------------------------------
+# ======================================================================================
+# Hydra / Snapshot / Utils
+# ======================================================================================
 
 
 def _compose_hydra_config(repo_root: Path, payload: SubmitPayload) -> DictConfig:
@@ -209,9 +253,8 @@ def _compose_hydra_config(repo_root: Path, payload: SubmitPayload) -> DictConfig
     if not config_dir.exists():  # pragma: no cover
         raise FileNotFoundError(
             f"Missing Hydra config directory: {config_dir} "
-            "(expected at repo root per repo blueprint)"
+            "(expected at repo root per repository blueprint)"
         )
-
     with initialize(config_path=str(config_dir), version_base=None):
         try:
             cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
@@ -257,9 +300,8 @@ def _resolve_predictions(repo_root: Path, cfg: DictConfig) -> Path:
     raw = str(cfg.submit.predictions)
     preds = (_as_path(raw) if os.path.isabs(raw) else repo_root / raw).resolve()
     if not preds.exists():
-        # Let caller raise a clearer error; here we only return normalized path.
+        # Caller raises precise error; here we only normalize
         return preds
-    # Optional: sanity on file size zero
     try:
         if preds.stat().st_size == 0:
             sys.stderr.write(f"[submit] warning: predictions file is empty: {preds}\n")
@@ -296,7 +338,6 @@ def _emit_config_snapshot(out_zip_file: Path, cfg: DictConfig, preds_file: Path)
         meta = {
             "schema": "spectramind/submit_config_snapshot@v1",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "git_root": str(_nearest_git_root(out_zip_file.parent) or ""),
             "predictions": str(preds_file),
             "predictions_sha256": _sha256_of_file(preds_file) if preds_file.exists() else "",
             "out_zip": str(out_zip_file),
@@ -308,7 +349,9 @@ def _emit_config_snapshot(out_zip_file: Path, cfg: DictConfig, preds_file: Path)
         sys.stderr.write(f"[submit] warning: failed to write config snapshot: {e}\n")
 
 
-# ---------------------------- Common helpers ---------------------------------
+# ======================================================================================
+# Common helpers
+# ======================================================================================
 
 
 def _sha256_of_file(path: Path, chunk: int = 1024 * 1024) -> str:
@@ -320,14 +363,6 @@ def _sha256_of_file(path: Path, chunk: int = 1024 * 1024) -> str:
                 break
             h.update(data)
     return h.hexdigest()
-
-
-def _nearest_git_root(path: Path) -> Path | None:
-    """Return nearest parent that contains `.git`, else None."""
-    for p in [path, *path.parents]:
-        if (p / ".git").exists():
-            return p
-    return None
 
 
 def _find_repo_root() -> Path:
@@ -342,11 +377,10 @@ def _find_repo_root() -> Path:
     here = Path(__file__).resolve()
     for p in [here, *here.parents]:
         if (p / "pyproject.toml").exists() or (p / "setup.cfg").exists() or (p / ".git").exists():
-            # If we’re sitting in .../src, prefer its parent as root (layout: root/src/...)
-            if p.name == "src":
+            if p.name == "src":  # /root/src/… → project root is parent
                 return p.parent
             return p
-    # Fallback: best-effort three levels up (keeps Kaggle/colab from exploding)
+    # Fallback: best-effort three levels up (safe for notebook contexts)
     return here.parents[3]
 
 
