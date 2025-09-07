@@ -1,2 +1,66 @@
-# flat parameters
-enabled: true
+# configs/calib/method/flat.yaml
+# ----------------------------------------------------------------------
+# AIRS Flat-Field Correction — pixel/wavelength sensitivity normalization
+# ----------------------------------------------------------------------
+# Corrects fixed-pattern sensitivity variations by dividing science frames
+# by a normalized flat map. Supports static per-pixel maps and wavelength-
+# dependent flats (via axis_info/wavelength grid).
+# ----------------------------------------------------------------------
+
+_target_: spectramind.calib.method.flat.FlatField
+enable: true
+apply_to: ["airs"]
+
+# --- Inputs / references ---
+flat_reference: ${data.root}/flat_reference.parquet   # or .npy/.csv
+axis_info: ${data.root}/axis_info.parquet            # wavelength-axis mapping (optional)
+image_key: "airs_frame"                              # raw 2D science frame
+mask_key: null                                       # optional boolean mask for bad pixels
+
+# --- Flat strategy ---
+strategy:
+  mode: "wavelength_map"    # ["pixel_map", "wavelength_map", "auto"]
+  # pixel_map:     use a static per-pixel flat (H x W)
+  # wavelength_map:use wavelength-indexed flats or per-column scaling
+  # auto:          prefer wavelength_map if axis_info is available, else pixel_map
+
+# --- Normalization of flat map(s) ---
+normalization:
+  method: "median"           # ["median", "mean", "percentile"]
+  percentile: 50             # used if method == "percentile"
+  per_slice: true            # normalize per wavelength slice/column if wavelength_map
+  eps: 1.0e-9                # jitter to avoid divide-by-zero
+
+# --- Interpolation for wavelength-dependent flats ---
+interpolation:
+  kind: "linear"             # ["nearest", "linear", "cubic", "spline"]
+  fill_value: "extrapolate"  # or a float
+  smooth: 0.0                # optional smoothing factor (0 = none)
+
+# --- Robust handling of flat map outliers / NaNs ---
+robust:
+  sigma_clip:
+    enable: true
+    sigma: 5.0
+    iters: 1
+  replace_nans: true
+  nan_fill: "local_median"   # ["zero", "local_mean", "local_median"]
+
+# --- Application order & masking ---
+apply:
+  pre_clip_science: false      # optional pre-clip science pixels before division
+  preserve_dtype: false        # cast back to original dtype after correction
+  update_mask_on_divzero: true # flag pixels where flat ~ 0 using mask_key
+
+# --- Output keys ---
+outputs:
+  corrected_key: "airs_frame_flatcorr"
+  meta_prefix: "airs_flat"
+
+# --- Diagnostics (optional; can be heavy) ---
+diagnostics:
+  enable: false
+  save_norm_flat: true
+  histogram_before_after: false
+  preview_slices: 0           # number of wavelength slices to dump as PNGs (0 disables)
+  out_dir: "./outputs/calib_diagnostics/airs_flat"
