@@ -1,13 +1,14 @@
 # src/spectramind/pipeline/diagnostics.py
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
@@ -15,7 +16,9 @@ from omegaconf import DictConfig, OmegaConf
 __all__ = ["run"]
 
 
-# ----------------------------- Data model -------------------------------------
+# ======================================================================================
+# Data model
+# ======================================================================================
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +32,9 @@ class DiagPayload:
     env: Dict[str, Any]
 
 
-# --------------------------------- API ----------------------------------------
+# ======================================================================================
+# Public API
+# ======================================================================================
 
 
 def run(
@@ -45,32 +50,11 @@ def run(
     Diagnostics runner: metrics/plots/HTML report (FFT/UMAP/SHAP, etc.)
 
     Responsibilities
-    ---------------
-    • Compose Hydra config (diagnostics + data + model refs)
-    • Dispatch to internal reporting pipeline
-    • Write artifacts in a DVC-friendly structure
-
-    Parameters
-    ----------
-    config_name
-        Name of the top-level Hydra config under `configs/` (default: "diagnose").
-    overrides
-        Hydra override strings, e.g. `["env=kaggle", "diagnostics.modules=[metrics,fft]"]`.
-    report_dir
-        Optional report output directory. When provided, overrides `cfg.diagnostics.report_dir`.
-    strict
-        If True, propagate Hydra composition/validation errors; otherwise warn and continue with defaults.
-    quiet
-        Suppress resolved config echoing to stderr.
-    env
-        Optional execution context, e.g. {"is_kaggle": True, "is_ci": False}.
-
-    Raises
-    ------
-    FileNotFoundError
-        When `configs/` cannot be found at repo root.
-    RuntimeError
-        When the internal diagnostics orchestrator is missing.
+    ----------------
+    • Compose Hydra config (diagnostics + data/model refs)
+    • Plan a DVC-friendly output structure
+    • Dispatch to internal reporting orchestrator
+    • Verify outputs and persist a manifest + config snapshots
     """
     payload = DiagPayload(
         config_name=config_name,
@@ -84,20 +68,25 @@ def run(
     repo_root = _find_repo_root()
     cfg = _compose_hydra_config(repo_root, payload)
 
-    # honor explicit report_dir if provided
+    # honor explicit report_dir
     if payload.report_dir is not None:
         cfg.diagnostics.report_dir = payload.report_dir
 
+    # detect env if not provided & apply guardrails
+    _auto_env_flags(payload.env)
     _apply_guardrails(cfg, payload.env)
 
-    # prepare report root + emit config snapshot/metadata for traceability
+    # normalize modules (accept comma-separated string or list[str])
+    cfg.diagnostics.modules = _normalize_modules(cfg.diagnostics.modules)
+
+    # prepare report root & snapshot config
     report_root = _prepare_report_root(repo_root, cfg)
     _emit_config_snapshot(report_root, cfg)
 
     # Defer heavy imports and provide clear errors
     try:
         # Expect orchestrator:
-        # `spectramind.diagnostics.report.generate(cfg=cfg)`
+        #   spectramind.diagnostics.report.generate(cfg=cfg) -> Optional[path | dict]
         from spectramind.diagnostics.report import generate as generate_report  # type: ignore[attr-defined]
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
@@ -111,10 +100,26 @@ def run(
         sys.stderr.write(OmegaConf.to_yaml(cfg, resolve=True) + "\n")
         sys.stderr.write(f"[diagnostics] report_dir = {report_root}\n")
 
-    generate_report(cfg=cfg)
+    # ---- Run orchestrator ----
+    result = generate_report(cfg=cfg)
+
+    # ---- Verify outputs (allow orchestrator to define primary output) ----
+    outputs = _discover_outputs(report_root, result)
+
+    if not outputs.get("html_reports"):
+        msg = f"[diagnostics] no HTML reports found in {report_root}"
+        if payload.strict:
+            raise RuntimeError(msg)
+        if not payload.quiet:
+            sys.stderr.write(msg + " (continuing)\n")
+
+    # ---- Persist a manifest for CI/DVC provenance ----
+    _write_diagnostics_manifest(report_root, cfg, outputs)
 
 
-# ---------------------------- Hydra / Utils ----------------------------------
+# ======================================================================================
+# Hydra / Defaults / Guardrails
+# ======================================================================================
 
 
 def _compose_hydra_config(repo_root: Path, payload: DiagPayload) -> DictConfig:
@@ -148,6 +153,8 @@ def _ensure_defaults(cfg: DictConfig) -> None:
     cfg.diagnostics.setdefault("num_workers", 2)
     cfg.setdefault("runtime", {})
     cfg.runtime.setdefault("seed", 42)
+    cfg.runtime.setdefault("deterministic", False)
+    cfg.runtime.setdefault("low_mem_mode", False)
 
 
 def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
@@ -168,6 +175,14 @@ def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
         sys.stderr.write(msg + " (continuing)\n")
 
 
+def _auto_env_flags(env: Dict[str, Any]) -> None:
+    """Detect Kaggle/CI if not given."""
+    if "is_kaggle" not in env:
+        env["is_kaggle"] = bool(os.environ.get("KAGGLE_URL_BASE") or os.environ.get("KAGGLE_KERNEL_INTEGRATIONS"))
+    if "is_ci" not in env:
+        env["is_ci"] = bool(os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"))
+
+
 def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
     """Apply environment-aware guardrails (workers, determinism, etc.)."""
     is_kaggle = bool(env.get("is_kaggle"))
@@ -176,11 +191,20 @@ def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
     # Conservative workers on non-interactive envs
     if "num_workers" not in cfg.diagnostics:
         cfg.diagnostics.num_workers = 1 if (is_kaggle or is_ci) else 2
+    else:
+        if is_kaggle or is_ci:
+            cfg.diagnostics.num_workers = min(int(cfg.diagnostics.num_workers), 2)
 
-    # Respect common CI/Kaggle env hints
-    cfg.runtime.setdefault("deterministic", bool(is_ci))
+    # Determinism in CI; low-mem hint on Kaggle
+    if is_ci:
+        cfg.runtime.deterministic = True
     if is_kaggle:
-        cfg.runtime.setdefault("low_mem_mode", True)
+        cfg.runtime.low_mem_mode = True
+
+
+# ======================================================================================
+# Planning, Snapshots, Discovery, Manifest
+# ======================================================================================
 
 
 def _prepare_report_root(repo_root: Path, cfg: DictConfig) -> Path:
@@ -198,8 +222,11 @@ def _prepare_report_root(repo_root: Path, cfg: DictConfig) -> Path:
 def _emit_config_snapshot(report_root: Path, cfg: DictConfig) -> None:
     """Write resolved config & minimal run metadata for traceability."""
     try:
+        snap_dir = report_root / "snapshots"
+        snap_dir.mkdir(exist_ok=True)
+
         # YAML snapshot (human-friendly)
-        snap_yaml = report_root / "snapshots" / "config_snapshot.yaml"
+        snap_yaml = snap_dir / "config_snapshot.yaml"
         OmegaConf.save(cfg, snap_yaml, resolve=True)
 
         # JSON run metadata (machine-friendly)
@@ -212,10 +239,113 @@ def _emit_config_snapshot(report_root: Path, cfg: DictConfig) -> None:
             "runtime": dict(getattr(cfg, "runtime", {})),
             "modules": list(getattr(cfg, "diagnostics", {}).get("modules", [])),
         }
-        meta_json = report_root / "snapshots" / "config_snapshot.json"
+        meta_json = snap_dir / "config_snapshot.json"
         meta_json.write_text(json.dumps(meta, indent=2))
     except Exception as e:  # pragma: no cover
         sys.stderr.write(f"[diagnostics] warning: failed to write config snapshot: {e}\n")
+
+
+def _normalize_modules(mods: Any) -> List[str]:
+    """Accept list[str] or comma-separated string; return normalized list[str]."""
+    if mods is None:
+        return []
+    if isinstance(mods, str):
+        parts = [p.strip() for p in mods.split(",") if p.strip()]
+        return parts
+    if isinstance(mods, Sequence):
+        return [str(m).strip() for m in mods if str(m).strip()]
+    return [str(mods).strip()]
+
+
+def _discover_outputs(report_root: Path, orchestrator_ret: Any) -> Dict[str, List[str]]:
+    """
+    Return discovered outputs:
+      • html_reports: list[str]
+      • plots: list[str]
+      • summaries: list[str] (json)
+    Orchestrator may return:
+      - a path to a primary html
+      - a dict of paths (e.g., {'html': '...', 'summary': '...'})
+    """
+    outputs: Dict[str, List[str]] = {"html_reports": [], "plots": [], "summaries": []}
+
+    # Honor orchestrator hints
+    try:
+        if orchestrator_ret:
+            if isinstance(orchestrator_ret, (str, os.PathLike)):
+                p = Path(str(orchestrator_ret)).resolve()
+                if p.is_file() and p.suffix.lower() in {".html", ".htm"}:
+                    outputs["html_reports"].append(str(p))
+            elif isinstance(orchestrator_ret, dict):
+                for k, v in orchestrator_ret.items():
+                    try:
+                        p = Path(str(v)).resolve()
+                        if p.is_file() and p.suffix.lower() in {".html", ".htm"}:
+                            outputs["html_reports"].append(str(p))
+                        elif p.is_file() and p.suffix.lower() == ".json":
+                            outputs["summaries"].append(str(p))
+                        elif p.is_dir():
+                            # treat dirs as plot roots
+                            outputs["plots"].append(str(p))
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    # Scan common locations
+    html_globs = [report_root.glob("*.htm*"), (report_root / "html").glob("*.htm*")]
+    for g in html_globs:
+        for p in g:
+            outputs["html_reports"].append(str(p.resolve()))
+
+    plot_dirs = [report_root / "plots", report_root / "assets"]
+    for d in plot_dirs:
+        if d.exists():
+            for p in d.rglob("*"):
+                if p.is_file() and p.suffix.lower() in {".png", ".svg", ".json"}:
+                    outputs["plots"].append(str(p.resolve()))
+
+    # summaries (json) at root/html/plots
+    for d in [report_root, report_root / "html", report_root / "plots"]:
+        for p in d.glob("*.json"):
+            outputs["summaries"].append(str(p.resolve()))
+
+    # dedupe
+    for k in outputs:
+        outputs[k] = sorted(set(outputs[k]))
+    return outputs
+
+
+def _write_diagnostics_manifest(report_root: Path, cfg: DictConfig, outputs: Dict[str, List[str]]) -> None:
+    """Write a manifest (CI/DVC-friendly) with discovered outputs and sha256 digests."""
+    def _digests(items: List[str]) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        for s in items:
+            try:
+                sha = _sha256_of_file(Path(s))
+            except Exception:
+                sha = ""
+            out.append({"path": s, "sha256": sha})
+        return out
+
+    manifest = {
+        "schema": "spectramind/diagnostics_manifest@v1",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "report_dir": str(report_root),
+        "modules": list(getattr(cfg, "diagnostics", {}).get("modules", [])),
+        "outputs": {
+            "html_reports": _digests(outputs.get("html_reports", [])),
+            "plots": _digests(outputs.get("plots", [])),
+            "summaries": _digests(outputs.get("summaries", [])),
+        },
+        "hydra_overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
+    }
+    (report_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+
+# ======================================================================================
+# Common helpers
+# ======================================================================================
 
 
 def _nearest_git_root(path: Path) -> Path | None:
@@ -242,9 +372,20 @@ def _find_repo_root() -> Path:
             if p.name == "src":
                 return p.parent
             return p
-    # Fallback: best-effort three levels up (keeps Kaggle/colab from exploding)
+    # Fallback: best-effort three levels up (keeps notebooks/colab from exploding)
     return here.parents[3]
 
 
 def _as_path(p: str | os.PathLike[str]) -> Path:
     return Path(p) if isinstance(p, Path) else Path(os.fspath(p))
+
+
+def _sha256_of_file(path: Path, chunk: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
