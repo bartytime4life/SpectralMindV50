@@ -48,9 +48,6 @@ All λ hyperparameters are tunable in `configs/loss/composite.yaml`.
 ## 3. Architecture
 
 
-If you prefer left→right layout:
-
-```markdown
 ```mermaid
 flowchart LR
   A["GLL baseline (competition metric)"] --> L["Composite Loss"]
