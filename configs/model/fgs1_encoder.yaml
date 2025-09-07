@@ -1,3 +1,121 @@
-type: mamba
-hidden: 128
-depth: 4
+# configs/model/fgs1_encoder.yaml
+# SpectraMind V50 — FGS1 Time-Series Encoder
+# ---------------------------------------------------------
+# Default backbone: Mamba/SSM (robust for long 1D sequences).
+# Alternatives: LSTM / Transformer (see `variants`).
+#
+# Usage examples (Hydra):
+#   spectramind train +model.fgs1_encoder._target_=spectramind.models.fgs1_mamba.FGS1Mamba
+#   spectramind train +model.fgs1_encoder=variants/lstm
+#   spectramind train +model.fgs1_encoder.preprocessing.binning.enabled=true
+
+# ------------------------------
+# Backbone (default)
+# ------------------------------
+_target_: spectramind.models.fgs1_mamba.FGS1Mamba
+
+# I/O
+input_dim: 1            # single-channel photometry
+seq_len: 1024           # expected sequence length after preprocessing/packing
+
+# Capacity / depth
+hidden_dim: 128
+state_dim: 64           # SSM state size
+depth: 6
+dropout: 0.10
+activation: gelu        # backbone MLPs
+
+# Readout
+return_sequence: false  # if true, returns per-timestep features
+pooling: "mean"         # options: mean | cls | last
+
+# Norm / init
+norm: layernorm         # options: none | layernorm
+init:
+  type: xavier_uniform
+  gain: 1.0
+
+# ------------------------------
+# Lightweight preprocessing
+# ------------------------------
+preprocessing:
+  # Detrend photometry (helps remove slow drifts)
+  detrend:
+    enabled: true
+    method: "poly"      # poly | savgol | none
+    poly_order: 2
+    savgol:
+      window: 31
+      polyorder: 2
+
+  # Optional time binning to boost SNR or fit GPU mem
+  binning:
+    enabled: false
+    size: 2             # combine N consecutive frames
+    method: "mean"      # mean | median
+
+  # Normalization
+  normalize:
+    enabled: true
+    mode: "standard"    # standard (z-score) | minmax | none
+    eps: 1.0e-6
+
+# ------------------------------
+# Regularization & stability
+# ------------------------------
+stochastic_depth:
+  enabled: false
+  drop_prob: 0.0
+weight_norm: false
+gradient_checkpointing: false
+
+# ------------------------------
+# Profiles (environment presets)
+# ------------------------------
+profiles:
+  kaggle:
+    seq_len: 768
+    hidden_dim: 128
+    depth: 6
+    preprocessing:
+      binning:
+        enabled: false
+  local:
+    seq_len: 1024
+    hidden_dim: 128
+    depth: 6
+  large_gpu:
+    seq_len: 1536
+    hidden_dim: 192
+    depth: 8
+
+# ------------------------------
+# Variants (drop-in backbones)
+# ------------------------------
+variants:
+
+  lstm:
+    _target_: spectramind.models.fgs1_rnn.FGS1LSTM
+    input_dim: 1
+    seq_len: ${..seq_len}
+    hidden_dim: 192
+    num_layers: 3
+    bidirectional: false
+    dropout: 0.1
+    return_sequence: false
+    pooling: "mean"
+    preprocessing: ${..preprocessing}
+
+  transformer:
+    _target_: spectramind.models.fgs1_transformer.FGS1Transformer
+    input_dim: 1
+    seq_len: ${..seq_len}
+    d_model: 256
+    nhead: 8
+    num_layers: 6
+    dim_feedforward: 1024
+    dropout: 0.1
+    rotary_emb: true
+    return_sequence: false
+    pooling: "cls"
+    preprocessing: ${..preprocessing}
