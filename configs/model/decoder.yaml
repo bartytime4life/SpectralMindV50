@@ -1,2 +1,71 @@
-type: mlp
-hidden: 256
+# configs/model/decoder.yaml
+# SpectraMind V50 — Heteroscedastic Decoder Head
+# ---------------------------------------------------------
+# Maps fused latent features -> per-bin mean (μ) and uncertainty (σ)
+# for 283 spectral bins. σ is produced with a positive link fn and
+# clamped by epsilon for GLL stability.
+
+_target_: spectramind.models.decoder_head.DecoderHead
+
+# I/O
+input_dim: 256          # must match fusion latent size
+hidden_dim: 512
+num_bins: 283
+
+# MLP topology
+depth: 3                # number of hidden layers (excluding heads)
+activation: gelu        # relu | gelu | silu | mish
+dropout: 0.10
+norm: layernorm         # none | batchnorm | layernorm
+weight_norm: false
+
+# Heads
+heads:
+  mu:
+    enabled: true
+    activation: identity   # identity | tanh | sigmoid (use identity for μ in ppm)
+  sigma:
+    enabled: true
+    link: softplus         # softplus | exp | log1p_exp  (ensures σ > 0)
+    epsilon: 1.0e-6        # clamp floor for numerical stability
+    max_sigma: null        # optional cap e.g. 0.1; set null to disable
+
+# Initialization
+init:
+  type: xavier_uniform
+  gain: 1.0
+
+# Post-processing guards (applied at inference/export)
+postprocess:
+  mu:
+    clamp:                 # optional hard clamps for μ
+      enabled: false
+      min: 0.0
+      max: 1.0
+  sigma:
+    clamp:
+      enabled: true
+      min: ${..heads.sigma.epsilon}
+      max: null
+
+# Export / formatting options
+export:
+  # If true, outputs a dict with keys: mu, sigma
+  dict_outputs: true
+  # If true, concatenates to a single tensor [B, 2*num_bins] (mu || sigma)
+  concat_outputs: false
+
+# Profiles for common environments
+profiles:
+  kaggle:
+    dropout: 0.10
+    hidden_dim: 512
+    depth: 3
+  local:
+    dropout: 0.05
+    hidden_dim: 512
+    depth: 3
+  large_gpu:
+    dropout: 0.10
+    hidden_dim: 768
+    depth: 4
