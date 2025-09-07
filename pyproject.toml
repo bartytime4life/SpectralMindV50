@@ -127,7 +127,7 @@ include = ["spectramind*"]
 exclude = ["tests*", "examples*", "docs*"]
 
 # Ensure configs/schemas ship inside the built wheel.
-# Place files under src/spectramind/{configs,schemas,...}
+# Place files under src/spectramind/{configs,schemas,assets/...}
 [tool.setuptools.package-data]
 spectramind = [
   "configs/**/*.yaml",
