@@ -1,134 +1,138 @@
-%% docs/diagrams/architecture.mmd
 %% SpectraMind V50 — Architecture Overview (Mermaid)
-%% Renders on GitHub and MkDocs (with mermaid plugin)
+%% Works on GitHub + MkDocs mermaid plugin
 
 flowchart TD
 
-  %% ─────────────────────────────────────────────────────────────
-  %% L1: Orchestration & Config
-  %% ─────────────────────────────────────────────────────────────
-  A["User / CI\n(typer CLI: spectramind)"] -->|invokes| B["Hydra Compose\n(configs/*)"]
-  B --> C["Run Context\n(seed, device, env)"]
+%% ─────────────────────────────────────────────────────────────
+%% L1: Orchestration & Config
+%% ─────────────────────────────────────────────────────────────
+A["User / CI<br/>(typer CLI: <code>spectramind</code>)"] -->|invokes| B["Hydra Compose<br/>(configs/*)"]
+B --> C["Run Context<br/>(seed, device, env)"]
 
-  subgraph CFG[Hydra Config Tree]
-    direction LR
-    CFG1["env/ (local,kaggle,hpc,ci)"]
-    CFG2["data/ (nominal,kaggle,debug)"]
-    CFG3["calib/ (adc,dark,flat,cds,photometry,trace,phase)"]
-    CFG4["model/ (fgs1,airs,fusion,decoder)"]
-    CFG5["training/ (optim, sched, precision, es)"]
-    CFG6["loss/ (smooth, nonneg, band, calibration)"]
-    CFG7["logger/ (jsonl,csv,wandb)"]
+subgraph CFG["Hydra Config Tree"]
+direction LR
+  CFG1["env/ (local, kaggle, hpc, ci)"]
+  CFG2["data/ (nominal, kaggle, debug)"]
+  CFG3["calib/ (adc, dark, flat, cds, photometry, trace, phase)"]
+  CFG4["model/ (fgs1, airs, fusion, decoder)"]
+  CFG5["training/ (optim, sched, precision, early_stop)"]
+  CFG6["loss/ (smooth, nonneg, band, calibration)"]
+  CFG7["logger/ (jsonl, csv, wandb)"]
+end
+
+B -. defaults + overrides .-> CFG
+
+%% ─────────────────────────────────────────────────────────────
+%% L2: DVC Pipeline Stages
+%% ─────────────────────────────────────────────────────────────
+subgraph DVC["Reproducible Pipeline (DVC)"]
+direction TB
+  P1["calibrate<br/>ADC→dark→flat→CDS→photometry→trace→phase"]
+  P2["tensors<br/>(feature-ready, physics-aligned)"]
+  P3["train<br/>(dual-encoder + heteroscedastic decoder)"]
+  P4["predict<br/>(μ, σ per bin; 283 bins)"]
+  P5["diagnose<br/>(FFT, UMAP/t-SNE, SHAP, rules)"]
+  P6["submit<br/>(schema-checked CSV/ZIP + manifest)"]
+
+  P1 --> P2 --> P3 --> P4
+  P4 --> P5
+  P4 --> P6
+end
+
+C --> P1
+
+%% ─────────────────────────────────────────────────────────────
+%% L3: Model Blocks
+%% ─────────────────────────────────────────────────────────────
+subgraph M["Model Architecture"]
+direction LR
+
+  subgraph E1["FGS1 Encoder"]
+  direction TB
+    E1a["Denoise / Bin / Downsample"]
+    E1b["Temporal Model (SSM/Mamba)"]
   end
 
-  B -. defaults+overrides .-> CFG
-
-  %% ─────────────────────────────────────────────────────────────
-  %% L2: DVC Pipeline Stages
-  %% ─────────────────────────────────────────────────────────────
-  subgraph DVC[Reproducible Pipeline (DVC)]
-    direction TB
-    P1["calibrate\nADC→dark→flat→CDS→photometry→trace→phase"] --> P2["tensors\n(feature-ready, physics-aligned)"]
-    P2 --> P3["train\n(dual-encoder + heteroscedastic decoder)"]
-    P3 --> P4["predict\n(μ, σ per bin; 283 bins)"]
-    P4 --> P5["diagnose\n(FFT, UMAP/t-SNE, SHAP, rules)"]
-    P4 --> P6["submit\n(schema-checked CSV/ZIP + manifest)"]
+  subgraph E2["AIRS Encoder"]
+  direction TB
+    E2a["Spectral CNN/GNN<br/>(wavelength-structured)"]
   end
 
-  C --> P1
+  FUS["Fusion<br/>(concat / cross-attn)"]
+  DEC["Decoder<br/>(heteroscedastic head → μ, σ)"]
+end
 
-  %% ─────────────────────────────────────────────────────────────
-  %% L3: Model Blocks
-  %% ─────────────────────────────────────────────────────────────
-  subgraph M["Model Architecture"]
-    direction LR
+P2 --> E1
+P2 --> E2
+E1 --> FUS
+E2 --> FUS
+FUS --> DEC
+DEC --> P4
 
-    subgraph E1["FGS1 Encoder"]
-      E1a["Denoise / Bin / Downsample"]
-      E1b["Temporal Model (SSM/Mamba)"]
-    end
+%% ─────────────────────────────────────────────────────────────
+%% L4: Constraints & Calibration
+%% ─────────────────────────────────────────────────────────────
+subgraph PHY["Physics-Aware Constraints"]
+direction TB
+  L1c["Smoothness Prior"]
+  L2c["Non-negativity of μ"]
+  L3c["Band Coherence / Priors"]
+  L4c["σ Calibration (Temp Scaling)"]
+end
 
-    subgraph E2["AIRS Encoder"]
-      E2a["Spectral CNN/GNN\n(wavelength-structured)"]
-    end
+PHY -. loss terms / checks .- DEC
+PHY -. validation .- P5
 
-    FUS["Fusion\n(concat / cross-attn)"]
-    DEC["Decoder\n(heteroscedastic head → μ, σ)"]
-  end
+%% ─────────────────────────────────────────────────────────────
+%% L5: Artifacts, Lineage & CI
+%% ─────────────────────────────────────────────────────────────
+subgraph ART["Lineage & Artifacts"]
+direction TB
+  A1["artifacts/configs/run.yaml<br/>(Hydra snapshot)"]
+  A2["artifacts/checkpoints/model.ckpt"]
+  A3["artifacts/predictions/{mu.csv, sigma.csv}"]
+  A4["artifacts/reports/diagnostics_dashboard.html"]
+  A5["dist/submission.{csv,zip,json}<br/>(+ checksums manifest)"]
+  A6["logs/events.jsonl<br/>(structured run log)"]
+end
 
-  %% tensors → encoders → fusion → decoder
-  P2 --> E1
-  P2 --> E2
-  E1 --> FUS
-  E2 --> FUS
-  FUS --> DEC
-  DEC --> P4
+B --> A1
+P3 --> A2
+P4 --> A3
+P5 --> A4
+P6 --> A5
+C  --> A6
 
-  %% ─────────────────────────────────────────────────────────────
-  %% L4: Constraints & Calibration
-  %% ─────────────────────────────────────────────────────────────
-  subgraph PHY["Physics-Aware Constraints"]
-    L1c["Smoothness Prior"]
-    L2c["Non-negativity of μ"]
-    L3c["Band Coherence / Priors"]
-    L4c["σ Calibration (Temp Scaling)"]
-  end
+%% ─────────────────────────────────────────────────────────────
+%% L6: Guardrails & Platform
+%% ─────────────────────────────────────────────────────────────
+subgraph KG["Kaggle Constraints"]
+direction TB
+  KG1["No Internet"]
+  KG2["≤ 9h GPU / 30 GB RAM"]
+  KG3["Inputs via /kaggle/input/<br/>(ariel-data-challenge-2025)"]
+  KG4["requirements-kaggle.txt only"]
+end
 
-  PHY -. loss terms / checks .- DEC
-  PHY -. validation .- P5
+subgraph CI["CI/CD & DVC"]
+direction TB
+  CI1["Lint/Type (pre-commit)"]
+  CI2["Determinism Checks"]
+  CI3["SBOM & Pinning"]
+  CI4["dvc repro / cache"]
+end
 
-  %% ─────────────────────────────────────────────────────────────
-  %% L5: Artifacts, Lineage & CI
-  %% ─────────────────────────────────────────────────────────────
-  subgraph ART["Lineage & Artifacts"]
-    direction TB
-    A1["artifacts/configs/run.yaml\n(Hydra snapshot)"]
-    A2["artifacts/checkpoints/model.ckpt"]
-    A3["artifacts/predictions/{mu.csv, sigma.csv}"]
-    A4["artifacts/reports/diagnostics_dashboard.html"]
-    A5["dist/submission.{csv,zip,json}\n(+ checksums manifest)"]
-    A6["logs/events.jsonl\n(structured run log)"]
-  end
+A -. run on Kaggle .- KG
+DVC -. caching & hashes .- CI4
+CI1 --> A6
+CI2 --> A6
+CI3 --> A5
 
-  %% provenance edges
-  B --> A1
-  P3 --> A2
-  P4 --> A3
-  P5 --> A4
-  P6 --> A5
-  C --> A6
+%% Styling (safe for GitHub)
+classDef dim fill:#eef,stroke:#446,stroke-width:1px,color:#111;
+classDef hot fill:#ffe,stroke:#884,stroke-width:1px,color:#111;
+classDef red fill:#fee,stroke:#a66,stroke-width:1px,color:#111;
 
-  %% ─────────────────────────────────────────────────────────────
-  %% L6: Guardrails & Platform
-  %% ─────────────────────────────────────────────────────────────
-  subgraph KG["Kaggle Constraints"]
-    direction TB
-    KG1["No Internet"]
-    KG2["≤ 9h GPU / 30GB RAM"]
-    KG3["Inputs via /kaggle/input/\n(ariel-data-challenge-2025)"]
-    KG4["requirements-kaggle.txt only"]
-  end
-
-  subgraph CI["CI/CD & DVC"]
-    CI1["Lint/Type (pre-commit)"]
-    CI2["Determinism Checks"]
-    CI3["SBOM & Pinning"]
-    CI4["dvc repro / cache"]
-  end
-
-  A -. run on Kaggle .- KG
-  DVC -. caching & hashes .- CI4
-  CI1 --> A6
-  CI2 --> A6
-  CI3 --> A5
-
-  %% ─────────────────────────────────────────────────────────────
-  %% Visual Notes
-  %% ─────────────────────────────────────────────────────────────
-  classDef dim fill:#eef,stroke:#446,stroke-width:1px;
-  classDef hot fill:#ffe,stroke:#884,stroke-width:1px;
-  classDef red fill:#fee,stroke:#a66,stroke-width:1px;
-
-  class DVC,CFG,ART,CI,KG dim
-  class PHY hot
-  class P6,A5 red
+class DVC,CFG,ART,CI,KG dim
+class PHY hot
+class P6,A5 red
