@@ -12,7 +12,6 @@ flowchart LR
   %% =============================
   subgraph Calib["Calibration Chain · spectramind calibrate"]
     direction LR
-
     C_ADC[ADC (bias/gain convert)] --> C_CDS[CDS (readout differencing)]
 
     %% FGS1 branch
@@ -76,8 +75,8 @@ flowchart LR
   %% =============================
   subgraph Repro["Reproducibility & Telemetry"]
     direction TB
-    H1[Hydra Config Snapshot<br/>/configs → .hydra/]:::meta
-    DVC[DVC Lineage<br/>stages: raw→calib→tensors→models]:::meta
+    H1[Hydra Config Snapshot<br/>configs → .hydra/]:::meta
+    DVC[DVC Lineage<br/>raw→calib→tensors→models]:::meta
     LOG[Event Log (JSONL)<br/>metrics, hashes, timings]:::meta
     ART[Artifacts Registry<br/>plots/, submissions/, sboms/]:::meta
   end
@@ -85,7 +84,7 @@ flowchart LR
   %% =============================
   %% WIRES
   %% =============================
-  %% Raw → Calibration (common ADC/CDS)
+  %% Raw → Calibration
   A --> C_ADC
   B --> C_ADC
 
@@ -104,7 +103,7 @@ flowchart LR
   D1 --> O1
   D1 --> O2
 
-  %% Loss wiring (training only)
+  %% Loss wiring
   D1 -. feeds .-> Lmain
   S1 -. regularize .-> Lmain
   S2 -. regularize .-> Lmain
