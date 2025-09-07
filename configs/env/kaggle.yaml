@@ -1,0 +1,2 @@
+device: gpu
+log_dir: /kaggle/working/logs
