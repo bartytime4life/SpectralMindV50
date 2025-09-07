@@ -1,1 +1,26 @@
-path: ${env.log_dir}/events.jsonl
+# configs/logger/jsonl.yaml
+# ======================================================================
+# JSONL Logger — SpectraMind V50
+# ======================================================================
+# Logs training/validation/test metrics as JSON Lines (.jsonl) for
+# downstream analysis, reproducibility, and audit trails.
+#
+# Usage:
+#   python -m spectramind.train +logger=jsonl
+#
+# Keys:
+#   _target_   : Python path to the logger implementation
+#   log_dir    : base directory for log files
+#   filename   : name of the JSONL file (relative to log_dir)
+#   flush_secs : how often to flush writes to disk (seconds)
+#   overwrite  : whether to overwrite an existing file
+#   pretty     : pretty-print JSON (debug only, larger files)
+# ======================================================================
+
+_target_: spectramind.train.callbacks.JsonlMetricsLogger
+
+log_dir: ${paths.logs}/jsonl     # resolved via Hydra config (paths.logs)
+filename: metrics.jsonl          # per-run JSONL metrics file
+flush_secs: 5                    # flush interval for durability
+overwrite: false                 # append by default for safety
+pretty: false                    # compact JSON for efficiency
