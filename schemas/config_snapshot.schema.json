@@ -1,29 +1,81 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Hydra Snapshot",
+  "title": "Hydra Config Snapshot",
+  "description": "Immutable snapshot of a composed Hydra configuration (data, model, training, etc.) used for reproducible runs.",
   "type": "object",
   "properties": {
     "_target_": {
-      "type": "string"
+      "type": "string",
+      "description": "Optional fully-qualified class/function path if Hydra target is present."
     },
     "defaults": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": ["string", "object"]
+      },
+      "description": "Hydra defaults list capturing config composition order."
     },
     "run": {
-      "type": "object"
+      "type": "object",
+      "description": "Run metadata (timestamp, seed, working dir, job name, etc.).",
+      "properties": {
+        "id": { "type": "string" },
+        "dir": { "type": "string" },
+        "seed": { "type": "integer" },
+        "time": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "dir"]
+    },
+    "env": {
+      "type": "object",
+      "description": "Environment profile (local, kaggle, ci, etc.).",
+      "additionalProperties": true
     },
     "data": {
-      "type": "object"
+      "type": "object",
+      "description": "Dataset config (splits, paths, preprocessing).",
+      "additionalProperties": true
+    },
+    "calib": {
+      "type": "object",
+      "description": "Calibration config (ADC, dark, flat, phase, etc.).",
+      "additionalProperties": true
     },
     "model": {
-      "type": "object"
+      "type": "object",
+      "description": "Model architecture config (encoders, fusion, decoder).",
+      "additionalProperties": true
     },
     "training": {
-      "type": "object"
+      "type": "object",
+      "description": "Training loop config (optimizer, scheduler, early stopping, precision).",
+      "additionalProperties": true
+    },
+    "loss": {
+      "type": "object",
+      "description": "Loss function settings (composite, smoothness, non-negativity, band coherence).",
+      "additionalProperties": true
+    },
+    "logger": {
+      "type": "object",
+      "description": "Logging config (wandb, csv, jsonl).",
+      "additionalProperties": true
+    },
+    "submission": {
+      "type": "object",
+      "description": "Submission packaging config (filenames, Kaggle metadata).",
+      "additionalProperties": true
+    },
+    "overrides": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Command-line overrides applied at runtime."
+    },
+    "hash": {
+      "type": "string",
+      "description": "SHA256 or similar hash of the snapshot for lineage tracking."
     }
   },
-  "required": [
-    "defaults",
-    "run"
-  ]
+  "required": ["defaults", "run", "data", "model", "training"],
+  "additionalProperties": false
 }
