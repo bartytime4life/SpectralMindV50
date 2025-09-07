@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hydra Snapshot",
+  "type": "object",
+  "properties": {
+    "_target_": {
+      "type": "string"
+    },
+    "defaults": {
+      "type": "array"
+    },
+    "run": {
+      "type": "object"
+    },
+    "data": {
+      "type": "object"
+    },
+    "model": {
+      "type": "object"
+    },
+    "training": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "defaults",
+    "run"
+  ]
+}
