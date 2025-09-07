@@ -1,1 +1,104 @@
-site_name: SpectraMind V50 Docs
+# docs/mkdocs.yml — SpectraMind V50 Documentation Site
+site_name: "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge"
+site_description: "Mission-grade, physics-informed, neuro-symbolic pipeline for exoplanet spectroscopy"
+site_author: "SpectraMind V50 Contributors"
+repo_url: "https://github.com/your-org/spectramind-v50"
+repo_name: "spectramind-v50"
+edit_uri: "edit/main/docs/"
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.expand
+    - navigation.instant
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: amber
+    - scheme: slate
+      primary: indigo
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  logo: assets/logos/spectramind-logo.png
+  favicon: assets/logos/spectramind-logo.png
+
+nav:
+  - Home: index.md
+  - Quickstart: guides/quickstart.md
+  - CLI & Config:
+      - Hydra Configs: guides/hydra.md
+      - DVC Pipeline: guides/dvc.md
+      - Kaggle Usage: guides/kaggle.md
+  - Design:
+      - Architecture: ../ARCHITECTURE.md
+      - Repository Blueprint: ../ARCHITECTURE.md
+      - Scientific Method: ../Scientific\ Context.md
+  - Reference:
+      - API: reference/api.md
+      - Config Schema:
+          - Submission: ../schemas/submission.schema.json
+          - Events: ../schemas/events.schema.json
+          - Config Snapshot: ../schemas/config_snapshot.schema.json
+  - Notebooks:
+      - Exploration: ../notebooks/00_exploration.ipynb
+      - Alignment & Binning: ../notebooks/10_alignment_and_binning.ipynb
+      - Model Ablation: ../notebooks/20_model_ablation.ipynb
+      - Error Analysis: ../notebooks/30_error_analysis.ipynb
+      - Submission Check: ../notebooks/99_submission_check.ipynb
+  - Challenge Context:
+      - Scientific Background: ../Scientific\ Context.md
+      - Recent Publications: ../Recent\ Nature\ Publications.md
+  - Meta:
+      - Contributing: ../CONTRIBUTING.md
+      - Code of Conduct: ../CODE_OF_CONDUCT.md
+      - Security Policy: ../SECURITY.md
+      - Changelog: ../CHANGELOG.md
+      - License: ../LICENSE
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            docstring_style: google
+  - mkdocs-jupyter
+  - mermaid2
+  - git-revision-date
+  - awesome-pages
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      linenums_style: pymdownx-inline
+  - pymdownx.inlinehilite
+  - pymdownx.magiclink
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.js
+
+extra_css:
+  - stylesheets/extra.css
