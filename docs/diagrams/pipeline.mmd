@@ -1,15 +1,33 @@
-flowchart TB
-  R[raw/]:::raw -->|dvc stage: calibrate| C[calibrated/]:::cal
-  C -->|dvc stage: preprocess| P[processed/tensors/]:::proc
-  P -->|dvc stage: train| M[artifacts/model.ckpt]:::art
-  P -->|dvc stage: train| L[artifacts/metrics.json]:::art
-  M -->|dvc stage: predict| Y[artifacts/preds/{mu.csv, sigma.csv}]:::art
-  Y -->|dvc stage: diagnose| D[artifacts/reports/diagnostics/]:::diag
-  Y -->|dvc stage: submit| S[submission/submission.csv]:::sub
+flowchart LR
+  %% =============================
+  %% USER / CLI ENTRY
+  %% =============================
+  A["User / CI\n(spectramind CLI)"] --> B["Hydra Configs\n(env, data, calib, model, loss, training)"]
 
-  classDef raw fill:#0b3d91,stroke:#0b3d91,color:#fff;
-  classDef cal fill:#1b6,stroke:#1b6,color:#fff;
-  classDef proc fill:#1aa,stroke:#1aa,color:#fff;
-  classDef art fill:#666,stroke:#666,color:#fff;
-  classDef diag fill:#a60,stroke:#a60,color:#fff;
-  classDef sub fill:#0a6,stroke:#0a6,color:#fff;
+  %% =============================
+  %% PIPELINE STAGES
+  %% =============================
+  B --> C["Calibrate\n(raw → calibrated)"]
+  C --> D["Preprocess\n(calibrated → tensors)"]
+  D --> E["Train\n(tensors → checkpoints)"]
+  E --> F["Predict\n(checkpoints → μ, σ)"]
+  F --> G["Diagnose\n(inject-&-recover, HTML dashboard)"]
+  F --> H["Submit\n(package, schema validate, zip/json)"]
+
+  %% =============================
+  %% ARTIFACTS & STORAGE
+  %% =============================
+  C -. DVC tracked .-> Z["data/interim/calibrated/"]
+  D -. DVC tracked .-> Y["data/processed/tensors/"]
+  E -. checkpoints .-> X["artifacts/checkpoints/model.ckpt"]
+  F -. preds .-> W["artifacts/predictions/{mu.csv,sigma.csv}"]
+  G -. report .-> V["artifacts/reports/diagnostics_dashboard.html"]
+  H -. submission .-> U["dist/submission.{zip,json,csv}"]
+
+  %% =============================
+  %% REMOTE CACHE
+  %% =============================
+  Z -.-> R["DVC Remote (local/S3/SSH)"]
+  Y -.-> R
+  X -.-> R
+  W -.-> R
