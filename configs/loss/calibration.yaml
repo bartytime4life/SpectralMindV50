@@ -3,45 +3,48 @@
 # Calibration Loss — SpectraMind V50
 # ----------------------------------------------------------------------
 # Penalizes miscalibrated uncertainties from the heteroscedastic decoder.
-# Combines three optional components:
+# This loss augments the Gaussian log-likelihood (GLL) by explicitly
+# encouraging well-calibrated variance estimates.
+#
+# Components (set λ=0.0 to disable):
 #   - variance calibration   (σ² vs empirical residuals)
-#   - coverage calibration   (Gaussian CI coverage vs target)
+#   - coverage calibration   (Gaussian CI coverage vs target 1-α)
 #   - ECE-style calibration  (empirical vs nominal quantile coverage)
 #
-# Enable by adding to your Hydra train config:
+# Usage:
 #   python -m spectramind.train +loss=calibration
 #
-# Keys correspond to CalibrationLoss arguments:
-#   _target_: fully qualified class path
-#   var_lambda:   weight for variance calibration penalty
-#   cover_lambda: weight for coverage calibration penalty
-#   ece_lambda:   weight for ECE-style penalty
-#   alpha:        miscoverage rate for coverage calibration (target=1-α)
-#   fgs1_weight:  up-weight factor for bin 0 (FGS1 channel)
-#   eps:          numerical stability epsilon
-#   var_normalization: normalization mode for variance residual
-#   ece_bins:     number of quantile bins for ECE surrogate
+# References:
+#   - NeurIPS 2025 Ariel Data Challenge metric (Gaussian LL):contentReference[oaicite:0]{index=0}
+#   - SpectraMind V50 design (physics-informed symbolic constraints):contentReference[oaicite:1]{index=1}
 # ----------------------------------------------------------------------
 
 _target_: spectramind.losses.calibration.CalibrationLoss
 
-# Main switches (set ≥0.0; 0 disables term)
-var_lambda: 1.0e-3         # encourage σ² ≈ (μ - y)²
-cover_lambda: 0.0          # target coverage of Gaussian CI
-ece_lambda: 0.0            # ECE-style binning of standardized residuals
+# Main weighting terms (≥0.0; set to 0 to disable)
+var_lambda: 1.0e-4         # encourage σ² ≈ (μ - y)² (variance fidelity)
+cover_lambda: 0.0          # coverage of Gaussian CI (target=1-α)
+ece_lambda: 0.0            # ECE-style calibration (binning residuals)
 
 # Coverage calibration settings
-alpha: 0.1                 # 90% nominal CI (1 - alpha)
+alpha: 0.1                 # nominal 90% CI (1 - α)
 
-# FGS1 weighting (bin 0 importance)
-fgs1_weight: 58.0
+# FGS1 weighting (bin 0 dominates challenge metric ~58×)
+use_fgs1_weight: true      # toggle for bin 0 up-weighting
+fgs1_weight: 58.0          # factor to apply if enabled
 
 # Numerical stability
-eps: 1.0e-8
+eps: 1.0e-8                # jitter to avoid divide-by-zero/log(0)
 
-# Normalization mode for variance residuals
-# Options: ["none", "per_bin", "per_batch"]
-var_normalization: "none"
+# Normalization for variance calibration
+# Options:
+#   "none"      — raw squared residuals vs variance
+#   "per_bin"   — normalize by per-bin residual variance
+#   "per_batch" — normalize by batch residual variance
+#   "global"    — normalize by dataset-wide variance (if tracked)
+var_normalization: "per_batch"
 
-# Quantile bins for ECE penalty
-ece_bins: 10
+# Quantile binning for ECE surrogate (higher = finer resolution, but noisier)
+ece_bins: 20
+ece_min_bins: 5            # safety lower bound
+ece_max_bins: 50           # safety upper bound
