@@ -7,57 +7,60 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## \[Unreleased]
 
-### Added
+### 🚀 Added
 
-* Initial **SECURITY.md**, **CODE\_OF\_CONDUCT.md**, **CONTRIBUTING.md**, and **LICENSE**.
+* **Governance docs**: `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `LICENSE`.
 * Baseline **`VERSION` file** (0.1.x series).
-* `dvc.yaml` upgraded with reproducible calibrate → train → predict pipeline.
-* `setup.cfg` with pytest, flake8, mypy, and Ruff lint rules.
+* Extended `dvc.yaml` with reproducible `calibrate → train → predict → diagnose → submit` pipeline.
+* `setup.cfg` with pytest, flake8, mypy, Ruff rules.
 * `pyproject.toml` with runtime + dev extras (`gpu`, `dev`).
-* `requirements-kaggle.txt` and `requirements-dev.txt` with pinned versions.
+* `requirements-kaggle.txt` (Kaggle-safe, pinned) and `requirements-dev.txt`.
+* CI: added **artifact sweeper**, **docs build**, and **branch-protection auto-merge** workflows.
 
-### Changed
+### 🔄 Changed
 
-* Promoted repo from scaffold → production-grade (per ADR-0001).
-* Moved Torch stack into **extras** (`gpu`) for Kaggle safety.
-* CI now enforces CodeQL, pip-audit, SBOM scans.
+* Repo promoted from **scaffold → production-grade** (per ADR-0001).
+* Torch stack moved into extras (`gpu`) for Kaggle compliance.
+* CI enforces **CodeQL**, **pip-audit**, **Trivy**, and **SBOM generation** (CycloneDX + SPDX).
+* CLI (`spectramind`) refactored to **Typer unified interface** with subcommands: `calibrate`, `train`, `predict`, `diagnose`, `submit`.
 
-### Deprecated
-
-* None.
-
-### Removed
+### ⚠️ Deprecated
 
 * None.
 
-### Fixed
+### ❌ Removed
 
-* Stable config composition in Hydra (`configs/train.yaml`).
-* DVC pipeline now persists processed data (`data/processed`).
+* None.
+
+### 🛠️ Fixed
+
+* Stable Hydra config composition (`configs/train.yaml`).
+* DVC pipeline now persists processed artifacts in `data/processed/`.
+* Kaggle notebooks auto-sync with repo; no duplicated pipeline logic.
 
 ---
 
 ## \[0.1.1] — 2025-09-06
 
-### Added
+### 🚀 Added
 
-* Introduced `VERSION` file bump script (`scripts/bump_version.sh`).
+* Introduced `scripts/bump_version.sh` for automated semantic versioning.
 
-### Changed
+### 🔄 Changed
 
-* Upgraded dependencies (pytest ≥8.1, ruff ≥0.6.8, mypy ≥1.11).
-* Enhanced docs: reproducibility and Kaggle constraints clarified.
+* Dependency upgrades: `pytest ≥8.1`, `ruff ≥0.6.8`, `mypy ≥1.11`.
+* Docs enhanced: reproducibility, Kaggle runtime constraints, and ADR workflow clarified.
 
 ---
 
 ## \[0.1.0] — 2025-09-05
 
-### Added
+### 🚀 Added
 
 * 🎉 Initial public release of **SpectraMind V50** scaffold.
-* CLI (`spectramind`) with `calibrate`, `train`, `predict` subcommands.
-* DVC integration for raw → processed data flow.
+* CLI (`spectramind`) with `calibrate`, `train`, `predict` commands.
+* DVC integration for raw → processed data lineage.
 * Initial configs (`configs/train.yaml`, `configs/env/`).
-* ADR system bootstrapped (`ADR/`).
+* ADR system bootstrapped (`ADR/0001-choose-hydra-dvc.md`).
 
 ---
