@@ -4,77 +4,120 @@
 # Reproducible pipeline:
 #   calibrate → train → predict → (diagnose) → (submit)
 #
-# Notes
-# - We track configs/ and src/ where it matters so code/config changes trigger
-#   recompute automatically.
-# - Processed data is marked 'persist' so DVC doesn't auto-remove it between runs.
-# - Metrics/plots are declared for CI dashboards and quick regressions checks.
-# - Torch stack is handled outside of DVC (e.g., bin/kaggle-boot.sh on Kaggle).
+# Tips
+# - Use params.yaml to expose Hydra selectors (env/data/calib/model/training/loss/logger)
+#   so `dvc exp show`/`dvc exp diff` can track config changes cleanly.
+# - Processed data is 'persist' so downstream stages can reuse it across runs.
+# - Training stage is dvclive-ready (uncomment if you log with dvclive).
+# - Torch stack is handled outside DVC (e.g., bin/kaggle-boot.sh).
 # ==============================================================================
 
 stages:
   calibrate:
-    # If you have a dedicated calibrate config, prefer: --config-name calibrate
-    cmd: spectramind calibrate --config-name train
+    wdir: .
+    cmd: >
+      spectramind calibrate
+      --config-name ${params.hydra.config_name_calibrate}
+      env=${params.hydra.env}
+      data=${params.hydra.data}
+      calib=${params.hydra.calib}
     deps:
-      - configs/              # hydra configs (data/calib/env)
-      - src/                  # calibration/preprocess code paths
-      - data/raw              # raw telescope inputs (DVC-tracked)
+      - configs/              # hydra configs (data/calib/env/...)
+      - src/                  # calibration code
+      - data/raw              # raw telescope inputs (DVC tracked)
+    params:
+      - hydra.config_name_calibrate
+      - hydra.env
+      - hydra.data
+      - hydra.calib
     outs:
       - path: data/processed  # calibrated + preprocessed tensors
-        persist: true         # reused by downstream stages; keep between runs
-    # Optional: record a config snapshot for traceability
-    # outs:
-    #   - path: artifacts/config_snapshot.json
-    #     cache: true
+        persist: true
 
   train:
-    cmd: spectramind train --config-name train
+    wdir: .
+    cmd: >
+      spectramind train
+      --config-name ${params.hydra.config_name_train}
+      env=${params.hydra.env}
+      data=${params.hydra.data}
+      model=${params.hydra.model}
+      training=${params.hydra.training}
+      loss=${params.hydra.loss}
+      logger=${params.hydra.logger}
     deps:
       - data/processed
       - configs/
       - src/
+    params:
+      - hydra.config_name_train
+      - hydra.env
+      - hydra.data
+      - hydra.model
+      - hydra.training
+      - hydra.loss
+      - hydra.logger
     outs:
       - path: artifacts/ckpt.pt
         cache: true
       - path: artifacts/metrics.json
         cache: true
+      - path: logs/train/        # optional structured logs
+        cache: false
     metrics:
       - artifacts/metrics.json:
           cache: false
           type: json
           xpath: .
-    # Optional logs/manifests for audit trails
-    # outs:
-    #   - path: logs/train/events.jsonl
-    #     cache: false
+    # Uncomment if you use dvclive (recommended for live learning curves)
+    # live:
+    #   path: dvclive
+    #   summary: true
+    #   html: true
 
   predict:
-    cmd: spectramind predict --config-name predict
+    wdir: .
+    cmd: >
+      spectramind predict
+      --config-name ${params.hydra.config_name_predict}
+      env=${params.hydra.env}
+      data=${params.hydra.data}
     deps:
       - artifacts/ckpt.pt
+      - data/processed
       - configs/
       - src/
-      - data/processed
+    params:
+      - hydra.config_name_predict
+      - hydra.env
+      - hydra.data
     outs:
       - path: outputs/preds.csv
         cache: true
 
-  # ----------------------- Optional downstream stages ------------------------
   diagnose:
-    cmd: spectramind diagnose --config-name diagnose
+    wdir: .
+    cmd: >
+      spectramind diagnose
+      --config-name ${params.hydra.config_name_diagnose}
+      env=${params.hydra.env}
+      data=${params.hydra.data}
     deps:
       - artifacts/ckpt.pt
       - outputs/preds.csv
       - configs/
       - src/
+    params:
+      - hydra.config_name_diagnose
+      - hydra.env
+      - hydra.data
     outs:
       - path: artifacts/diagnostics/report.html
         cache: true
       - path: artifacts/diagnostics/plots/
         cache: true
     plots:
-      - artifacts/diagnostics/plots/  # PNG/SVG/JSON figures for quick inspection
+      - artifacts/diagnostics/plots/    # png/svg/json — quick visual checks
     metrics:
       - artifacts/diagnostics/summary.json:
           cache: false
@@ -82,11 +125,16 @@ stages:
           xpath: .
 
   submit:
-    cmd: spectramind submit --config-name submit
+    wdir: .
+    cmd: >
+      spectramind submit
+      --config-name ${params.hydra.config_name_submit}
     deps:
       - outputs/preds.csv
       - configs/
       - src/
+    params:
+      - hydra.config_name_submit
     outs:
       - path: outputs/submission.csv
         cache: true
