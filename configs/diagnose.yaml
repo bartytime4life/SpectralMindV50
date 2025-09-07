@@ -1,2 +1,145 @@
+# configs/diagnose.yaml
+# ======================================================================
+# SpectraMind V50 — Diagnostics & Reporting Config
+# ======================================================================
+# Runs post-training analyses (metrics + signal/feature diagnostics) and
+# emits an HTML report with figures and JSONL metrics. Designed to be
+# CI/Kaggle-safe (no internet), fully reproducible, and configurable.
+# ======================================================================
+
 defaults:
-  - env: local
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+# ----------------------------------------------------------------------
+# Inputs
+# ----------------------------------------------------------------------
+inputs:
+  # Model checkpoint to evaluate; if null, use latest under artifacts/models/
+  model_ckpt: ${oc.env:SM_MODEL_CKPT, artifacts/models/latest.ckpt}
+
+  # Evaluation split; you can point to a prepared file or a named split
+  # consumed by the datamodule.
+  eval_split: ${oc.env:SM_EVAL_SPLIT, "val"}     # one of: val|test|custom
+  eval_file:  ${oc.env:SM_EVAL_FILE, null}       # optional explicit path
+
+  # Optional precomputed predictions; if provided, metric/diagnostics will
+  # operate on this CSV instead of running inference.
+  predictions: ${oc.env:SM_PREDICTIONS, null}
+
+  # Random seed for any stochastic subsampling (e.g., SHAP/UMAP sampling)
+  seed: ${oc.env:SM_SEED, 1337}
+
+# ----------------------------------------------------------------------
+# Metrics (leaderboard-aligned + internal)
+# ----------------------------------------------------------------------
+metrics:
+  # Gaussian log-likelihood (primary competition metric)
+  gll:
+    enabled: true
+    # Relative weighting for the FGS1 (broadband) channel in the loss/score.
+    # (Kept configurable; do NOT hardcode the competition’s internal weight.)
+    weight_fgs1: ${oc.env:SM_GLL_W_FGS1, 58.0}
+    clamp_sigma_min: 1e-6       # numeric safety for σ
+    clamp_sigma_max: 1e2
+
+  # Additional sanity metrics
+  mae: true
+  rmse: true
+
+# ----------------------------------------------------------------------
+# Analyses
+# ----------------------------------------------------------------------
+analyses:
+  # Frequency-domain checks on lightcurves/spectral residuals
+  fft:
+    enabled: true
+    detrend: "poly"       # none|mean|poly
+    poly_order: 2
+    window: "hann"
+    n_fft: 2048
+    save_power_spectra: true
+
+  # Low-dim embedding of latent/features/residuals for cluster/OOD inspection
+  umap:
+    enabled: true
+    n_neighbors: 15
+    min_dist: 0.10
+    metric: "euclidean"
+    sample_size: 5000        # cap for speed
+    random_state: ${inputs.seed}
+
+  # Model explainability on μ predictions (optionally on σ)
+  shap:
+    enabled: true
+    method: "kernel"         # kernel|sampling|gradient (choose per model)
+    background_size: 256
+    sample_size: 512
+    max_eval: 5000           # compute budget cap
+    explain_sigma: false
+
+  # Physics/symbolic plausibility checks on spectra
+  symbolic_checks:
+    enabled: true
+    smoothness:
+      enabled: true
+      max_curvature: 0.02    # threshold on |2nd derivative|
+    nonneg:
+      enabled: true
+      tol: -1e-6             # allow tiny numerical noise below zero
+    band_coherence:
+      enabled: true
+      window_bins: 5
+      max_zscore: 5.0
+
+# ----------------------------------------------------------------------
+# Reporting & Artifacts
+# ----------------------------------------------------------------------
+report:
+  out_dir: ${oc.env:SM_DIAG_OUT, artifacts/reports/diagnostics}
+  html:
+    enabled: true
+    filename: index.html
+  save_plots: true
+  fig:
+    dpi: 160
+    style: "default"         # matplotlib style (CI/Kaggle-safe)
+    format: "png"            # png for wide compatibility
+  jsonl_metrics:
+    enabled: true
+    path: ${report.out_dir}/metrics.jsonl
+  tables_csv:
+    enabled: true
+    dir: ${report.out_dir}/tables
+
+# ----------------------------------------------------------------------
+# Provenance & Schema Validation
+# ----------------------------------------------------------------------
+provenance:
+  # Manifest capturing config snapshot, hashes, and environment
+  manifest: ${oc.env:SM_DIAG_MANIFEST, artifacts/manifest_diagnostics.json}
+  include_git: true
+  include_env: true
+
+validate:
+  # Optional schema to validate structured events/metrics
+  events_schema: schemas/events.schema.json
+  strict: true
+  quiet: false
+
+# ----------------------------------------------------------------------
+# Runtime toggles
+# ----------------------------------------------------------------------
+runtime:
+  offline: true     # enforce no-internet behavior (Kaggle/CI safe)
+  num_workers: 2    # CPU workers for I/O-bound ops
+
+# ----------------------------------------------------------------------
+# Hydra runtime
+# ----------------------------------------------------------------------
+hydra:
+  run:
+    dir: outputs/diagnose/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/diagnose/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
