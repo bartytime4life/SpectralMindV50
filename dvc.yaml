@@ -1,13 +1,92 @@
+# ==============================================================================
+# dvc.yaml — SpectraMind V50
+# ------------------------------------------------------------------------------
+# Reproducible pipeline:
+#   calibrate → train → predict → (diagnose) → (submit)
+#
+# Notes
+# - We track configs/ and src/ where it matters so code/config changes trigger
+#   recompute automatically.
+# - Processed data is marked 'persist' so DVC doesn't auto-remove it between runs.
+# - Metrics/plots are declared for CI dashboards and quick regressions checks.
+# - Torch stack is handled outside of DVC (e.g., bin/kaggle-boot.sh on Kaggle).
+# ==============================================================================
+
 stages:
   calibrate:
+    # If you have a dedicated calibrate config, prefer: --config-name calibrate
     cmd: spectramind calibrate --config-name train
-    deps: [configs/, src/]
-    outs: [data/processed]
+    deps:
+      - configs/              # hydra configs (data/calib/env)
+      - src/                  # calibration/preprocess code paths
+      - data/raw              # raw telescope inputs (DVC-tracked)
+    outs:
+      - path: data/processed  # calibrated + preprocessed tensors
+        persist: true         # reused by downstream stages; keep between runs
+    # Optional: record a config snapshot for traceability
+    # outs:
+    #   - path: artifacts/config_snapshot.json
+    #     cache: true
+
   train:
     cmd: spectramind train --config-name train
-    deps: [data/processed]
-    outs: [artifacts/ckpt.pt]
+    deps:
+      - data/processed
+      - configs/
+      - src/
+    outs:
+      - path: artifacts/ckpt.pt
+        cache: true
+      - path: artifacts/metrics.json
+        cache: true
+    metrics:
+      - artifacts/metrics.json:
+          cache: false
+          type: json
+          xpath: .
+    # Optional logs/manifests for audit trails
+    # outs:
+    #   - path: logs/train/events.jsonl
+    #     cache: false
+
   predict:
     cmd: spectramind predict --config-name predict
-    deps: [artifacts/ckpt.pt]
-    outs: [outputs/preds.csv]
+    deps:
+      - artifacts/ckpt.pt
+      - configs/
+      - src/
+      - data/processed
+    outs:
+      - path: outputs/preds.csv
+        cache: true
+
+  # ----------------------- Optional downstream stages ------------------------
+  diagnose:
+    cmd: spectramind diagnose --config-name diagnose
+    deps:
+      - artifacts/ckpt.pt
+      - outputs/preds.csv
+      - configs/
+      - src/
+    outs:
+      - path: artifacts/diagnostics/report.html
+        cache: true
+      - path: artifacts/diagnostics/plots/
+        cache: true
+    plots:
+      - artifacts/diagnostics/plots/  # PNG/SVG/JSON figures for quick inspection
+    metrics:
+      - artifacts/diagnostics/summary.json:
+          cache: false
+          type: json
+          xpath: .
+
+  submit:
+    cmd: spectramind submit --config-name submit
+    deps:
+      - outputs/preds.csv
+      - configs/
+      - src/
+    outs:
+      - path: outputs/submission.csv
+        cache: true
