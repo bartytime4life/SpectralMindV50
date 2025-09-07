@@ -1,139 +1,134 @@
-%%{init: {'flowchart': {'htmlLabels': false}}}%%
-flowchart LR
-  %% =============================
-  %% RAW INPUTS
-  %% =============================
-  subgraph Raw [Raw Inputs]
-    A[FGS1 Time Series]:::raw
-    B[AIRS Spectra]:::raw
-  end
+%% docs/diagrams/architecture.mmd
+%% SpectraMind V50 — Architecture Overview (Mermaid)
+%% Renders on GitHub and MkDocs (with mermaid plugin)
 
-  %% =============================
-  %% CALIBRATION CHAIN (branched)
-  %% =============================
-  subgraph Calib [Calibration Chain - spectramind calibrate]
+flowchart TD
+
+  %% ─────────────────────────────────────────────────────────────
+  %% L1: Orchestration & Config
+  %% ─────────────────────────────────────────────────────────────
+  A["User / CI\n(typer CLI: spectramind)"] -->|invokes| B["Hydra Compose\n(configs/*)"]
+  B --> C["Run Context\n(seed, device, env)"]
+
+  subgraph CFG[Hydra Config Tree]
     direction LR
-    C_ADC[ADC bias and gain convert] --> C_CDS[CDS readout differencing]
-
-    %% FGS1 branch
-    C_CDS --> C_DARK_F[Dark FGS1]
-    C_DARK_F --> C_PHOT[Photometry and Detrend]
-    C_PHOT --> C_PHASE_F[Phase and Align FGS1]
-
-    %% AIRS branch
-    C_CDS --> C_DARK_A[Dark AIRS]
-    C_DARK_A --> C_FLAT[Flat Field AIRS]
-    C_FLAT --> C_TRACE[Trace and Wavelength Solution]
-    C_TRACE --> C_PHASE_A[Phase and Align AIRS]
+    CFG1["env/ (local,kaggle,hpc,ci)"]
+    CFG2["data/ (nominal,kaggle,debug)"]
+    CFG3["calib/ (adc,dark,flat,cds,photometry,trace,phase)"]
+    CFG4["model/ (fgs1,airs,fusion,decoder)"]
+    CFG5["training/ (optim, sched, precision, es)"]
+    CFG6["loss/ (smooth, nonneg, band, calibration)"]
+    CFG7["logger/ (jsonl,csv,wandb)"]
   end
 
-  %% =============================
-  %% MODEL-READY TENSORS
-  %% =============================
-  subgraph Tensors [Model Ready Tensors DVC tracked]
-    T1[(FGS1 tensors)]
-    T2[(AIRS tensors)]
-  end
+  B -. defaults+overrides .-> CFG
 
-  %% =============================
-  %% ENCODERS
-  %% =============================
-  subgraph Encoders [Dual Encoders]
-    E1[FGS1 Encoder SSM or Mamba transit aware]:::enc
-    E2[AIRS Encoder CNN or GNN spectral]:::enc
-  end
-
-  %% =============================
-  %% FUSION + DECODER
-  %% =============================
-  subgraph Fusion [Fusion and Decoder - spectramind train or predict]
-    F1[Cross modal Fusion]:::fusion
-    D1[Heteroscedastic Decoder per bin mu and sigma 283]:::dec
-  end
-
-  %% =============================
-  %% OUTPUTS
-  %% =============================
-  subgraph Outputs [Outputs]
-    O1[(mu_0..mu_282)]
-    O2[(sigma_0..sigma_282)]
-  end
-
-  %% =============================
-  %% CONSTRAINTS / LOSSES
-  %% =============================
-  subgraph Constraints [Symbolic and Physics Priors and Losses]
+  %% ─────────────────────────────────────────────────────────────
+  %% L2: DVC Pipeline Stages
+  %% ─────────────────────────────────────────────────────────────
+  subgraph DVC[Reproducible Pipeline (DVC)]
     direction TB
-    S1[Non negativity]
-    S2[Smoothness]
-    S3[Band Coherence]
-    S4[Instrument and Pipeline priors]
-    Lmain[Supervised Loss for example NLL]:::loss
+    P1["calibrate\nADC→dark→flat→CDS→photometry→trace→phase"] --> P2["tensors\n(feature-ready, physics-aligned)"]
+    P2 --> P3["train\n(dual-encoder + heteroscedastic decoder)"]
+    P3 --> P4["predict\n(μ, σ per bin; 283 bins)"]
+    P4 --> P5["diagnose\n(FFT, UMAP/t-SNE, SHAP, rules)"]
+    P4 --> P6["submit\n(schema-checked CSV/ZIP + manifest)"]
   end
 
-  %% =============================
-  %% REPRO & TELEMETRY
-  %% =============================
-  subgraph Repro [Reproducibility and Telemetry]
+  C --> P1
+
+  %% ─────────────────────────────────────────────────────────────
+  %% L3: Model Blocks
+  %% ─────────────────────────────────────────────────────────────
+  subgraph M["Model Architecture"]
+    direction LR
+
+    subgraph E1["FGS1 Encoder"]
+      E1a["Denoise / Bin / Downsample"]
+      E1b["Temporal Model (SSM/Mamba)"]
+    end
+
+    subgraph E2["AIRS Encoder"]
+      E2a["Spectral CNN/GNN\n(wavelength-structured)"]
+    end
+
+    FUS["Fusion\n(concat / cross-attn)"]
+    DEC["Decoder\n(heteroscedastic head → μ, σ)"]
+  end
+
+  %% tensors → encoders → fusion → decoder
+  P2 --> E1
+  P2 --> E2
+  E1 --> FUS
+  E2 --> FUS
+  FUS --> DEC
+  DEC --> P4
+
+  %% ─────────────────────────────────────────────────────────────
+  %% L4: Constraints & Calibration
+  %% ─────────────────────────────────────────────────────────────
+  subgraph PHY["Physics-Aware Constraints"]
+    L1c["Smoothness Prior"]
+    L2c["Non-negativity of μ"]
+    L3c["Band Coherence / Priors"]
+    L4c["σ Calibration (Temp Scaling)"]
+  end
+
+  PHY -. loss terms / checks .- DEC
+  PHY -. validation .- P5
+
+  %% ─────────────────────────────────────────────────────────────
+  %% L5: Artifacts, Lineage & CI
+  %% ─────────────────────────────────────────────────────────────
+  subgraph ART["Lineage & Artifacts"]
     direction TB
-    H1[Hydra Config Snapshot saved to hydra]:::meta
-    DVC[DVC Lineage raw to calib to tensors to models]:::meta
-    LOG[Event Log JSONL metrics hashes timings]:::meta
-    ART[Artifacts Registry plots submissions sboms]:::meta
+    A1["artifacts/configs/run.yaml\n(Hydra snapshot)"]
+    A2["artifacts/checkpoints/model.ckpt"]
+    A3["artifacts/predictions/{mu.csv, sigma.csv}"]
+    A4["artifacts/reports/diagnostics_dashboard.html"]
+    A5["dist/submission.{csv,zip,json}\n(+ checksums manifest)"]
+    A6["logs/events.jsonl\n(structured run log)"]
   end
 
-  %% =============================
-  %% WIRES
-  %% =============================
-  %% Raw -> Calibration
-  A --> C_ADC
-  B --> C_ADC
+  %% provenance edges
+  B --> A1
+  P3 --> A2
+  P4 --> A3
+  P5 --> A4
+  P6 --> A5
+  C --> A6
 
-  %% Calibration -> Tensors
-  C_PHASE_F --> T1
-  C_PHASE_A --> T2
+  %% ─────────────────────────────────────────────────────────────
+  %% L6: Guardrails & Platform
+  %% ─────────────────────────────────────────────────────────────
+  subgraph KG["Kaggle Constraints"]
+    direction TB
+    KG1["No Internet"]
+    KG2["≤ 9h GPU / 30GB RAM"]
+    KG3["Inputs via /kaggle/input/\n(ariel-data-challenge-2025)"]
+    KG4["requirements-kaggle.txt only"]
+  end
 
-  %% Tensors -> Encoders
-  T1 --> E1
-  T2 --> E2
+  subgraph CI["CI/CD & DVC"]
+    CI1["Lint/Type (pre-commit)"]
+    CI2["Determinism Checks"]
+    CI3["SBOM & Pinning"]
+    CI4["dvc repro / cache"]
+  end
 
-  %% Encoders -> Fusion -> Decoder -> Outputs
-  E1 --> F1
-  E2 --> F1
-  F1 --> D1
-  D1 --> O1
-  D1 --> O2
+  A -. run on Kaggle .- KG
+  DVC -. caching & hashes .- CI4
+  CI1 --> A6
+  CI2 --> A6
+  CI3 --> A5
 
-  %% Loss wiring
-  D1 -. feeds .-> Lmain
-  S1 -. regularize .-> Lmain
-  S2 -. regularize .-> Lmain
-  S3 -. regularize .-> Lmain
-  S4 -. regularize .-> Lmain
+  %% ─────────────────────────────────────────────────────────────
+  %% Visual Notes
+  %% ─────────────────────────────────────────────────────────────
+  classDef dim fill:#eef,stroke:#446,stroke-width:1px;
+  classDef hot fill:#ffe,stroke:#884,stroke-width:1px;
+  classDef red fill:#fee,stroke:#a66,stroke-width:1px;
 
-  %% Repro wiring
-  %% link to concrete nodes, not subgraphs
-  A -. tracked .-> DVC
-  B -. tracked .-> DVC
-  T1 -. tracked .-> DVC
-  T2 -. tracked .-> DVC
-  D1 -. tracked .-> DVC
-
-  %% take snapshot when stages run
-  C_ADC -. snapshot .-> H1
-  E1 -. snapshot .-> H1
-  E2 -. snapshot .-> H1
-  F1 -. snapshot .-> H1
-
-  Lmain -. metrics .-> LOG
-  D1 -. artifacts .-> ART
-
-  %% =============================
-  %% STYLES
-  %% =============================
-  classDef raw fill:#0b3d91,stroke:#0b3d91,color:#fff;
-  classDef enc fill:#0a6,stroke:#0a6,color:#fff;
-  classDef fusion fill:#a60,stroke:#a60,color:#fff;
-  classDef dec fill:#444,stroke:#444,color:#fff;
-  classDef meta fill:#555,stroke:#555,color:#fff;
-  classDef loss fill:#7b1fa2,stroke:#7b1fa2,color:#fff;
+  class DVC,CFG,ART,CI,KG dim
+  class PHY hot
+  class P6,A5 red
