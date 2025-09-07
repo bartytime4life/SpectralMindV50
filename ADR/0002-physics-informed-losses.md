@@ -49,7 +49,7 @@ All λ hyperparameters are tunable in `configs/loss/composite.yaml`.
 
 
 ```mermaid
-flowchart LR
+flowchart TD
   A["GLL baseline (competition metric)"] --> L["Composite Loss"]
   B["Smoothness prior"] --> L
   C["Non-negativity prior"] --> L
