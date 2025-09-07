@@ -48,15 +48,14 @@ All λ hyperparameters are tunable in `configs/loss/composite.yaml`.
 ## 3. Architecture
 
 ```mermaid
+
 flowchart TD
   A["GLL baseline (competition metric)"] --> L["Composite Loss"]
   B["Smoothness prior"] --> L
   C["Non-negativity prior"] --> L
   D["Band coherence prior"] --> L
-  E["Calibration prior (FGS1<->AIRS)"] --> L
-  L --> F["Backpropagation -> Model update"]
-
-
+  E["Calibration prior (FGS1↔AIRS)"] --> L
+  L --> F["Backpropagation → Model update"]
 
 * Each loss lives in `src/spectramind/losses/*.py`.
 * Configured via Hydra (`configs/loss/*.yaml`).
