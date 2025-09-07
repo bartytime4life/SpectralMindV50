@@ -1,6 +1,25 @@
 # src/spectramind/pipeline/diagnostics.py
 from __future__ import annotations
 
+"""
+SpectraMind V50 — Diagnostics Runner (Hydra + Reporting Orchestrator)
+=====================================================================
+
+Key capabilities
+----------------
+• Hydra config composition with robust defaults
+• Kaggle/CI guardrails (workers, determinism, low-mem)
+• DVC-/CI-friendly report root planning
+• Config snapshot + artifact manifest + SHA256 digests
+• Optional JSONL event logging (start/end) and run manifest
+
+Notes
+-----
+• CLI stays thin; this module holds orchestration/business logic.
+• The actual diagnostics/report generation is delegated to
+  `spectramind.diagnostics.report.generate(cfg)`.
+"""
+
 import hashlib
 import json
 import os
@@ -10,8 +29,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from hydra import compose, initialize
+from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
+
+# Optional SpectraMind logging backplane (manifest + JSONL events)
+try:
+    from spectramind.logging.manifest import generate_manifest, save_manifest  # type: ignore
+    from spectramind.logging.event_logger import EventLogger  # type: ignore
+
+    _HAS_SM_LOGGING = True
+except Exception:  # pragma: no cover
+    _HAS_SM_LOGGING = False
 
 __all__ = ["run"]
 
@@ -83,12 +111,34 @@ def run(
     report_root = _prepare_report_root(repo_root, cfg)
     _emit_config_snapshot(report_root, cfg)
 
+    # Optional JSONL event logger (tie to report dir name)
+    evt_logger: Optional[EventLogger] = None
+    run_id = Path(cfg.diagnostics.report_dir).name
+    if _HAS_SM_LOGGING:
+        evt_logger = EventLogger.for_run(stage="diagnostics", run_id=run_id)
+        evt_logger.info(
+            "diagnostics/start",
+            data={
+                "config_name": payload.config_name,
+                "overrides": payload.overrides,
+                "report_dir": str(report_root),
+                "modules": list(cfg.diagnostics.modules),
+                "env": payload.env,
+                "num_workers": int(cfg.diagnostics.num_workers),
+                "deterministic": bool(cfg.runtime.deterministic),
+                "low_mem_mode": bool(cfg.runtime.low_mem_mode),
+            },
+        )
+
     # Defer heavy imports and provide clear errors
     try:
         # Expect orchestrator:
         #   spectramind.diagnostics.report.generate(cfg=cfg) -> Optional[path | dict]
         from spectramind.diagnostics.report import generate as generate_report  # type: ignore[attr-defined]
     except Exception as e:  # pragma: no cover
+        if evt_logger is not None:
+            evt_logger.error("diagnostics/error", message="import_failure", data={"cause": f"{type(e).__name__}: {e}"})
+            evt_logger.close()
         raise RuntimeError(
             "Diagnostics entrypoint not found. Implement "
             "`spectramind.diagnostics.report.generate(cfg)` or adjust this import. "
@@ -109,12 +159,33 @@ def run(
     if not outputs.get("html_reports"):
         msg = f"[diagnostics] no HTML reports found in {report_root}"
         if payload.strict:
+            if evt_logger is not None:
+                evt_logger.error("diagnostics/error", message="no_html_reports", data={"report_dir": str(report_root)})
+                evt_logger.close()
             raise RuntimeError(msg)
         if not payload.quiet:
             sys.stderr.write(msg + " (continuing)\n")
 
     # ---- Persist a manifest for CI/DVC provenance ----
     _write_diagnostics_manifest(report_root, cfg, outputs)
+
+    # ---- Optional richer run manifest ----
+    if _HAS_SM_LOGGING:
+        manifest = generate_manifest(
+            stage="diagnostics",
+            config_snapshot=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
+            extra={
+                "report_dir": str(report_root),
+                "modules": list(cfg.diagnostics.modules),
+                "outputs": outputs,
+                "env": payload.env,
+            },
+        )
+        save_manifest(manifest, report_root / "manifest.json")
+
+    if evt_logger is not None:
+        evt_logger.info("diagnostics/end", data={"outputs": outputs})
+        evt_logger.close()
 
 
 # ======================================================================================
@@ -131,7 +202,8 @@ def _compose_hydra_config(repo_root: Path, payload: DiagPayload) -> DictConfig:
             "(expected at repo root per repo blueprint)"
         )
 
-    with initialize(config_path=str(config_dir), version_base=None):
+    # Use absolute-dir initializer (stable across CWDs and notebooks)
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         try:
             cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
         except Exception:
@@ -277,7 +349,7 @@ def _discover_outputs(report_root: Path, orchestrator_ret: Any) -> Dict[str, Lis
                 if p.is_file() and p.suffix.lower() in {".html", ".htm"}:
                     outputs["html_reports"].append(str(p))
             elif isinstance(orchestrator_ret, dict):
-                for k, v in orchestrator_ret.items():
+                for _, v in orchestrator_ret.items():
                     try:
                         p = Path(str(v)).resolve()
                         if p.is_file() and p.suffix.lower() in {".html", ".htm"}:
@@ -285,7 +357,6 @@ def _discover_outputs(report_root: Path, orchestrator_ret: Any) -> Dict[str, Lis
                         elif p.is_file() and p.suffix.lower() == ".json":
                             outputs["summaries"].append(str(p))
                         elif p.is_dir():
-                            # treat dirs as plot roots
                             outputs["plots"].append(str(p))
                     except Exception:
                         continue
@@ -372,8 +443,8 @@ def _find_repo_root() -> Path:
             if p.name == "src":
                 return p.parent
             return p
-    # Fallback: best-effort three levels up (keeps notebooks/colab from exploding)
-    return here.parents[3]
+    # Fallback: best-effort two levels up (keeps notebooks/colab from exploding)
+    return here.parents[2]
 
 
 def _as_path(p: str | os.PathLike[str]) -> Path:
