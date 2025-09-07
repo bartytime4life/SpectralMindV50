@@ -20,7 +20,7 @@ We require a **configuration framework** and a **data/experiment lineage framewo
 
 - Interoperate cleanly with CLI workflows.  
 - Scale from laptops → GPU clusters → Kaggle (no internet, 9h runtime).  
-- Enforce determinism and auditability without adding heavy infra.  
+- Enforce determinism and auditability without heavy infra.  
 
 ---
 
@@ -28,107 +28,85 @@ We require a **configuration framework** and a **data/experiment lineage framewo
 
 Adopt **Hydra** for hierarchical configuration and **DVC** for data & pipeline lineage.
 
-### Hydra (Structured Configs + Config Groups)
+### Hydra
 
-- Single source of truth for environment, data, calibration, model, training, loss, logger, runners.  
-- Safe composition via `defaults` and overrides (`+env=local`, `+data=kaggle`, `+calib=nominal`, `+model=v50`).  
-- Repro snapshots: frozen OmegaConf dump + content hash per run.  
+- Unified configs for env/data/calib/model/training/loss/logger.  
+- Safe composition via `defaults` and CLI overrides (`+env=local`, `+data=kaggle`, `+model=v50`).  
+- Frozen OmegaConf dumps + hashes per run → reproducible snapshots.  
 
-### DVC (with Git as control plane)
+### DVC
 
-- Tracks raw → calibrated → tensorized data artifacts and model checkpoints.  
-- Encodes pipeline stages (`dvc.yaml`) for **calibrate → train → predict → submit** with explicit deps/outs.  
-- Supports remotes (local/SSH/S3/GDrive) for heavy artifacts, keeping Git lean.  
+- Encodes calibration → training → prediction → submission as `dvc.yaml` stages.  
+- Tracks artifacts (raw → calibrated → tensors → ckpts → preds).  
+- Remote storage (local/S3/SSH) keeps Git lean.  
 
-**Division of labor:** Hydra owns **experiment shape & parameters**; DVC owns **artifacts & pipeline DAG**.  
+**Division of labor:** Hydra owns **experiment shape & parameters**; DVC owns **artifacts & DAG**.  
 CLI (`spectramind calibrate/train/predict/submit`) binds them.  
 
 ---
 
-## 3. Decision Drivers
+## 3. Drivers
 
-- **Reproducibility** — exact reconstruction of any leaderboard submission from config snapshot + DVC cache.  
-- **Safety** — no hidden defaults; fail loud in CI/Kaggle.  
-- **Iteration speed** — swap configs (`loss.smoothness.weight=0.1`) without code edits.  
-- **Auditability** — JSONL manifests + DVC DAG explainability.  
-- **Portability** — identical behavior across local/Linux/Kaggle (no internet, 9h cap).  
-
----
-
-## 4. Alternatives Considered
-
-1. **Pydantic configs + Makefiles + Git LFS**  
-   - ✅ Simple; Python type safety.  
-   - ❌ No first-class composition, weak lineage, brittle artifact orchestration.  
-
-2. **MLFlow + YAML + ad-hoc scripts**  
-   - ✅ Experiment UI, metrics registry.  
-   - ❌ Determinism depends on discipline; heavy infra; weak dataset versioning under Kaggle constraints.  
-
-3. **Poetry scripts + custom cache + Docker only**  
-   - ✅ Simple mental model.  
-   - ❌ No graph lineage, opaque cache invalidation, poor audit trails.  
-
-**Why Hydra + DVC?** Balanced safety, determinism, lean Git, and proven patterns under offline constraints.  
+- **Reproducibility** — exact reconstruction from config + DVC cache.  
+- **Safety** — no hidden defaults; CI/Kaggle fail loud.  
+- **Iteration speed** — tweak configs, not code.  
+- **Auditability** — JSONL manifests + DVC graph.  
+- **Portability** — identical runs across local/Linux/Kaggle.  
 
 ---
 
-## 5. Scope & Non-Goals
+## 4. Alternatives
 
-- **In-scope:** configs, calibration lineage, pipeline DAG, artifact stores, run manifests, CLI integration, CI gates.  
-- **Out-of-scope:** experiment UI/dashboarding (may add W&B/MLFlow later); hyper-parameter sweeps beyond simple grid/random.  
+1. **Pydantic + Makefiles + Git LFS** — too brittle, no DAG lineage.  
+2. **MLFlow + YAML + scripts** — infra heavy, Kaggle-unfriendly.  
+3. **Poetry + Docker only** — simple but poor reproducibility and audit trails.  
+
+Hydra + DVC balance **safety, determinism, and offline constraints**.  
+
+---
+
+## 5. Scope
+
+- **In-scope:** configs, pipeline DAG, calibration lineage, artifacts, manifests, CI gates.  
+- **Out-of-scope:** dashboards/experiment UI (future W&B/MLFlow), large sweeps.  
 
 ---
 
 ## 6. Architecture Overview
 
+```mermaid
 flowchart LR
-  A["Hydra Configs\n(env, data, calib, model, train, loss, logger)"] -->|OmegaConf snapshot| B["Run Manifest"]
+  A["Hydra Configs\n(env, data, calib, model, training, loss, logger)"]
+    -->|OmegaConf snapshot| B["Run Manifest"]
+
   A --> C["CLI (Typer) spectramind"]
   C --> D["DVC Pipeline\n(dvc.yaml stages)"]
   D --> E["Artifacts\n(raw, calib, tensors, ckpts, preds)"]
-  E --> F["Submission\n(283-bin mu/sigma)"]
+  E --> F["Submission\n(283-bin μ/σ)"]
   D --> G["Remote Cache\n(S3 / SSH / Local)"]
-  
+````
+
 ---
 
 ## 7. Implementation Plan
 
 ### Hydra
 
-* **Config layout (`configs/`):**
-
-  * `env/` — `local.yaml`, `kaggle.yaml`, `ci.yaml`
-  * `data/` — `kaggle.yaml`, `smoke.yaml`, `science.yaml`
-  * `calib/` — `nominal.yaml`, `dev.yaml` (+ ADC/CDS/dark/flat/trace/phase)
-  * `model/` — `v50.yaml`, ablations
-  * `training/` — `trainer.yaml`, `precision.yaml`, `num_workers/`, `accumulate_grad_batches/`
-  * `loss/` — `smoothness.yaml`, `nonneg.yaml`, `molecular.yaml`, `composite.yaml`
-  * `logger/` — `jsonl.yaml`, `wandb_off.yaml`
-  * Entry points: `train.yaml`, `predict.yaml`
-
-* **Snapshot & hashing:** persist merged config + hash under `artifacts/runs/<run_id>/`.
-
-* **Guards:** forbid missing keys, require explicit defaults, pin seeds, deterministic data loaders.
+* Config tree: `configs/{env,data,calib,model,training,loss,logger}`.
+* Snapshot + hash each run into `artifacts/runs/<run_id>/`.
+* Guards: forbid missing keys, pin seeds, enforce deterministic dataloaders.
 
 ### DVC
 
-* **Pipeline (`dvc.yaml`):**
-
-  * `calibrate`: raw → calib data.
-  * `train`: calib tensors → ckpts.
-  * `predict`: ckpts → predictions.
-  * `submit`: predictions → submission CSV.
-
-* **Remotes:** default `localcache`; optional S3/SSH team remotes.
-
-* **Locks:** commit `dvc.lock`; enforce `dvc repro` in CI.
+* Pipeline stages: `calibrate`, `train`, `predict`, `submit`.
+* Lock file (`dvc.lock`) enforced in CI.
+* Default remote = `localcache`; optional S3/SSH.
 
 ---
 
-## 8. Example Snippets
+## 8. Snippets
 
-### Hydra (`configs/train.yaml`)
+**Hydra (configs/train.yaml)**
 
 ```yaml
 defaults:
@@ -143,7 +121,7 @@ defaults:
 seed: 2025
 ```
 
-### DVC (`dvc.yaml`)
+**DVC (dvc.yaml)**
 
 ```yaml
 stages:
@@ -151,24 +129,21 @@ stages:
     cmd: spectramind calibrate --config-name train +phase=calib
     deps: [configs/calib, data/raw]
     outs: [data/calib]
-
   train:
     cmd: spectramind train --config-name train
     deps: [configs/model, configs/training, data/tensors]
     outs: [artifacts/ckpts]
-
   predict:
     cmd: spectramind predict --config-name predict
     deps: [artifacts/ckpts/best.ckpt, data/tensors_eval]
     outs: [artifacts/preds]
-
   submit:
     cmd: spectramind submit artifacts/preds --out artifacts/submissions
     deps: [artifacts/preds]
     outs: [artifacts/submissions]
 ```
 
-### Run Manifest
+**Run Manifest (JSON)**
 
 ```json
 {
@@ -187,61 +162,58 @@ stages:
 
 ---
 
-## 9. Risks & Mitigations
+## 9. Risks
 
-* **Config sprawl** → add config lint, group READMEs, ADR patterns.
-* **Hidden nondeterminism** → pinned seeds, CI “determinism” job, `torch.use_deterministic_algorithms(True)`.
-* **DVC remote contention** → default localcache + GC, optional team remote quotas.
-* **Kaggle constraints (no internet, 9h cap)** → smoke configs, artifact packing.
+* **Config sprawl** → add lint, group READMEs, ADR templates.
+* **Nondeterminism** → CI determinism job (`torch.use_deterministic_algorithms(True)`).
+* **DVC contention** → localcache + quotas.
+* **Kaggle runtime** → smoke configs, artifact packing.
 
 ---
 
 ## 10. Consequences
 
-* ✅ Repeatable experiments, fast ablations, audit-friendly submissions.
-* ❌ Dev learning curve (Hydra/DVC); YAML/metadata discipline needed.
+* ✅ Repeatable experiments, CI-verified lineage.
+* ❌ YAML discipline + Hydra/DVC learning curve required.
 
 ---
 
-## 11. Compliance Checklist (CI Gates)
+## 11. CI Compliance Gates
 
 * [ ] `spectramind doctor` passes (env, CUDA, seeds).
-* [ ] `pre-commit run -a` clean.
+* [ ] Pre-commit hooks clean.
 * [ ] `dvc status` clean; `dvc repro` succeeds.
 * [ ] Run manifest + config snapshot archived.
-* [ ] Submission CSV schema-valid (283-bin μ/σ).
+* [ ] Submission schema valid (283-bin μ/σ).
 
 ---
 
-## 12. How to Revisit
+## 12. Revisit Triggers
 
-Revisit if: Kaggle rules change, new sensors added, calibration diverges, or richer experiment UI is required.
+Revisit if Kaggle rules change, new sensors added, calibration diverges, or we require experiment UIs.
 
 ---
 
 ## 13. References
 
-* Internal: `configs/*/ARCHITECTURE.md`, `docs/architecture/`, `dvc.yaml`, `Makefile`.
-* External: Hydra docs, DVC docs, reproducible ML literature.
-* Related: [ADR 0002 — Physics-Informed Losses](0002-physics-informed-losses.md)
+* Repo: `configs/*/ARCHITECTURE.md`, `dvc.yaml`, `Makefile`.
+* Docs: Hydra, DVC, reproducible ML papers.
+* Related: ADR 0002 — Physics-Informed Losses.
 
 ---
 
 ## 14. FAQ
 
-**Q:** Why not Git LFS for models?
-**A:** No pipeline semantics; DVC encodes DAG + cache policy.
+**Q:** Why not Git LFS?
+**A:** No DAG semantics; DVC encodes lineage + cache policy.
 
 **Q:** Hydra without DVC?
-**A:** Possible, but artifact lineage is lost.
+**A:** Possible, but artifact lineage lost.
 
 **Q:** Quick smoke test?
 **A:** `+data=smoke +training=trainer_smoke +env=ci` with `dvc repro -s train`.
 
-**Q:** How does this aid reviews?
-**A:** PRs show config deltas, CI proves pipeline, manifests ensure local reproducibility.
+**Q:** How does this help reviews?
+**A:** PR diffs show config deltas; CI proves pipeline; manifests ensure reproducibility.
 
-```
-
-Would you like me to also regenerate an **`adr/README.md` index file** that lists ADR 0001 and ADR 0002 for navigation, like a mini RFC index?
 ```
