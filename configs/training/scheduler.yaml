@@ -1,2 +1,70 @@
-name: cosine
-warmup_steps: 100
+# configs/training/scheduler.yaml
+# SpectraMind V50 — Learning-Rate Scheduler (Hydra sub-config)
+# Select a scheduler via `name`, and tweak its block below.
+# The trainer/optimizer sections in higher-level configs can reference these values.
+
+# -------------------------
+# Which scheduler to use
+# -------------------------
+name: cosine_annealing         # one of: cosine_annealing | one_cycle | reduce_on_plateau | constant
+
+# -------------------------
+# Global PL integration knobs
+# -------------------------
+pl:
+  interval: epoch              # "step" or "epoch" — PL scheduler stepping granularity
+  frequency: 1                 # apply every N intervals
+  monitor: val/loss            # metric to watch (used by reduce_on_plateau)
+  strict: true                 # PL: raise if monitor is missing when required
+
+# -------------------------
+# Optional warmup (applied before the main scheduler)
+# -------------------------
+warmup:
+  enabled: true
+  strategy: linear             # "linear" | "cosine"
+  steps: 500                   # number of warmup steps (preferred on Kaggle to stabilize mixed precision)
+  min_lr: 1.0e-7               # start LR
+  max_lr: ${optimizer.lr}      # target LR at end of warmup
+
+# -------------------------
+# Cosine Annealing (default)
+# -------------------------
+cosine_annealing:
+  T_max: ${trainer.max_epochs} # period in epochs; if using pl.interval=step, provide total update steps instead
+  eta_min: 1.0e-6
+  last_epoch: -1
+
+# -------------------------
+# One-Cycle policy (good for faster convergence)
+# -------------------------
+one_cycle:
+  max_lr: ${optimizer.lr}      # peak LR
+  pct_start: 0.3               # fraction of cycle spent increasing LR
+  div_factor: 25.0             # initial_lr = max_lr / div_factor
+  final_div_factor: 10000.0    # min_lr = initial_lr / final_div_factor
+  total_steps: null            # set if known; else PL will infer from epochs * steps_per_epoch
+  epochs: ${trainer.max_epochs}
+  steps_per_epoch: null
+  three_phase: false
+  anneal_strategy: cos         # "cos" or "linear"
+
+# -------------------------
+# Reduce-on-Plateau (robust when validation is noisy)
+# -------------------------
+reduce_on_plateau:
+  mode: min
+  factor: 0.5
+  patience: 4
+  threshold: 1.0e-4
+  threshold_mode: rel
+  cooldown: 0
+  min_lr: 1.0e-6
+  eps: 1.0e-8
+  monitor: ${pl.monitor}       # keep in sync with pl.monitor
+
+# -------------------------
+# Constant LR (for ablations / debugging)
+# -------------------------
+constant:
+  lr: ${optimizer.lr}
