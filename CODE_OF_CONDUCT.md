@@ -1,7 +1,3 @@
-Here’s a **mission-grade `CODE_OF_CONDUCT.md`** tailored for the SpectraMind V50 repository. It blends the standard Contributor Covenant with your repo’s NASA-grade reproducibility and Kaggle-safe standards:
-
----
-
 # 🌌 SpectraMind V50 — Code of Conduct
 
 This project follows the **Contributor Covenant Code of Conduct v2.1** with extensions for scientific reproducibility and competition integrity.
