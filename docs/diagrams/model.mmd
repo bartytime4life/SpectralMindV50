@@ -1,0 +1,69 @@
+flowchart TB
+
+  %% ===========================
+  %% Inputs
+  %% ===========================
+  subgraph inputs["Inputs"]
+    i1["FGS1 time-series<br/>Δt-aligned, binned"]
+    i2["AIRS spectra<br/>283 λ-bins"]
+  end
+
+  %% ===========================
+  %% FGS1 branch
+  %% ===========================
+  subgraph fgs1Enc["FGS1 Encoder"]
+    fe1["Preprocess<br/>denoise • detrend • bin"]
+    fe2["Sequence model<br/>state-space (Mamba)"]
+    fe3["Temporal pooling<br/>projection"]
+  end
+
+  %% ===========================
+  %% AIRS branch
+  %% ===========================
+  subgraph airsEnc["AIRS Encoder"]
+    ae1["Preprocess<br/>normalize • mask bad λ"]
+    ae2["Spectral encoder<br/>CNN / GNN"]
+    ae3["Global pooling<br/>projection"]
+  end
+
+  %% ===========================
+  %% Fusion + Decoder
+  %% ===========================
+  subgraph fusionDec["Fusion + Heteroscedastic Head"]
+    f0["Concat or Cross-attention"]
+    h1["Residual MLP head"]
+    h2["Per-bin outputs<br/>μ(λ), log σ(λ)"]
+  end
+
+  %% ===========================
+  %% Constraints (loss)
+  %% ===========================
+  subgraph constraints["Symbolic / Physics Constraints (loss)"]
+    c1["Non-negativity<br/>(μ ≥ 0)"]
+    c2["Smoothness<br/>(Δ²μ small)"]
+    c3["Band coherence<br/>molecular regions"]
+  end
+
+  %% ===========================
+  %% Uncertainty Calibration & Diagnostics
+  %% ===========================
+  subgraph calibDiag["Uncertainty Calibration & Diagnostics"]
+    t1["Temperature scaling<br/>σ ← σ / T (val split)"]
+    d1["Inject-&-recover tests<br/>CO₂ bands, photometric drift"]
+    d2["HTML dashboard<br/>metrics & plots"]
+  end
+
+  %% Flows
+  i1 --> fe1 --> fe2 --> fe3 --> f0
+  i2 --> ae1 --> ae2 --> ae3 --> f0
+  f0 --> h1 --> h2
+
+  %% Loss hooks (dotted)
+  c1 -.-> h2
+  c2 -.-> h2
+  c3 -.-> h2
+
+  %% Calibration / Diagnostics hooks (dotted)
+  h2 -.-> t1
+  h2 -.-> d1
+  d1 -.-> d2
