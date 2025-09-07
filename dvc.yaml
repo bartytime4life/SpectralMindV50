@@ -1,0 +1,13 @@
+stages:
+  calibrate:
+    cmd: spectramind calibrate --config-name train
+    deps: [configs/, src/]
+    outs: [data/processed]
+  train:
+    cmd: spectramind train --config-name train
+    deps: [data/processed]
+    outs: [artifacts/ckpt.pt]
+  predict:
+    cmd: spectramind predict --config-name predict
+    deps: [artifacts/ckpt.pt]
+    outs: [outputs/preds.csv]

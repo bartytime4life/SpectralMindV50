@@ -1,0 +1,7 @@
+pytest>=8.1
+ruff>=0.6.8
+mypy>=1.11
+toml-sort>=0.23
+check-jsonschema>=0.28
+jsonschema>=4.22
+pandas>=2.2
