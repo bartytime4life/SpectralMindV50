@@ -50,6 +50,13 @@ INSTALL_EXTRAS    ?= gpu,dev   # must match pyproject extras
 DOCKER_BUILDKIT   ?= 1
 GPU_FLAG          ?= --gpus all
 
+# Pipeline config (for scripts/run_pipeline.sh)
+CFG ?= train
+
+# Docs/diagrams
+DIAGRAMS_THEME ?= neutral
+DIAGRAMS_CONC  ?= 8
+
 # Misc
 export PYTHONHASHSEED = 0
 .DEFAULT_GOAL := help
@@ -59,13 +66,13 @@ export PYTHONHASHSEED = 0
 # -----------------------------------------------------------------------------
 .PHONY: help env ensure-venv ensure-tools dev precommit lint format type test \
         coverage check docs docs-serve \
-        train calibrate predict submit \
+        train calibrate predict submit pipeline \
         dvc-setup dvc-repro dvc-push dvc-pull \
         sbom pip-audit trivy scan licenses \
         kaggle-package kaggle-verify kaggle-clean kaggle \
         docker-build docker-build-cpu docker-run docker-shell \
         version tag push-tag release bump \
-        diagrams clean distclean ci
+        diagrams diagrams-dark diagrams-clean clean distclean ci
 
 # -----------------------------------------------------------------------------
 # Help
@@ -77,7 +84,7 @@ help:
 # -----------------------------------------------------------------------------
 # Environment bootstrapping
 # -----------------------------------------------------------------------------
-env: ensure-venv ensure-tools ## Create .venv and install dev tools (fast if uv/rye exists)
+env: ensure-venv ensure-tools ## Create .venv and install dev tools (fast if uv available)
 
 ensure-venv: ## Create virtualenv if missing
 	@if [ ! -d "$(VENV)" ]; then \
@@ -89,51 +96,53 @@ ensure-tools: ensure-venv ## Install dev dependencies and tools (prefers uv, fal
 	@if command -v uv >/dev/null 2>&1; then \
 	  echo ">> Using uv for fast installs"; \
 	  uv pip install --system --python $(PYTHON) -U pip wheel || true; \
-	  uv pip install --system --python $(PYTHON) -e . -r requirements-dev.txt; \
+	  uv pip install --system --python $(PYTHON) -e . -r requirements-dev.txt || true; \
 	else \
-	  $(PIP) install -U pip wheel; \
-	  $(PIP) install -e . -r requirements-dev.txt; \
+	  $(PIP) install -U pip wheel || true; \
+	  $(PIP) install -e . -r requirements-dev.txt || true; \
 	fi
 	@if [ -f requirements-kaggle.txt ]; then $(PIP) install -r requirements-kaggle.txt || true; fi
-	$(PRECOMMIT) install || true
+	@if command -v $(PRECOMMIT) >/dev/null 2>&1; then $(PRECOMMIT) install || true; fi
 	@echo "$(C_OK)Env ready$(C_RESET)"
 
 dev: env precommit ## Setup local dev env & run pre-commit (once)
 
 precommit: ## Run pre-commit hooks on all files
-	$(PRECOMMIT) run --all-files
+	@if command -v $(PRECOMMIT) >/dev/null 2>&1; then $(PRECOMMIT) run --all-files; else echo "::warning::pre-commit not installed"; fi
 
 # -----------------------------------------------------------------------------
 # Code quality
 # -----------------------------------------------------------------------------
 lint: ## Lint (Ruff + TOML sort)
-	$(VENV_BIN)/ruff check src tests
-	$(VENV_BIN)/ruff format --check src tests || true
-	$(VENV_BIN)/toml-sort --check pyproject.toml || true
+	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff check src tests; else echo "::warning::ruff not found"; fi
+	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff format --check src tests || true; fi
+	@if [ -x "$(VENV_BIN)/toml-sort" ]; then $(VENV_BIN)/toml-sort --check pyproject.toml || true; fi
 
 format: ## Auto-format code (Ruff)
-	$(VENV_BIN)/ruff format src tests
+	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff format src tests; else echo "::warning::ruff not found"; fi
 
 type: ## Type-check (mypy)
-	$(VENV_BIN)/mypy src
+	@if [ -x "$(VENV_BIN)/mypy" ]; then $(VENV_BIN)/mypy src; else echo "::warning::mypy not found"; fi
 
 test: ## Run tests (pytest -q)
-	$(VENV_BIN)/pytest -q
+	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest -q; else echo "::warning::pytest not found"; fi
 
 coverage: ## Run tests with coverage HTML report
-	$(VENV_BIN)/pytest -q --cov=$(PKG) --cov-report=term --cov-report=html:$(ARTIFACTS_DIR)/coverage
-	@echo "::notice::Coverage HTML -> $(ARTIFACTS_DIR)/coverage/index.html"
+	@if [ -x "$(VENV_BIN)/pytest" ]; then \
+	  $(VENV_BIN)/pytest -q --cov=$(PKG) --cov-report=term --cov-report=html:$(ARTIFACTS_DIR)/coverage; \
+	  echo "::notice::Coverage HTML -> $(ARTIFACTS_DIR)/coverage/index.html"; \
+	else echo "::warning::pytest not found"; fi
 
 check: precommit lint type test ## Full local gate: pre-commit + lint + type + tests
 
 # -----------------------------------------------------------------------------
 # Docs
 # -----------------------------------------------------------------------------
-docs: ## Build docs (MkDocs)
-	$(VENV_BIN)/mkdocs build -q
+docs: diagrams ## Build docs (MkDocs) after rendering diagrams
+	@if [ -x "$(VENV_BIN)/mkdocs" ]; then $(VENV_BIN)/mkdocs build -q; else echo "::warning::mkdocs not found"; fi
 
-docs-serve: ## Serve docs locally (MkDocs @ http://0.0.0.0:8000)
-	$(VENV_BIN)/mkdocs serve -a 0.0.0.0:8000
+docs-serve: diagrams ## Serve docs locally (MkDocs @ http://0.0.0.0:8000)
+	@if [ -x "$(VENV_BIN)/mkdocs" ]; then $(VENV_BIN)/mkdocs serve -a 0.0.0.0:8000; else echo "::warning::mkdocs not found"; fi
 
 # -----------------------------------------------------------------------------
 # Pipeline (CLI-first via Hydra)
@@ -150,30 +159,42 @@ predict: ## Run predictions
 submit: ## Build submission artifacts (CLI submit command)
 	$(PYTHON) -m $(PKG) submit --config-name submit
 
+pipeline: ## Run calibrate → train → predict → submit via scripts/run_pipeline.sh (CFG?=train)
+	@if [ -x scripts/run_pipeline.sh ]; then \
+	  echo ">> Running pipeline with CFG=$(CFG)"; \
+	  bash scripts/run_pipeline.sh "$(CFG)"; \
+	else \
+	  echo "::error::scripts/run_pipeline.sh not found"; exit 1; \
+	fi
+
 # -----------------------------------------------------------------------------
 # DVC
 # -----------------------------------------------------------------------------
 dvc-setup: ## Initialize DVC and default remote
-	$(VENV_BIN)/dvc init -q || true
-	mkdir -p "$(DVC_REMOTE_PATH)"
-	$(VENV_BIN)/dvc remote add -d $(DVC_REMOTE) "$(DVC_REMOTE_PATH)" 2>/dev/null || true
-	@echo "::notice::DVC remote '$(DVC_REMOTE)' -> $(DVC_REMOTE_PATH)"
+	@if [ -x "$(VENV_BIN)/dvc" ]; then \
+	  $(VENV_BIN)/dvc init -q || true; \
+	  mkdir -p "$(DVC_REMOTE_PATH)"; \
+	  $(VENV_BIN)/dvc remote add -d $(DVC_REMOTE) "$(DVC_REMOTE_PATH)" 2>/dev/null || true; \
+	  echo "::notice::DVC remote '$(DVC_REMOTE)' -> $(DVC_REMOTE_PATH)"; \
+	else \
+	  echo "::warning::dvc not installed"; \
+	fi
 
 dvc-repro: ## Reproduce DVC pipeline
-	$(VENV_BIN)/dvc repro
+	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc repro; else echo "::warning::dvc not installed"; fi
 
 dvc-push: ## Push DVC-tracked data to remote
-	$(VENV_BIN)/dvc push
+	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc push; else echo "::warning::dvc not installed"; fi
 
 dvc-pull: ## Pull DVC-tracked data from remote
-	$(VENV_BIN)/dvc pull
+	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc pull; else echo "::warning::dvc not installed"; fi
 
 # -----------------------------------------------------------------------------
 # Security / Supply Chain
 # -----------------------------------------------------------------------------
 licenses: ## Export 3rd-party license manifest (pip-licenses)
 	@mkdir -p $(ARTIFACTS_DIR)
-	@if command -v $(VENV_BIN)/pip-licenses >/dev/null 2>&1; then \
+	@if [ -x "$(VENV_BIN)/pip-licenses" ]; then \
 	  $(VENV_BIN)/pip-licenses --format=json --with-authors --with-urls > $(ARTIFACTS_DIR)/licenses.json; \
 	  echo "::notice::Licenses -> $(ARTIFACTS_DIR)/licenses.json"; \
 	else \
@@ -184,7 +205,7 @@ sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
 	mkdir -p $(ARTIFACTS_DIR)
 	if command -v syft >/dev/null 2>&1; then \
 	  syft packages dir:. -o cyclonedx-json > $(ARTIFACTS_DIR)/sbom.json; \
-	elif command -v $(VENV_BIN)/cyclonedx-bom >/dev/null 2>&1; then \
+	elif [ -x "$(VENV_BIN)/cyclonedx-bom" ]; then \
 	  $(VENV_BIN)/cyclonedx-bom -o $(ARTIFACTS_DIR)/sbom.json || true; \
 	else \
 	  echo "::warning::No SBOM tool available; skipping SBOM."; \
@@ -192,8 +213,12 @@ sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
 	@echo "::notice::SBOM -> $(ARTIFACTS_DIR)/sbom.json"
 
 pip-audit: ## Audit Python deps (pip-audit)
-	$(VENV_BIN)/pip-audit -r requirements-dev.txt || true
-	if [ -f requirements-kaggle.txt ]; then $(VENV_BIN)/pip-audit -r requirements-kaggle.txt || true; fi
+	@if [ -x "$(VENV_BIN)/pip-audit" ]; then \
+	  $(VENV_BIN)/pip-audit -r requirements-dev.txt || true; \
+	  if [ -f requirements-kaggle.txt ]; then $(VENV_BIN)/pip-audit -r requirements-kaggle.txt || true; fi; \
+	else \
+	  echo "::warning::pip-audit not installed"; \
+	fi
 
 trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	if command -v trivy >/dev/null 2>&1; then \
@@ -261,21 +286,25 @@ kaggle-clean: ## Remove local Kaggle bundle
 kaggle: kaggle-package kaggle-verify ## Package + verify submission
 
 # -----------------------------------------------------------------------------
-# Diagrams (Mermaid CLI, optional)
+# Diagrams (Mermaid via scripts/render_diagrams.sh)
 # -----------------------------------------------------------------------------
-diagrams: ## Render Mermaid diagrams in assets/diagrams to PNG+SVG (requires mmdc)
-	@if ! command -v mmdc >/dev/null 2>&1; then \
-	  echo "::warning::Mermaid CLI (mmdc) not found; skipping diagrams."; \
+diagrams: ## Render Mermaid diagrams -> SVG (and optional PNG) with scripts/render_diagrams.sh
+	@if [ -x scripts/render_diagrams.sh ]; then \
+	  ./scripts/render_diagrams.sh -t "$(DIAGRAMS_THEME)" -c "$(DIAGRAMS_CONC)"; \
 	else \
-	  mkdir -p assets/diagrams/rendered; \
-	  for m in assets/diagrams/*.mmd; do \
-	    [ -e "$$m" ] || continue; \
-	    base="$$(basename "$$m" .mmd)"; \
-	    mmdc -i "$$m" -o "assets/diagrams/rendered/$${base}.png"; \
-	    mmdc -i "$$m" -o "assets/diagrams/rendered/$${base}.svg"; \
-	    echo "Rendered: $$m"; \
-	  done; \
+	  echo "::warning::scripts/render_diagrams.sh not found; skipping diagrams."; \
 	fi
+
+diagrams-dark: ## Render Mermaid diagrams with dark theme + PNGs into assets/diagrams/out
+	@if [ -x scripts/render_diagrams.sh ]; then \
+	  ./scripts/render_diagrams.sh -t dark -p -o assets/diagrams/out -c "$(DIAGRAMS_CONC)"; \
+	else \
+	  echo "::warning::scripts/render_diagrams.sh not found; skipping diagrams."; \
+	fi
+
+diagrams-clean: ## Remove generated diagram images
+	-find assets/diagrams -type f \( -name '*.svg' -o -name '*.png' \) -delete || true
+	-find docs/diagrams    -type f \( -name '*.svg' -o -name '*.png' \) -delete || true
 
 # -----------------------------------------------------------------------------
 # Docker (GPU + CPU)
@@ -331,7 +360,7 @@ define _read_version
 	fi
 endef
 
-version: ## Sync VERSION -> pyproject.toml and commit (optionally tags if TAG=vX.Y.Z)
+version: ## Sync VERSION -> pyproject.toml and commit (optionally tag if TAG=vX.Y.Z)
 	@set -Eeuo pipefail; \
 	ver="$$(tr -d '[:space:]' < $(VERSION_FILE))"; \
 	[ -n "$$ver" ] || { echo "❌ $(VERSION_FILE) empty"; exit 1; }; \
