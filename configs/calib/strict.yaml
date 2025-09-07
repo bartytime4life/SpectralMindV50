@@ -1,2 +1,34 @@
-stages: [adc, dark, flat, cds, photometry, trace, phase]
-diagnostics: true
+# configs/calib/strict.yaml
+# ======================================================================
+# Strict Calibration Profile — SpectraMind V50
+# ======================================================================
+# Enforces the full calibration pipeline (ADC → CDS → dark → flat →
+# trace → phase alignment) with *strict* validation and error handling.
+# This is the most rigorous profile, intended for production training
+# and leaderboard submissions.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib=strict
+#
+# Keys:
+#   steps   : ordered list of calibration methods to apply
+#   strict  : whether to fail on any missing calibration file or mismatch
+#   validate: enable consistency checks (e.g. flux baselines, NaN guards)
+# ======================================================================
+
+_target_: spectramind.pipeline.calibrate.CalibrationPipeline
+
+steps:
+  - adc         # bias/gain conversion
+  - cds         # correlated double sampling
+  - dark        # dark subtraction
+  - flat        # flat-field correction
+  - trace       # wavelength solution
+  - phase       # phase alignment
+  - photometry  # photometric detrending (FGS1)
+  - align       # joint FGS1/AIRS alignment
+
+strict: true       # hard fail on any error/missing input
+validate: true     # run all validation checks
+log_level: INFO    # options: DEBUG | INFO | WARNING | ERROR
+save_intermediates: false  # set true for debugging, large disk use
