@@ -5,147 +5,132 @@ from __future__ import annotations
 SpectraMind V50 — Pipeline Entrypoints
 ======================================
 
-Python API facade for the main pipeline stages.
+This package exposes clean, lazy-loaded accessors for each pipeline stage's
+`run(**kwargs)` function, plus a tiny router.
+
+Stages
+------
+- calibrate  → sensor calibration (FGS1 + AIRS)
+- train      → model training (dual encoders + decoder)
+- predict    → inference & spectral μ/σ outputs
+- diagnostics→ reporting & evaluation
+- submit     → package validated submission bundle (csv/zip/manifest)
 
 Usage
 -----
-    >>> from spectramind.pipeline import train, calibrate, predict, diagnostics, submit
-    >>> train(config_name="train", overrides=["+env=kaggle"])
+>>> from spectramind.pipeline import train, predict, submit
+>>> train(config_name="train", overrides=["+env=local"])
+>>> predict(checkpoint="artifacts/ckpts/last.ckpt")
+>>> submit(predictions="outputs/predictions/predictions.csv")
 
-Design
-------
-We *lazy-load* stage modules the first time you call them, so importing this
-package is fast and side-effect free (important in CLI, Kaggle, and tests).
-Each stage module is expected to expose a `run(**kwargs)` callable.
+Advanced
+--------
+>>> from spectramind.pipeline import run_stage, available_stages
+>>> run_stage("predict", checkpoint="...", strict=True)
+>>> available_stages()
+['calibrate', 'train', 'predict', 'diagnostics', 'submit']
 
-Stages:
-- train         → model training (dual encoders + decoder)
-- calibrate     → sensor calibration (FGS1 + AIRS)
-- predict       → inference & spectral μ/σ outputs
-- diagnostics   → reporting & evaluation
-- submit        → Kaggle packaging & validation
-
-If a stage is not implemented yet, calling it raises a clear RuntimeError with
-guidance on what to add (module path + expected symbol).
+Design notes
+------------
+- We *lazy import* stage modules to keep CLI startup snappy and Kaggle/CI-safe.
+- We expose a `__getattr__` per PEP 562 to resolve attributes like `train`
+  to the underlying `run` function at first touch.
+- No heavy deps at import-time; stages can import torch, lightning, etc.
 """
 
 from importlib import import_module
-from typing import Any, Callable, Dict, TYPE_CHECKING
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional
 
-__all__: list[str] = [
+__all__ = [
     "train",
     "calibrate",
     "predict",
     "diagnostics",
     "submit",
+    "run_stage",
+    "available_stages",
+    "get_version",
 ]
 
+# -----------------------------------------------------------------------------#
+# Internal registry and lazy resolver
+# -----------------------------------------------------------------------------#
 
-def _lazy_stage_runner(module_path: str, symbol: str = "run") -> Callable[..., Any]:
+# stage name -> module path
+_STAGE_MODULES: Mapping[str, str] = {
+    "calibrate": "spectramind.pipeline.calibrate",
+    "train": "spectramind.pipeline.train",
+    "predict": "spectramind.pipeline.predict",
+    "diagnostics": "spectramind.pipeline.diagnostics",
+    "submit": "spectramind.pipeline.submit",
+}
+
+# Cache resolved callables after first import to avoid repeated import overhead.
+_RESOLVED: MutableMapping[str, Callable[..., Any]] = {}
+
+
+def _resolve(stage: str) -> Callable[..., Any]:
+    """Resolve a stage name to its `run` callable, importing lazily."""
+    if stage in _RESOLVED:
+        return _RESOLVED[stage]
+    if stage not in _STAGE_MODULES:
+        raise AttributeError(f"Unknown pipeline stage '{stage}'. "
+                             f"Known: {sorted(_STAGE_MODULES)}")
+    mod_path = _STAGE_MODULES[stage]
+    mod = import_module(mod_path)
+    if not hasattr(mod, "run") or not callable(getattr(mod, "run")):
+        raise AttributeError(f"Module '{mod_path}' does not export a callable 'run'")
+    _RESOLVED[stage] = getattr(mod, "run")  # type: ignore[assignment]
+    return _RESOLVED[stage]
+
+
+# -----------------------------------------------------------------------------#
+# Public helpers
+# -----------------------------------------------------------------------------#
+
+def available_stages() -> List[str]:
+    """Return a sorted list of available stage names."""
+    return sorted(_STAGE_MODULES.keys())
+
+
+def run_stage(stage: str, /, *args: Any, **kwargs: Any) -> Any:
     """
-    Return a callable that imports `module_path` and forwards to `symbol` at call time.
+    Dispatch to a stage's `run` with positional/keyword passthrough.
 
-    Parameters
-    ----------
-    module_path
-        Dotted module path, e.g. 'spectramind.pipeline.train'.
-    symbol
-        Callable attribute in the module (default: 'run').
-
-    Returns
-    -------
-    Callable[..., Any]
-        A function that imports and dispatches to the underlying stage runner.
+    Example:
+        run_stage("predict", checkpoint="...", strict=True)
     """
-    def _runner(*args: Any, **kwargs: Any) -> Any:
-        try:
-            mod = import_module(module_path)
-        except Exception as e:  # pragma: no cover
-            raise RuntimeError(
-                f"Pipeline stage module not found: '{module_path}'.\n"
-                f"Implement the module or adjust the import path.\n"
-                f"Cause: {type(e).__name__}: {e}"
-            ) from e
-        if not hasattr(mod, symbol):
-            raise RuntimeError(
-                f"Pipeline stage '{module_path}' is missing the expected callable "
-                f"'{symbol}(**kwargs)'. Please expose a '{symbol}' entrypoint."
-            )
-        fn = getattr(mod, symbol)
-        if not callable(fn):
-            raise RuntimeError(
-                f"Attribute '{symbol}' in module '{module_path}' is not callable."
-            )
-        return fn(*args, **kwargs)
-    return _runner
+    fn = _resolve(stage)
+    return fn(*args, **kwargs)
 
 
-# Public, lazy stage entrypoints
-train: Callable[..., Any] = _lazy_stage_runner("spectramind.pipeline.train", "run")
-calibrate: Callable[..., Any] = _lazy_stage_runner("spectramind.pipeline.calibrate", "run")
-predict: Callable[..., Any] = _lazy_stage_runner("spectramind.pipeline.predict", "run")
-diagnostics: Callable[..., Any] = _lazy_stage_runner("spectramind.pipeline.diagnostics", "run")
-submit: Callable[..., Any] = _lazy_stage_runner("spectramind.pipeline.submit", "run")
+def get_version(default: str = "0.0.0") -> str:
+    """
+    Return the installed package version if available (pip/PEP 621 metadata),
+    else fall back to `default`.
+    """
+    try:
+        return _pkg_version("spectramind-v50")
+    except PackageNotFoundError:
+        return default
 
 
-# --- Optional type hints for better editor support ---------------------------
-# If you keep stable signatures in the stage modules, expose them here for static typing.
-if TYPE_CHECKING:
-    # Import only for type checkers (no runtime import/cost)
-    from typing import Iterable, Optional
+# -----------------------------------------------------------------------------#
+# PEP 562: Module-level attribute access for lazy stage functions
+# -----------------------------------------------------------------------------#
 
-    def train(
-        *,
-        config_name: str = "train",
-        overrides: Iterable[str] | None = None,
-        out_dir: str | None = None,
-        strict: bool = True,
-        quiet: bool = False,
-        env: Dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any: ...
+def __getattr__(name: str) -> Any:
+    """
+    Allow `from spectramind.pipeline import train` to resolve lazily.
 
-    def calibrate(
-        *,
-        config_name: str = "calibrate",
-        overrides: Iterable[str] | None = None,
-        out_dir: str | None = None,
-        strict: bool = True,
-        quiet: bool = False,
-        dry_run: bool = False,
-        env: Dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any: ...
+    Returns the stage `run` callable when `name` matches a stage.
+    """
+    if name in _STAGE_MODULES:
+        return _resolve(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    def predict(
-        *,
-        config_name: str = "predict",
-        overrides: Iterable[str] | None = None,
-        out_dir: str | None = None,
-        strict: bool = True,
-        quiet: bool = False,
-        env: Dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any: ...
 
-    def diagnostics(
-        *,
-        config_name: str = "diagnose",
-        overrides: Iterable[str] | None = None,
-        out_dir: str | None = None,
-        strict: bool = True,
-        quiet: bool = False,
-        env: Dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any: ...
-
-    def submit(
-        *,
-        config_name: str = "submit",
-        overrides: Iterable[str] | None = None,
-        out_dir: str | None = None,
-        strict: bool = True,
-        quiet: bool = False,
-        env: Dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any: ...
+def __dir__() -> List[str]:
+    """So that dir(spectramind.pipeline) lists stage names and exports."""
+    return sorted(set(globals().keys()) | set(_STAGE_MODULES.keys()))
