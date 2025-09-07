@@ -1,2 +1,46 @@
-# dark parameters
-enabled: true
+# configs/calib/method/dark.yaml
+# ======================================================================
+# Dark Current Subtraction — SpectraMind V50
+# ======================================================================
+# Removes sensor dark current and fixed-pattern offsets from frames.
+# Supports file-based master darks or parametric modeling with optional
+# scaling by exposure time and detector temperature.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib.method=dark
+#
+# Keys:
+#   _target_            : Python path to the dark calibration impl
+#   source              : "file" | "model" | "median"
+#   master_dark         : path to master dark (if source=="file")
+#   scale_by_exptime    : scale dark by exposure time (sec)
+#   scale_by_temperature: scale by detector temperature (°C/K metadata)
+#   hot_pixel_threshold : sigma threshold for hot pixel detection
+#   replace_hot_pixels  : inpaint detected hot pixels
+#   inpaint_method      : "median3" | "bilateral" | "none"
+#   clamp_min_zero      : clamp negative values to 0 after subtraction
+#   validate            : run basic sanity checks
+#   log_level           : per-step logging verbosity
+# ======================================================================
+
+_target_: spectramind.pipeline.calibrate.methods.DarkCalibration
+
+# --- Source of dark signal ---
+source: "file"                    # ["file", "model", "median"]
+master_dark: ${paths.data}/calib/master_dark.fits  # used when source=="file"
+
+# --- Scaling options ---
+scale_by_exptime: true            # use FITS/metadata exposure time
+scale_by_temperature: false       # enable if temperature metadata is reliable
+
+# --- Hot pixel handling ---
+hot_pixel_threshold: 8.0          # z-score threshold for hot pixel masking
+replace_hot_pixels: true
+inpaint_method: "median3"         # ["median3", "bilateral", "none"]
+
+# --- Post-processing guards ---
+clamp_min_zero: true              # avoid negative flux after subtraction
+
+# --- Safety & logging ---
+validate: true                    # check mean/variance reductions, NaNs
+log_level: INFO
