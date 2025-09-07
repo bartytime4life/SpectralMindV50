@@ -1,39 +1,60 @@
 flowchart TB
+  %% ===========================================
   %% Inputs
+  %% ===========================================
   subgraph Inputs
     I1[FGS1 time-series<br/>Δt-aligned, binned]:::in
     I2[AIRS spectra<br/>283 λ-bins]:::in
   end
 
+  %% ===========================================
   %% FGS1 branch
+  %% ===========================================
   subgraph FGS1_Encoder["FGS1 Encoder (sequence)"]
     FE1[Preprocess<br/>denoise • detrend • bin]:::blk
     FE2[State-space / SSM (e.g., Mamba)<br/>transit-aware latent]:::blk
     FE3[Temporal pooling / projection]:::blk
   end
 
+  %% ===========================================
   %% AIRS branch
+  %% ===========================================
   subgraph AIRS_Encoder["AIRS Encoder (spectral)"]
     AE1[Preprocess<br/>normalize • mask bad λ]:::blk
     AE2[Spectral CNN / GNN<br/>local band features]:::blk
     AE3[Global pooling / projection]:::blk
   end
 
+  %% ===========================================
   %% Fusion + Head
+  %% ===========================================
   subgraph Fusion_Head["Fusion + Heteroscedastic Head"]
     F0[Concat / Cross-attention]:::fusion
-    H1[MLP / Residual head]:::blk
+    H1[Residual MLP head]:::blk
     H2[Per-bin outputs<br/>μ(λ), log σ(λ)]:::head
   end
 
-  %% Constraints
-  subgraph Constraints["Symbolic/Physics Constraints (loss)"]
+  %% ===========================================
+  %% Constraints (Loss)
+  %% ===========================================
+  subgraph Constraints["Symbolic / Physics Constraints (loss)"]
     C1[Non-negativity<br/>(μ ≥ 0)]:::cons
     C2[Smoothness<br/>(Δ²μ small)]:::cons
     C3[Band coherence<br/>molecular regions]:::cons
   end
 
+  %% ===========================================
+  %% Uncertainty Calibration & Diagnostics
+  %% ===========================================
+  subgraph CalibDiag["Uncertainty Calibration & Diagnostics"]
+    T1[Temperature scaling<br/>σ ← σ / T (val split)]:::aux
+    D1[Inject-&-Recover tests<br/>(CO₂ bands, photometric drift)]:::aux
+    D2[HTML dashboard<br/>metrics & plots]:::aux
+  end
+
+  %% ===========================================
   %% Flow
+  %% ===========================================
   I1 --> FE1 --> FE2 --> FE3
   I2 --> AE1 --> AE2 --> AE3
   FE3 --> F0
@@ -45,9 +66,17 @@ flowchart TB
   C2 -. penalize .-> H2
   C3 -. penalize .-> H2
 
+  %% Calibration / Diagnostics hooks
+  H2 -. eval/fit T .-> T1
+  H2 -. eval .-> D1
+  D1 -. report .-> D2
+
+  %% ===========================================
   %% Styling
-  classDef in fill:#0b3d91,stroke:#0b3d91,color:#fff;
-  classDef blk fill:#1b6,stroke:#166,color:#fff;
-  classDef fusion fill:#a60,stroke:#a60,color:#fff;
+  %% ===========================================
+  classDef in fill:#0B3D91,stroke:#0B3D91,color:#fff;
+  classDef blk fill:#16A085,stroke:#0E7A60,color:#fff;
+  classDef fusion fill:#A65E00,stroke:#A65E00,color:#fff;
   classDef head fill:#444,stroke:#444,color:#fff;
-  classDef cons fill:#7a2,stroke:#7a2,color:#fff;
+  classDef cons fill:#7A9E2A,stroke:#6C8C25,color:#fff;
+  classDef aux fill:#555,stroke:#333,color:#fff;
