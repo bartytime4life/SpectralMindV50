@@ -56,7 +56,6 @@ flowchart TD
   E["Calibration prior (FGS1↔AIRS)"] --> L
   L --> F["Backpropagation → Model update"]
 
-
 * Each loss lives in `src/spectramind/losses/*.py`.
 * Configured via Hydra (`configs/loss/*.yaml`).
 * Logged separately in JSONL, W\&B, and diagnostics.
