@@ -1,1 +1,78 @@
-stages: [adc, dark, flat, cds, photometry, trace, phase]
+# configs/calib/nominal.yaml
+# ----------------------------------------------------------------------
+# Nominal Calibration Profile — SpectraMind V50
+# ----------------------------------------------------------------------
+# Defines the default calibration sequence applied to raw Ariel inputs.
+# Applies both FGS1 (photometric) and AIRS (spectroscopic) channels.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib=nominal
+#
+# Stages:
+#   - ADC (bias/gain conversion, ADU → flux units)
+#   - CDS (correlated double sampling, readout differencing)
+#   - DARK (dark current subtraction)
+#   - FLAT (spectral flat-field correction; AIRS only)
+#   - TRACE (wavelength solution; AIRS only)
+#   - PHOTOMETRY (light-curve extraction; FGS1 only)
+#   - PHASE (phase folding & alignment)
+#
+# References:
+#   - NeurIPS 2025 Ariel Challenge data docs:contentReference[oaicite:3]{index=3}
+#   - SpectraMind V50 pipeline design (physics-informed calibration):contentReference[oaicite:4]{index=4}
+# ----------------------------------------------------------------------
+
+calib:
+  profile: "nominal"
+  strict: true
+  save_intermediates: false
+
+  stages:
+    adc:
+      _target_: spectramind.calib.method.adc.ADC
+      enable: true
+      gain_map: ${data.root}/adc_info.csv
+      bias_correction: true
+
+    cds:
+      _target_: spectramind.calib.method.cds.CDS
+      enable: true
+      window: 2   # differencing window in frames
+
+    dark:
+      _target_: spectramind.calib.method.dark.DarkSubtract
+      enable: true
+      dark_reference: ${data.root}/dark_reference.parquet
+      per_channel: true
+
+    flat:
+      _target_: spectramind.calib.method.flat.FlatField
+      enable: true
+      flat_reference: ${data.root}/flat_reference.parquet
+      apply_to: ["airs"]    # AIRS only
+
+    trace:
+      _target_: spectramind.calib.method.trace.TraceSolve
+      enable: true
+      wavelength_solution: ${data.root}/axis_info.parquet
+      apply_to: ["airs"]
+
+    photometry:
+      _target_: spectramind.calib.method.photometry.FGS1Photometry
+      enable: true
+      aperture_radius: 5
+      background_subtract: true
+      detrend: true
+      apply_to: ["fgs1"]
+
+    phase:
+      _target_: spectramind.calib.method.phase.PhaseAlign
+      enable: true
+      ephemeris_file: ${data.root}/train_star_info.csv
+      oversample: 4
+      normalize: true
+
+  # Diagnostics toggle — whether to dump FFT/UMAP checks during calibration
+  diagnostics:
+    enable: false
+    output_dir: ./outputs/calib_diagnostics
