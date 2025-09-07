@@ -1,14 +1,34 @@
+# -----------------------------------------------------------------------------
+# Version bumping (syncs VERSION → pyproject.toml, commits, and tags)
+# -----------------------------------------------------------------------------
 .PHONY: version
 version:
-	@echo "Setting version to $$(cat VERSION)"
-	@python - <<'PY'
-import re, sys, pathlib
-ver = pathlib.Path("VERSION").read_text().strip()
-p = pathlib.Path("pyproject.toml")
-s = p.read_text()
-s = re.sub(r'(?m)^(version\s*=\s*")[^"]+(")', rf'\1{ver}\2', s)
-p.write_text(s)
-print(f"pyproject.toml version -> {ver}")
-PY
-	@git add VERSION pyproject.toml
-	@git commit -m "chore: set version $$(cat VERSION)" || true
+	@set -euo pipefail; \
+	ver="$$(cat VERSION | tr -d '[:space:]')"; \
+	if [ -z "$$ver" ]; then \
+		echo "❌ ERROR: VERSION file is empty"; exit 1; \
+	fi; \
+	echo "🔄 Setting version to $$ver"; \
+	pyproject="pyproject.toml"; \
+	if [ ! -f "$$pyproject" ]; then \
+		echo "❌ ERROR: $$pyproject not found"; exit 1; \
+	fi; \
+	# Update version in pyproject.toml (PEP 621 compliant)
+	sed -i.bak -E "s/^(version\s*=\s*\").*(\")/\1$$ver\2/" "$$pyproject"; \
+	rm -f "$$pyproject.bak"; \
+	echo "✅ pyproject.toml version -> $$ver"; \
+	# Stage changes
+	git add VERSION "$$pyproject"; \
+	# Commit if needed
+	if ! git diff --cached --quiet; then \
+		git commit -m "chore: set version $$ver"; \
+	else \
+		echo "ℹ️  No changes to commit"; \
+	fi; \
+	# Create tag (annotated, signed if GPG configured)
+	if git rev-parse "v$$ver" >/dev/null 2>&1; then \
+		echo "⚠️  Tag v$$ver already exists"; \
+	else \
+		git tag -a "v$$ver" -m "Release v$$ver"; \
+		echo "🏷️  Created tag v$$ver"; \
+	fi
