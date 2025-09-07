@@ -3,14 +3,15 @@ name: release
 on:
   push:
     tags:
-      - 'v*'                # e.g., v0.1.1 or v1.2.0-rc.1
+      - 'v*'                # e.g., v1.2.0 or v1.2.0-rc.1
   workflow_dispatch:
 
 permissions:
   contents: write           # create releases, upload assets
   packages: write           # push GHCR image
-  id-token: write           # OIDC for provenance / cosign keyless
+  id-token: write           # OIDC (provenance, keyless signing)
   actions: read
+  pages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,8 +34,7 @@ jobs:
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - name: Extract tag
         id: tag
@@ -67,7 +67,7 @@ jobs:
           fi
           echo "✅ Tag ${TAG} matches VERSION v${VER}"
 
-      - name: Determine pre-release (contains hyphen in semver)
+      - name: Determine pre-release (semver with hyphen)
         id: prerelease
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
@@ -76,7 +76,6 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "prerelease=$(cat $GITHUB_OUTPUT | tail -n1)"
 
   build:
     name: Build & Package
@@ -87,8 +86,7 @@ jobs:
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -116,6 +114,23 @@ jobs:
             sha256sum "$f" >> SHA256SUMS.txt
           done
           cat SHA256SUMS.txt
+
+      - name: Install cosign (for artifact signing)
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sigstore sign Python dist artifacts (keyless)
+        working-directory: dist
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          shopt -s nullglob
+          for f in *; do
+            echo "Signing $f"
+            cosign sign-blob --yes "$f" \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.cert"
+          done
+          ls -l
 
       - name: Make Kaggle submission bundle (if script exists)
         run: |
@@ -156,7 +171,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Upload metrics & reports (if present)
+      - name: Upload diagnostics & metrics (if present)
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-and-metrics
@@ -188,7 +203,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64    # set to linux/amd64,linux/arm64 if you build multi-arch
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:latest
@@ -202,10 +217,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Install cosign
+      - name: Install cosign (for OCI)
         uses: sigstore/cosign-installer@v3.7.0
 
-      - name: Cosign sign (keyless OIDC)
+      - name: Cosign sign OCI images (keyless OIDC by default)
         if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
         env:
           COSIGN_EXPERIMENTAL: "true"
@@ -213,7 +228,7 @@ jobs:
           cosign sign --yes ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}
           cosign sign --yes ${{ env.IMAGE_NAME }}:latest
 
-      - name: Cosign sign (key-based)
+      - name: Cosign sign OCI images (key-based)
         if: ${{ secrets.COSIGN_PRIVATE_KEY }}
         env:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
@@ -230,14 +245,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: SBOM for repo (Anchore sbom-action → CycloneDX JSON)
+      - name: Repository SBOM (Anchore → CycloneDX JSON)
         uses: anchore/sbom-action@v0.16.0
         with:
           path: .
           output-file: sbom-repo.json
           format: cyclonedx-json
 
-      - name: SBOM for Python deps (CycloneDX)
+      - name: Python deps SBOM (CycloneDX)
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -267,8 +282,7 @@ jobs:
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-        with:
-          path: release-assets
+        with: { path: release-assets }
 
       - name: Flatten artifacts into assets/
         id: gather
@@ -298,9 +312,66 @@ jobs:
       - name: Log Release URL
         run: echo "Release => ${{ steps.gh_release.outputs.url }}"
 
+  docs:
+    name: Build & Publish Docs
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - name: Install mkdocs + plugins
+        run: |
+          pip install mkdocs mkdocs-material mkdocs-git-revision-date-localized-plugin || true
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt || true; fi
+
+      - name: Build docs
+        working-directory: docs
+        run: mkdocs build --strict
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/site
+          publish_branch: gh-pages
+          keep_files: false
+          commit_message: "docs: publish ${{ needs.validate.outputs.tag }}"
+
+  testpypi-publish:
+    name: Publish to TestPyPI (optional)
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
+    steps:
+      - name: Download python dist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@v1.10.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          user: __token__
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          skip-existing: true
+
   pypi-publish:
     name: Publish to PyPI (optional)
-    needs: [validate, build]
+    needs: [validate, build, testpypi-publish]
     runs-on: ubuntu-latest
     if: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
@@ -312,8 +383,7 @@ jobs:
 
       - name: Verify checksums
         working-directory: dist
-        run: |
-          sha256sum -c SHA256SUMS.txt
+        run: sha256sum -c SHA256SUMS.txt
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@v1.10.3
