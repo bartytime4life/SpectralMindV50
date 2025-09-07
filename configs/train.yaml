@@ -1,0 +1,18 @@
+# Top-level composition
+defaults:
+  - env: local
+  - data: kaggle
+  - calib: nominal
+  - model: v50
+  - training: lightning
+  - training/optimizer: optimizer
+  - training/scheduler: scheduler
+  - training/precision: precision
+  - training/dataloader: dataloader
+  - loss: composite
+  - logger: jsonl
+
+run:
+  seed: 1337
+  workdir: ${oc.env:SM_WORKDIR,artifacts}
+  hash_keys: [defaults, run, data, calib, model, loss, training]
