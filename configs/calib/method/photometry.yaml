@@ -1,2 +1,99 @@
-# photometry parameters
-enabled: true
+# configs/calib/method/photometry.yaml
+# ----------------------------------------------------------------------
+# FGS1 Photometry — aperture extraction + background + detrending
+# ----------------------------------------------------------------------
+# Extracts the FGS1 white-light lightcurve from 2D frames, removes
+# background, clips outliers (e.g., jitter spikes), and applies a
+# mild trend removal prior to phase alignment.
+#
+# References:
+#   - Ariel challenge calibration & detrending guidance:contentReference[oaicite:2]{index=2}
+#   - SpectraMind V50 physics-informed pipeline design:contentReference[oaicite:3]{index=3}
+# ----------------------------------------------------------------------
+
+_target_: spectramind.calib.method.photometry.FGS1Photometry
+enable: true
+apply_to: ["fgs1"]
+
+# --- Source image geometry ---
+# FGS1 frames are 2D; if a subset/window is used upstream, ensure consistency.
+image_key: "fgs1_frame"        # key in sample dict for the raw 2D frame
+time_key: "time"               # per-frame timestamp (e.g., MJD or seconds)
+mask_key: null                 # optional boolean mask for bad pixels (same shape as frame)
+
+# --- Centroiding (per-frame source localization) ---
+centroid:
+  method: "gaussian"           # ["gaussian", "moments", "brightest"]
+  search_box: 15               # odd int; window (pixels) around previous centroid
+  max_shift: 8                 # max pixel drift allowed between frames
+  smooth_traj: true            # smooth centroid trajectory across time
+  smooth_window: 11            # Savitzky-Golay window length (odd)
+  smooth_polyorder: 2
+
+# --- Aperture photometry ---
+aperture:
+  radius: 5                    # pixel radius for circular aperture
+  subpixel: true               # fractional pixel weighting at boundary
+  normalize_by_exptime: true   # divide flux by exposure time if available
+  exposure_key: "exptime"      # metadata key for exposure time (optional)
+
+# --- Background estimation ---
+background:
+  method: "annulus"            # ["annulus", "local-median", "tile-median", "constant"]
+  inner_radius: 8              # annulus inner radius (pixels)
+  outer_radius: 12             # annulus outer radius (pixels)
+  robust: true                 # use robust estimator (median / biweight)
+  sigma_clip:
+    enable: true
+    sigma: 4.0
+    iters: 2
+
+# --- Outlier handling (per time point) ---
+outliers:
+  # Clip flux outliers to mitigate jitter spikes/cosmic rays before detrending.
+  method: "sigma"              # ["sigma", "mad", "none"]
+  sigma: 5.0
+  iters: 1
+  interpolate: true            # replace clipped samples by linear interp
+  min_run: 1
+
+# --- Temporal binning (optional; improves SNR at cost of cadence) ---
+binning:
+  enable: false
+  size: 1                      # integer bin size (frames per bin)
+  reduce: "mean"               # ["mean", "median"]
+
+# --- Detrending (remove low-frequency drift; preserve transit shape) ---
+detrend:
+  enable: true
+  mode: "savgol"               # ["savgol", "poly", "none"]
+  savgol:
+    window: 101                # odd; adapt to sequence length
+    polyorder: 2
+  poly:
+    degree: 2                  # used if mode == "poly"
+  # Optionally include common-mode removal using centroid motion
+  regress_centroid: true       # linear reg on (dx, dy) to remove motion-correlated systematics
+  center_features: true
+
+# --- Normalization (white-light baseline) ---
+normalize:
+  enable: true
+  method: "oot_median"         # ["oot_median", "robust_mean", "percentile"]
+  percentile: 10               # used if method == "percentile"
+  ref_mask_key: null           # optional mask for out-of-transit region
+
+# --- Numerical stability & bookkeeping ---
+eps: 1.0e-9
+outputs:
+  flux_key: "fgs1_flux"        # extracted (detrended, normalized) lightcurve
+  meta_prefix: "fgs1_phot"     # prefix for saved diagnostics in sample
+
+# --- Diagnostics (optional; heavy) ---
+diagnostics:
+  enable: false
+  save_centroid_traj: true
+  save_background_series: false
+  save_prepost_flux: false
+  fft_check: false             # run FFT of flux to verify low-frequency removal
+  out_dir: "./outputs/calib_diagnostics/fgs1_photometry"
