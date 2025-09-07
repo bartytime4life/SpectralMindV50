@@ -1,15 +1,3 @@
-Below is a production-grade `src/spectramind/reports.py` that generates an **HTML diagnostics dashboard** for SpectraMind V50 runs. It’s Kaggle/CI-safe (no internet), typed, and designed to slot into your existing CLI (Typer) and Hydra workflow.
-
-* Validates predictions (283 bins), optional targets, and optional submission schema.
-* Aggregates JSONL event logs for **lineage** (config hash, git commit, timings, DVC stages).
-* Computes diagnostics: residuals, per-bin error stats, **negative log-likelihood**, **PIT histogram**, calibration plots, and σ profiling.
-* Supports **Inject-&-Recover** comparisons between two prediction files (e.g., base vs. perturbed).
-* Renders a single self-contained HTML with inline CSS and base64 plots.
-* Emits loud, typed errors for missing inputs / malformed data.
-
-> Drop this file at `src/spectramind/reports.py`. Wire it from your CLI (`spectramind diagnose report …`) or call programmatically.
-
-```python
 # src/spectramind/reports.py
 from __future__ import annotations
 
