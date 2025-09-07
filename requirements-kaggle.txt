@@ -1,5 +1,5 @@
 # ==============================================================================
-# requirements-kaggle.txt — SpectraMind V50 (runtime, slim, Kaggle-safe)
+# requirements-kaggle.txt — SpectraMind V50
 # ------------------------------------------------------------------------------
 # Purpose:
 #   Runtime-only deps for Kaggle kernels & DVC stages.
@@ -21,15 +21,27 @@ jsonschema==4.22.0
 numpy==1.26.4
 scipy==1.11.4
 pandas==2.2.2
+polars==0.20.31        # faster tabular ops (opt-in, safe)
 
 # --- Progress / Logging ---
 tqdm==4.66.4
 rich==13.7.1
+loguru==0.7.2          # structured logging, lightweight
 
-# --- Visualization & Analysis ---
+# --- Visualization & Diagnostics ---
 matplotlib==3.8.4
 umap-learn==0.5.6
 networkx==3.2.1
+seaborn==0.13.2        # Kaggle-preinstalled, pinned for safety
+
+# --- Model Utils (non-Torch) ---
+scikit-learn==1.5.1    # classical ML baselines & preprocessing
+joblib==1.4.2          # lightweight caching
+statsmodels==0.14.2    # ARIMA, regression diagnostics
+
+# --- Symbolic / Physics-informed ---
+sympy==1.13.1          # symbolic checks & constraints
+numba==0.60.0          # JIT acceleration (safe for Kaggle)
 
 # ⚠️ Torch stack handled separately by bin/kaggle-boot.sh:
 # torch==2.8.0
