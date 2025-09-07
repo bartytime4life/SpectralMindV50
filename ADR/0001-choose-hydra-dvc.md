@@ -1,3 +1,6 @@
+Here’s the regenerated **ADR 0001** file, clean and consistent, ready to drop into your repo as `adr/0001-hydra-dvc.md`:
+
+````markdown
 # ADR 0001 — Choose Hydra + DVC for Configuration & Data/Experiment Lineage
 
 * **Status:** ✅ Accepted  
@@ -84,15 +87,173 @@ CLI (`spectramind calibrate/train/predict/submit`) binds them.
 
 ```mermaid
 flowchart LR
-  A[Hydra Configs<br/>(env, data, calib, model, train, loss, logger)]
-    -->|OmegaConf snapshot| B[Run Manifest]
+  A["Hydra Configs\n(env, data, calib, model, train, loss, logger)"]
+    -->|OmegaConf snapshot| B["Run Manifest"]
 
-  A --> C[CLI (Typer)<br/>spectramind *]
+  A --> C["CLI (Typer)\n spectramind *"]
 
-  C --> D[DVC Pipeline<br/>(dvc.yaml stages)]
+  C --> D["DVC Pipeline\n(dvc.yaml stages)"]
 
-  D --> E[Artifacts<br/>(raw, calib, tensors, ckpts, preds)]
+  D --> E["Artifacts\n(raw, calib, tensors, ckpts, preds)"]
 
-  E --> F[Submission<br/>(283-bin μ/σ)]
+  E --> F["Submission\n(283-bin mu/sigma)"]
 
-  D --> G[Remote Cache<br/>(S3 / SSH / Local)]
+  D --> G["Remote Cache\n(S3 / SSH / Local)"]
+
+````
+
+---
+
+## 7. Implementation Plan
+
+### Hydra
+
+* **Config layout (`configs/`):**
+
+  * `env/` — `local.yaml`, `kaggle.yaml`, `ci.yaml`
+  * `data/` — `kaggle.yaml`, `smoke.yaml`, `science.yaml`
+  * `calib/` — `nominal.yaml`, `dev.yaml` (+ ADC/CDS/dark/flat/trace/phase)
+  * `model/` — `v50.yaml`, ablations
+  * `training/` — `trainer.yaml`, `precision.yaml`, `num_workers/`, `accumulate_grad_batches/`
+  * `loss/` — `smoothness.yaml`, `nonneg.yaml`, `molecular.yaml`, `composite.yaml`
+  * `logger/` — `jsonl.yaml`, `wandb_off.yaml`
+  * Entry points: `train.yaml`, `predict.yaml`
+
+* **Snapshot & hashing:** persist merged config + hash under `artifacts/runs/<run_id>/`.
+
+* **Guards:** forbid missing keys, require explicit defaults, pin seeds, deterministic data loaders.
+
+### DVC
+
+* **Pipeline (`dvc.yaml`):**
+
+  * `calibrate`: raw → calib data.
+  * `train`: calib tensors → ckpts.
+  * `predict`: ckpts → predictions.
+  * `submit`: predictions → submission CSV.
+
+* **Remotes:** default `localcache`; optional S3/SSH team remotes.
+
+* **Locks:** commit `dvc.lock`; enforce `dvc repro` in CI.
+
+---
+
+## 8. Example Snippets
+
+### Hydra (`configs/train.yaml`)
+
+```yaml
+defaults:
+  - env: local
+  - data: kaggle
+  - calib: nominal
+  - model: v50
+  - training: trainer
+  - loss: composite
+  - logger: jsonl
+
+seed: 2025
+```
+
+### DVC (`dvc.yaml`)
+
+```yaml
+stages:
+  calibrate:
+    cmd: spectramind calibrate --config-name train +phase=calib
+    deps: [configs/calib, data/raw]
+    outs: [data/calib]
+
+  train:
+    cmd: spectramind train --config-name train
+    deps: [configs/model, configs/training, data/tensors]
+    outs: [artifacts/ckpts]
+
+  predict:
+    cmd: spectramind predict --config-name predict
+    deps: [artifacts/ckpts/best.ckpt, data/tensors_eval]
+    outs: [artifacts/preds]
+
+  submit:
+    cmd: spectramind submit artifacts/preds --out artifacts/submissions
+    deps: [artifacts/preds]
+    outs: [artifacts/submissions]
+```
+
+### Run Manifest
+
+```json
+{
+  "project": "spectramind-v50",
+  "run_id": "2025-09-06T21-55-00Z_local_v50_nominal",
+  "config_hash": "a5b1…",
+  "hydra_config": "artifacts/runs/.../config.yaml",
+  "git_rev": "<sha>",
+  "stages": ["calibrate","train","predict"],
+  "artifacts": {
+    "ckpt": "artifacts/ckpts/best.ckpt",
+    "preds": "artifacts/preds/val.csv"
+  }
+}
+```
+
+---
+
+## 9. Risks & Mitigations
+
+* **Config sprawl** → add config lint, group READMEs, ADR patterns.
+* **Hidden nondeterminism** → pinned seeds, CI “determinism” job, `torch.use_deterministic_algorithms(True)`.
+* **DVC remote contention** → default localcache + GC, optional team remote quotas.
+* **Kaggle constraints (no internet, 9h cap)** → smoke configs, artifact packing.
+
+---
+
+## 10. Consequences
+
+* ✅ Repeatable experiments, fast ablations, audit-friendly submissions.
+* ❌ Dev learning curve (Hydra/DVC); YAML/metadata discipline needed.
+
+---
+
+## 11. Compliance Checklist (CI Gates)
+
+* [ ] `spectramind doctor` passes (env, CUDA, seeds).
+* [ ] `pre-commit run -a` clean.
+* [ ] `dvc status` clean; `dvc repro` succeeds.
+* [ ] Run manifest + config snapshot archived.
+* [ ] Submission CSV schema-valid (283-bin μ/σ).
+
+---
+
+## 12. How to Revisit
+
+Revisit if: Kaggle rules change, new sensors added, calibration diverges, or richer experiment UI is required.
+
+---
+
+## 13. References
+
+* Internal: `configs/*/ARCHITECTURE.md`, `docs/architecture/`, `dvc.yaml`, `Makefile`.
+* External: Hydra docs, DVC docs, reproducible ML literature.
+* Related: [ADR 0002 — Physics-Informed Losses](0002-physics-informed-losses.md)
+
+---
+
+## 14. FAQ
+
+**Q:** Why not Git LFS for models?
+**A:** No pipeline semantics; DVC encodes DAG + cache policy.
+
+**Q:** Hydra without DVC?
+**A:** Possible, but artifact lineage is lost.
+
+**Q:** Quick smoke test?
+**A:** `+data=smoke +training=trainer_smoke +env=ci` with `dvc repro -s train`.
+
+**Q:** How does this aid reviews?
+**A:** PRs show config deltas, CI proves pipeline, manifests ensure local reproducibility.
+
+```
+
+Would you like me to also regenerate an **`adr/README.md` index file** that lists ADR 0001 and ADR 0002 for navigation, like a mini RFC index?
+```
