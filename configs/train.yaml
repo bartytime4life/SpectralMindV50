@@ -1,18 +1,96 @@
-# Top-level composition
-defaults:
-  - env: local
-  - data: kaggle
-  - calib: nominal
-  - model: v50
-  - training: lightning
-  - training/optimizer: optimizer
-  - training/scheduler: scheduler
-  - training/precision: precision
-  - training/dataloader: dataloader
-  - loss: composite
-  - logger: jsonl
+# configs/train.yaml
+# SpectraMind V50 — Training Config
+# Top-level composed Hydra configuration for model training
 
-run:
-  seed: 1337
-  workdir: ${oc.env:SM_WORKDIR,artifacts}
-  hash_keys: [defaults, run, data, calib, model, loss, training]
+defaults:
+  - env: local           # or kaggle / debug
+  - data: nominal        # dataset profile (nominal/kaggle/splits)
+  - calib: nominal       # calibration pipeline settings
+  - model: v50           # model architecture (dual encoders + decoder)
+  - training: lightning  # training loop params (PL Trainer)
+  - loss: composite      # physics-informed composite loss
+  - logger: jsonl        # logging backend (jsonl/csv/wandb)
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+experiment:
+  name: "spectramind_v50_train"
+  tags: ["v50", "train", "fgs1", "airs"]
+
+paths:
+  work_dir: ${hydra:runtime.cwd}
+  artifacts: ${paths.work_dir}/artifacts
+  logs: ${paths.artifacts}/logs
+  ckpt: ${paths.artifacts}/checkpoints
+
+seed: 42
+deterministic: true
+precision: 32  # set to 16-mixed for AMP on GPU if stable
+
+trainer:
+  max_epochs: 50
+  gpus: 1
+  accumulate_grad_batches: 2
+  gradient_clip_val: 1.0
+  log_every_n_steps: 50
+  val_check_interval: 0.25
+  deterministic: true
+  enable_checkpointing: true
+
+optimizer:
+  name: adamw
+  lr: 3e-4
+  weight_decay: 1e-2
+  betas: [0.9, 0.999]
+
+scheduler:
+  name: cosine_annealing
+  T_max: ${trainer.max_epochs}
+  eta_min: 1e-6
+
+early_stopping:
+  monitor: val/loss
+  patience: 8
+  mode: min
+  min_delta: 1e-4
+
+checkpoint:
+  monitor: val/loss
+  mode: min
+  save_top_k: 3
+  filename: "epoch{epoch:02d}-valloss{val/loss:.4f}"
+  save_last: true
+
+logger:
+  jsonl:
+    log_dir: ${paths.logs}/jsonl
+  csv:
+    save_dir: ${paths.logs}/csv
+  wandb:
+    project: "spectramind-v50"
+    entity: null
+    mode: disabled   # enable when WANDB_API_KEY is set
+
+loss:
+  composite:
+    weights:
+      gll: 1.0
+      smoothness: 0.2
+      nonneg: 0.5
+      band_coherence: 0.3
+      calibration: 0.5
+
+callbacks:
+  - jsonl_metrics_logger
+  - epoch_time
+  - lr_monitor
+  - checkpoint
+  - early_stopping
+
+# Hydra runtime options
+hydra:
+  run:
+    dir: ${paths.artifacts}/runs/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${paths.artifacts}/sweeps
+    subdir: ${hydra.job.num}
