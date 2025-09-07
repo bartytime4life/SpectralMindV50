@@ -1,1 +1,32 @@
+# configs/loss/smoothness.yaml
+# SpectraMind V50 — Smoothness Regularization Loss
+# -------------------------------------------------
+# Encourages local smoothness across adjacent spectral bins,
+# penalizing sharp fluctuations in predicted μ(λ) sequences.
+#
+# Notes:
+# - Implemented in `spectramind.losses.smoothness.SmoothnessLoss`.
+# - Physics-informed: real exoplanet spectra are continuous and
+#   differentiable; strong bin-to-bin oscillations are unlikely
+#   to be astrophysical in origin.
+# - This is a *symbolic constraint loss* — it can be linearly
+#   combined with other loss terms in `composite.yaml`.
+
+_target_: spectramind.losses.smoothness.SmoothnessLoss
+
+# Weight applied to this regularizer in composite loss
 weight: 0.1
+
+# Order of finite difference used for smoothness penalty:
+# 1 = first derivative (Δμ), 2 = second derivative (Δ²μ).
+order: 2
+
+# Reduction mode for loss aggregation
+#   - "mean": average across batch and bins
+#   - "sum": sum across batch and bins
+#   - "none": return per-sample loss values
+reduction: "mean"
+
+# Optional spectral mask: indices of bins to exclude from smoothness
+# checks (e.g., detector edges, strong tellurics).
+mask: null
