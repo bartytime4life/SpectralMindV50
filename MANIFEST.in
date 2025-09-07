@@ -1,0 +1,336 @@
+## `MANIFEST.in`
+
+Ensures sdists include configs/schemas/assets (matching your wheel package-data).
+
+```ini
+# MANIFEST.in — include non-Python runtime assets in sdist
+recursive-include src/spectramind/configs *.yml *.yaml
+recursive-include src/spectramind/schemas *.json
+recursive-include src/spectramind/assets/diagrams *.mmd *.svg *.png
+
+# Common top-level docs
+include README.md LICENSE VERSION
+
+# Exclude obvious junk
+global-exclude *.py[cod] __pycache__ *.so *.dylib *.dll *.bak *.tmp
+```
+
+---
+
+## `src/spectramind/__init__.py`
+
+Exposes `__version__` from package metadata; safe fallback for editable installs.
+
+```python
+# src/spectramind/__init__.py
+from __future__ import annotations
+
+from importlib import metadata
+
+__all__ = ["__version__"]
+
+def _detect_version() -> str:
+    try:
+        # Package name in pyproject
+        return metadata.version("spectramind-v50")
+    except metadata.PackageNotFoundError:
+        # Fallback for dev/editable before install; Makefile updates pyproject.
+        return "0.0.0"
+
+__version__ = _detect_version()
+```
+
+---
+
+## `src/spectramind/__main__.py`
+
+Keeps `python -m spectramind` identical to the console script.
+
+```python
+# src/spectramind/__main__.py
+from __future__ import annotations
+from .cli import app
+
+def main() -> None:
+    app()
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## `src/spectramind/cli.py`
+
+Thin, typed Typer app that delegates to pipelines; Hydra-aware config loading; rich errors; deterministic exits. The pipeline call sites are single points to wire your real logic.
+
+```python
+# src/spectramind/cli.py
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import typer
+from rich.console import Console
+from rich.traceback import install as rich_traceback
+from omegaconf import OmegaConf
+from hydra import compose, initialize
+
+from . import __version__
+
+app = typer.Typer(
+    name="spectramind",
+    no_args_is_help=True,
+    help="SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge pipeline",
+)
+console = Console()
+rich_traceback(show_locals=False, width=120, word_wrap=True)
+
+# -------------------------- Utilities --------------------------
+
+@dataclass
+class RunResult:
+    ok: bool
+    info: Dict[str, Any]
+
+def _load_cfg(config_name: str, overrides: list[str]) -> Dict[str, Any]:
+    cfg_dir = str(Path(__file__).with_suffix("").parent / "configs")
+    with initialize(version_base=None, config_path=cfg_dir):
+        cfg = compose(config_name=config_name, overrides=overrides)
+    return OmegaConf.to_container(cfg, resolve=True)  # type: ignore[no-any-return]
+
+def _print_manifest(title: str, cfg: Dict[str, Any]) -> None:
+    console.rule(f"[bold cyan]{title}")
+    console.print_json(json.dumps(cfg, indent=2, sort_keys=True))
+
+def _fail(msg: str, code: int = 1) -> None:
+    console.print(f"[bold red]ERROR:[/bold red] {msg}")
+    raise typer.Exit(code)
+
+# -------------------------- Delegates --------------------------
+# Swap these shims with your real modules (keep the signatures).
+
+def _run_calibrate(cfg: Dict[str, Any]) -> RunResult:
+    # from .pipeline.calibrate import run as calibrate_run
+    # return calibrate_run(cfg)
+    out_dir = Path(cfg.get("paths", {}).get("calib_dir", "outputs/calib"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # TODO: wire real calibration here
+    return RunResult(ok=True, info={"calib_dir": str(out_dir)})
+
+def _run_train(cfg: Dict[str, Any]) -> RunResult:
+    # from .pipeline.train import run as train_run
+    # return train_run(cfg)
+    ckpt = Path(cfg.get("paths", {}).get("checkpoint", "artifacts/model.ckpt"))
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_bytes(b"stub-checkpoint")  # TODO replace with real save
+    return RunResult(ok=True, info={"checkpoint": str(ckpt)})
+
+def _run_predict(cfg: Dict[str, Any]) -> RunResult:
+    # from .pipeline.predict import run as predict_run
+    # return predict_run(cfg)
+    pred = Path(cfg.get("paths", {}).get("predictions", "predictions/preds.csv"))
+    pred.parent.mkdir(parents=True, exist_ok=True)
+    if not pred.exists():
+        pred.write_text("sample_id," + ",".join([f"mu_{i:03d}" for i in range(283)]) + "\n")
+    return RunResult(ok=True, info={"predictions": str(pred)})
+
+def _run_submit(cfg: Dict[str, Any]) -> RunResult:
+    # from .pipeline.submit import run as submit_run
+    # return submit_run(cfg)
+    bundle = Path(cfg.get("paths", {}).get("bundle", "artifacts/submission.zip"))
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    # Packaging is handled by scripts/package_submission.sh or Makefile; here we just echo.
+    return RunResult(ok=True, info={"bundle": str(bundle)})
+
+# -------------------------- Commands --------------------------
+
+@app.callback()
+def _version_callback(
+    version: Optional[bool] = typer.Option(
+        None, "--version", "-V", help="Show version and exit.", is_eager=True
+    )
+) -> None:
+    if version:
+        console.print(f"spectramind-v50 {__version__}")
+        raise typer.Exit(code=0)
+
+@app.command(help="Calibrate sensors/data (ADC→CDS→dark/flat→trace→phase).")
+def calibrate(
+    config_name: str = typer.Option("train", help="Hydra config name to load."),
+    override: list[str] = typer.Argument(default_factory=list, help="Hydra overrides, e.g., +env=local"),
+) -> None:
+    try:
+        cfg = _load_cfg(config_name, override)
+        _print_manifest("Calibration Config", cfg)
+        res = _run_calibrate(cfg)
+        if not res.ok:
+            _fail("Calibration failed.")
+        console.print(f"[green]✓ Calibrated[/green] → {res.info}")
+    except Exception as e:
+        _fail(str(e))
+
+@app.command(help="Train fusion model (FGS1+AIRS encoders → decoder).")
+def train(
+    config_name: str = typer.Option("train", help="Hydra config name to load."),
+    override: list[str] = typer.Argument(default_factory=list),
+) -> None:
+    try:
+        cfg = _load_cfg(config_name, override)
+        _print_manifest("Training Config", cfg)
+        res = _run_train(cfg)
+        if not res.ok:
+            _fail("Training failed.")
+        console.print(f"[green]✓ Trained[/green] → {res.info}")
+    except Exception as e:
+        _fail(str(e))
+
+@app.command(help="Predict μ/σ across 283 bins.")
+def predict(
+    config_name: str = typer.Option("predict", help="Hydra config name to load."),
+    override: list[str] = typer.Argument(default_factory=list),
+) -> None:
+    try:
+        cfg = _load_cfg(config_name, override)
+        _print_manifest("Prediction Config", cfg)
+        res = _run_predict(cfg)
+        if not res.ok:
+            _fail("Prediction failed.")
+        console.print(f"[green]✓ Predicted[/green] → {res.info}")
+    except Exception as e:
+        _fail(str(e))
+
+@app.command(help="Package submission artifacts (zip/csv/schema).")
+def submit(
+    config_name: str = typer.Option("submit", help="Hydra config name to load."),
+    override: list[str] = typer.Argument(default_factory=list),
+) -> None:
+    try:
+        cfg = _load_cfg(config_name, override)
+        _print_manifest("Submit Config", cfg)
+        res = _run_submit(cfg)
+        if not res.ok:
+            _fail("Submit failed.")
+        console.print(f"[green]✓ Submit[/green] → {res.info}")
+    except Exception as e:
+        _fail(str(e))
+```
+
+---
+
+## Minimal Hydra configs (so CLI works out of the box)
+
+```
+# src/spectramind/configs/train.yaml
+paths:
+  calib_dir: outputs/calib
+  checkpoint: artifacts/model.ckpt
+training:
+  seed: 42
+  epochs: 1
+  batch_size: 8
+  device: "cuda:0"
+
+# src/spectramind/configs/predict.yaml
+paths:
+  predictions: predictions/preds.csv
+  checkpoint: artifacts/model.ckpt
+inference:
+  device: "cuda:0"
+  batch_size: 64
+
+# src/spectramind/configs/submit.yaml
+paths:
+  bundle: artifacts/submission.zip
+  predictions_dir: predictions
+schema:
+  json_schema: schemas/submission.schema.json
+```
+
+---
+
+## Submission schema (JSON; handy for validation in CI)
+
+If you export JSON too, this enforces ID + 283 mu/sigma columns. (The Makefile already hooks `check-jsonschema` if present.)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ariel Challenge Submission",
+  "type": "object",
+  "properties": {
+    "sample_id": { "type": "string" }
+  },
+  "patternProperties": {
+    "^mu_\\d{3}$": { "type": "number" },
+    "^sigma_\\d{3}$": { "type": "number" }
+  },
+  "required": ["sample_id"],
+  "additionalProperties": false
+}
+```
+
+Save as:
+
+```
+# src/spectramind/schemas/submission.schema.json
+```
+
+---
+
+## `scripts/package_submission.sh`
+
+A safe, loud packager that supports both CSV and JSON; lines up with your Makefile’s `kaggle-package` and `kaggle-verify`.
+
+```bash
+#!/usr/bin/env bash
+# scripts/package_submission.sh
+set -Eeuo pipefail
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
+PRED_DIR="${PRED_DIR:-predictions}"
+OUT_ZIP="${OUT_ZIP:-${ARTIFACTS_DIR}/submission.zip}"
+
+mkdir -p "${ARTIFACTS_DIR}"
+
+# Collect candidate files (CSV/JSON/Parquet)
+mapfile -t FILES < <(find "${PRED_DIR}" -type f \( -name '*.csv' -o -name '*.json' -o -name '*.parquet' \) | sort)
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  echo "::error::No predictions found under ${PRED_DIR}"
+  exit 1
+fi
+
+echo ">> Packing ${#FILES[@]} files → ${OUT_ZIP}"
+rm -f "${OUT_ZIP}"
+zip -j -r "${OUT_ZIP}" "${FILES[@]}"
+
+if [[ ! -f "${OUT_ZIP}" ]]; then
+  echo "::error::Failed to create ${OUT_ZIP}"
+  exit 1
+fi
+echo "::notice::Created ${OUT_ZIP}"
+```
+
+> Don’t forget: `chmod +x scripts/package_submission.sh`
+
+---
+
+### Sanity quickstart
+
+```bash
+# Bootstrap
+make dev
+
+# Smoke the CLI (uses stub pipelines + minimal configs)
+spectramind calibrate
+spectramind train
+spectramind predict
+make kaggle
+
+# Validate bundle (lists files; JSON schema check runs if present)
+make kaggle-verify
+```
