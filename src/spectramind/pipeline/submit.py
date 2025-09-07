@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import hashlib
+import io
 import json
 import os
+import platform
 import sys
 import zipfile
 from dataclasses import dataclass
@@ -16,6 +19,18 @@ from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
 
 __all__ = ["run"]
+
+# --------------------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------------------
+
+BIN_COUNT = 283
+ID_COL = "id"
+MU_PREFIX = "mu_"
+SIGMA_PREFIX = "sigma_"
+EXPECTED_MU = [f"{MU_PREFIX}{i:03d}" for i in range(BIN_COUNT)]
+EXPECTED_SIGMA = [f"{SIGMA_PREFIX}{i:03d}" for i in range(BIN_COUNT)]
+CSV_MAX_PREVIEW_BYTES = 4096
 
 
 # ======================================================================================
@@ -56,8 +71,10 @@ def run(
     Responsibilities
     ---------------
     • Compose Hydra config (submit + io paths)
-    • Validate predictions file (shape, columns, basic numeric checks; optional JSON schema)
-    • Package predictions and manifest into a deterministic zip & emit a config snapshot
+    • Validate predictions file (shape, columns, numeric checks; optional JSON schema)
+    • Normalize CSV (string ids; numeric mu/sigma; column order)
+    • Package predictions + manifest (+ optional extras) into a *deterministic* ZIP
+    • Emit resolved config snapshot & meta beside the ZIP
     """
     payload = SubmitPayload(
         config_name=config_name,
@@ -79,20 +96,20 @@ def run(
         cfg.submit.out_zip = payload.out_zip
 
     # Resolve IO
-    preds_file = _resolve_predictions(repo_root, cfg)
-    out_zip_file = _prepare_out_zip(repo_root, cfg)
+    preds_path = _resolve_predictions(repo_root, cfg)
+    out_zip_path = _prepare_out_zip(repo_root, cfg)
 
-    # Validate predictions (fast CSV & strict column contract)
-    _validate_predictions(cfg, repo_root, preds_file, quiet=payload.quiet, strict=payload.strict)
+    # Validate predictions (CSV sniff + contract + numeric)
+    _validate_and_normalize_predictions(cfg, repo_root, preds_path, quiet=payload.quiet, strict=payload.strict)
 
     # Emit config snapshot (resolved Hydra YAML + JSON meta) next to zip
-    _emit_config_snapshot(out_zip_file, cfg, preds_file)
+    _emit_config_snapshot(out_zip_path, cfg, preds_path)
 
-    # Create zip (stable filenames; compressed)
-    _package_submission(cfg, preds_file, out_zip_file, quiet=payload.quiet)
+    # Create deterministic zip (stable timestamps, permissions, and order)
+    _package_submission(cfg, preds_path, out_zip_path, quiet=payload.quiet)
 
     if not payload.quiet:
-        sys.stderr.write(f"[submit] package ready → {out_zip_file}\n")
+        sys.stderr.write(f"[submit] package ready → {out_zip_path}\n")
 
 
 # ======================================================================================
@@ -100,7 +117,33 @@ def run(
 # ======================================================================================
 
 
-def _validate_predictions(
+def _read_csv_head(path: Path, max_bytes: int = CSV_MAX_PREVIEW_BYTES) -> str:
+    if path.suffix.lower() == ".gz":
+        with gzip.open(path, "rt", newline="") as f:
+            return f.read(max_bytes)
+    with path.open("r", newline="") as f:
+        return f.read(max_bytes)
+
+
+def _read_csv_df(path: Path):
+    try:
+        import pandas as pd  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("pandas is required for submission validation") from e
+
+    if path.suffix.lower() == ".gz":
+        return pd.read_csv(path, compression="gzip")
+    return pd.read_csv(path)
+
+
+def _write_csv_df(path: Path, df) -> None:
+    if path.suffix.lower() == ".gz":
+        df.to_csv(path, index=False, compression="gzip")
+    else:
+        df.to_csv(path, index=False)
+
+
+def _validate_and_normalize_predictions(
     cfg: DictConfig,
     repo_root: Path,
     preds_path: Path,
@@ -113,16 +156,13 @@ def _validate_predictions(
 
     # 1) Basic CSV sniff (non-empty, parseable)
     try:
-        with preds_path.open("r", newline="") as f:
-            blob = f.read(4096)
-            if not blob.strip():
-                raise ValueError("empty file")
-            sniff = csv.Sniffer().sniff(blob)
-            f.seek(0)
-            reader = csv.reader(f, dialect=sniff)
-            peek = [row for _, row in zip(range(3), reader)]
-            if not peek:
-                raise ValueError("no rows parsed")
+        blob = _read_csv_head(preds_path)
+        if not blob.strip():
+            raise ValueError("empty file")
+        sniff = csv.Sniffer().sniff(blob)
+        # sanity: try reading a couple of rows using the detected dialect
+        sample_reader = csv.reader(io.StringIO(blob), dialect=sniff)
+        _ = [row for _, row in zip(range(3), sample_reader)]
     except Exception as e:
         msg = f"[submit] basic CSV check failed for {preds_path}: {e}"
         if strict:
@@ -130,86 +170,126 @@ def _validate_predictions(
         if not quiet:
             sys.stderr.write(msg + " (continuing)\n")
 
-    # 2) Column contract & numeric sanity (use pandas for convenience)
-    try:
-        import pandas as pd  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError("pandas is required for submission validation") from e
+    # 2) Column contract & numeric sanity
+    df = _read_csv_df(preds_path)
 
-    df = pd.read_csv(preds_path)
+    # Required id column
+    if ID_COL not in df.columns:
+        raise RuntimeError(f"[submit] missing required column: '{ID_COL}'")
 
-    # Required columns
-    required_id = "id"
-    if required_id not in df.columns:
-        raise RuntimeError(f"[submit] missing required column: '{required_id}'")
+    # Collect mu/sigma columns and enforce exact match + order
+    mu_cols = sorted([c for c in df.columns if c.startswith(MU_PREFIX)])
+    sg_cols = sorted([c for c in df.columns if c.startswith(SIGMA_PREFIX)])
 
-    # Ensure exactly 283 mu_* and 283 sigma_* columns
-    mu_cols = sorted([c for c in df.columns if c.startswith("mu_")])
-    sg_cols = sorted([c for c in df.columns if c.startswith("sigma_")])
+    missing_mu = [c for c in EXPECTED_MU if c not in mu_cols]
+    extra_mu = [c for c in mu_cols if c not in EXPECTED_MU]
+    missing_sg = [c for c in EXPECTED_SIGMA if c not in sg_cols]
+    extra_sg = [c for c in sg_cols if c not in EXPECTED_SIGMA]
 
-    def _expected(prefix: str) -> list[str]:
-        return [f"{prefix}{i:03d}" for i in range(283)]
-
-    exp_mu = _expected("mu_")
-    exp_sg = _expected("sigma_")
-
-    if mu_cols != exp_mu:
-        missing = [c for c in exp_mu if c not in mu_cols]
-        extra = [c for c in mu_cols if c not in exp_mu]
+    if missing_mu or extra_mu:
         raise RuntimeError(
             "[submit] mu columns mismatch: "
-            f"missing={missing[:5]}{'...' if len(missing) > 5 else ''}, "
-            f"extra={extra[:5]}{'...' if len(extra) > 5 else ''}"
+            f"missing={missing_mu[:5]}{'...' if len(missing_mu) > 5 else ''}, "
+            f"extra={extra_mu[:5]}{'...' if len(extra_mu) > 5 else ''}"
         )
-    if sg_cols != exp_sg:
-        missing = [c for c in exp_sg if c not in sg_cols]
-        extra = [c for c in sg_cols if c not in exp_sg]
+    if missing_sg or extra_sg:
         raise RuntimeError(
             "[submit] sigma columns mismatch: "
-            f"missing={missing[:5]}{'...' if len(missing) > 5 else ''}, "
-            f"extra={extra[:5]}{'...' if len(extra) > 5 else ''}"
+            f"missing={missing_sg[:5]}{'...' if len(missing_sg) > 5 else ''}, "
+            f"extra={extra_sg[:5]}{'...' if len(extra_sg) > 5 else ''}"
         )
 
-    # id column sanity (non-null, mostly string-like; unique)
-    if df[required_id].isna().any():
+    # Reorder columns to the canonical submission layout
+    canonical_cols = [ID_COL] + EXPECTED_MU + EXPECTED_SIGMA
+    df = df[canonical_cols]
+
+    # 'id' sanity (non-null, unique, string-cast)
+    if df[ID_COL].isna().any():
         raise RuntimeError("[submit] 'id' column contains nulls")
-    if df[required_id].duplicated().any():
-        dup = df[required_id][df[required_id].duplicated()].iloc[:5].tolist()
+    if df[ID_COL].duplicated().any():
+        dup = df[ID_COL][df[ID_COL].duplicated()].iloc[:5].tolist()
         raise RuntimeError(f"[submit] 'id' column contains duplicates (e.g., {dup})")
-    # Cast to str to ensure safe CSV identity
-    df[required_id] = df[required_id].astype(str)
+    df[ID_COL] = df[ID_COL].astype(str)
 
-    # mu/sigma numeric sanity (no NaNs; finite)
-    numeric = df[mu_cols + sg_cols].apply(pd.to_numeric, errors="coerce")
-    if numeric.isna().any().any():
-        bad = numeric.columns[numeric.isna().any()].tolist()[:5]
-        raise RuntimeError(f"[submit] numeric columns contain NaN/non-numeric values (e.g., {bad})")
-    # Replace original block with numeric-cast (keeps exact column order)
-    df[mu_cols + sg_cols] = numeric
+    # Numeric sanity (no NaNs; finite; sigma >= 0)
+    import numpy as np  # local import is fine; required at runtime anyway
+    numeric = df[EXPECTED_MU + EXPECTED_SIGMA].apply(
+        _to_numeric_strict if strict else _to_numeric_lenient, errors="ignore"
+    )
 
-    # Optional JSON Schema (column-level validation can be brittle; treat as informational)
+    # Coerce object columns to numeric (both helpers above return floats/NaN)
+    numeric = numeric.apply(lambda s: _coerce_series_to_float(s))
+
+    if not np.isfinite(numeric.to_numpy(dtype="float64")).all():
+        # Identify a few offenders to help users debug
+        bad_cols = []
+        arr = numeric.to_numpy(dtype="float64")
+        for i, col in enumerate(numeric.columns):
+            col_vals = arr[:, i]
+            if not np.isfinite(col_vals).all():
+                bad_cols.append(col)
+            if len(bad_cols) >= 8:
+                break
+        raise RuntimeError(f"[submit] numeric columns contain non-finite values (e.g., {bad_cols[:8]})")
+
+    # Sigma non-negativity
+    if (numeric[EXPECTED_SIGMA] < 0).any().any():
+        if strict:
+            neg_cols = [c for c in EXPECTED_SIGMA if (numeric[c] < 0).any()]
+            raise RuntimeError(f"[submit] sigma must be ≥ 0; negatives in {neg_cols[:5]}")
+        else:
+            num_neg = int((numeric[EXPECTED_SIGMA] < 0).to_numpy().sum())
+            if not quiet:
+                sys.stderr.write(f"[submit] warning: clamping {num_neg} negative sigma values to 0 (non-strict mode)\n")
+            numeric[EXPECTED_SIGMA] = numeric[EXPECTED_SIGMA].clip(lower=0)
+
+    # Replace original numeric block (ensures exact order and dtypes)
+    df[EXPECTED_MU + EXPECTED_SIGMA] = numeric.astype("float64")
+
+    # Optional JSON Schema (informational; our checks are the source of truth)
     schema_path = repo_root / "schemas" / "submission.schema.json"
     if schema_path.exists():
         try:
             import jsonschema  # type: ignore
-            with schema_path.open("r") as f:
+
+            with schema_path.open("r", encoding="utf-8") as f:
                 submission_schema = json.load(f)
-            # Validate a minimal object capturing columns -> types, not the entire table
-            obj = {
-                "id": str(df["id"].iloc[0]) if len(df) else "",
-                # we only validate presence via pattern; numeric content already checked
-                **{c: float(df[c].iloc[0]) if len(df) else 0.0 for c in mu_cols[:1] + sg_cols[:1]},
+
+            # Validate a minimal representative instance; full tabular schema is brittle.
+            sample_obj = {
+                "id": str(df[ID_COL].iloc[0]) if len(df) else "",
+                # We just verify types via a couple of representative fields.
+                EXPECTED_MU[0]: float(df[EXPECTED_MU[0]].iloc[0]) if len(df) else 0.0,
+                EXPECTED_SIGMA[0]: float(df[EXPECTED_SIGMA[0]].iloc[0]) if len(df) else 0.0,
             }
-            jsonschema.validate(obj, submission_schema)
+            jsonschema.validate(sample_obj, submission_schema)
             if not quiet:
-                sys.stderr.write("[submit] schema present; basic sample validation passed.\n")
+                sys.stderr.write("[submit] schema present; sample validation passed.\n")
         except Exception as e:
-            # Keep the strong, explicit checks above as the source of truth
             if not quiet:
                 sys.stderr.write(f"[submit] schema validation warning: {e}\n")
 
-    # Write back normalized CSV (string ids, numeric mu/sigma) to ensure downstream stability
-    df.to_csv(preds_path, index=False)
+    # Persist normalized CSV back to the same path (stable types & order)
+    _write_csv_df(preds_path, df)
+
+
+def _to_numeric_strict(s):
+    import pandas as pd
+    out = pd.to_numeric(s, errors="coerce")
+    if out.isna().any():
+        raise RuntimeError(f"[submit] non-numeric values detected in column '{s.name}'")
+    return out
+
+
+def _to_numeric_lenient(s):
+    import pandas as pd
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _coerce_series_to_float(s):
+    import numpy as np
+    # cast to float64, preserving NaNs (handled upstream)
+    return np.asarray(s, dtype="float64")
 
 
 def _package_submission(
@@ -227,16 +307,32 @@ def _package_submission(
         "predictions": preds_file.name,  # arcname in zip
         "predictions_sha256": preds_sha256,
         "tool": "spectramind-v50",
+        "env": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+        },
         "config": {
             "out_zip": str(out_zip_file),
         },
     }
 
-    # Write zip (stable arcnames)
+    # Optional extras (configured via Hydra): list of file paths to include alongside predictions
+    extras: list[str] = []
+    try:
+        extras = list(getattr(cfg.submit, "extra_files", []))
+    except Exception:
+        extras = []
+    extra_paths = _resolve_existing_files(extras, base_dir=_find_repo_root())
+
+    # Write deterministic ZIP: fixed timestamps/permissions; sorted entries
+    files_to_add = [(preds_file, preds_file.name)] + [(p, p.name) for p in extra_paths]
+    files_to_add.sort(key=lambda x: x[1])  # sort by arcname for deterministic order
+
     with zipfile.ZipFile(out_zip_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # store predictions under basename (common Kaggle norm)
-        zf.write(preds_file, arcname=preds_file.name)
-        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+        for src, arc in files_to_add:
+            _zip_write_deterministic(zf, src, arc)
+        # manifest last (but deterministic name)
+        _zip_writestr_deterministic(zf, "manifest.json", json.dumps(manifest, indent=2))
 
     if not quiet:
         sys.stderr.write(f"[submit] wrote package: {out_zip_file}\n")
@@ -277,6 +373,7 @@ def _ensure_defaults(cfg: DictConfig) -> None:
     # DVC-/Kaggle-friendly defaults under repo
     cfg.submit.setdefault("predictions", "outputs/predictions/predictions.csv")
     cfg.submit.setdefault("out_zip", "outputs/submissions/submission.zip")
+    cfg.submit.setdefault("extra_files", [])  # optional list of extra artifacts to include
 
 
 def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
@@ -296,11 +393,10 @@ def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
 
 
 def _resolve_predictions(repo_root: Path, cfg: DictConfig) -> Path:
-    """Return absolute predictions path (ensure parent exists; file may be absent until validated)."""
+    """Return absolute predictions path; supports .csv and .csv.gz. Warn if empty."""
     raw = str(cfg.submit.predictions)
     preds = (_as_path(raw) if os.path.isabs(raw) else repo_root / raw).resolve()
     if not preds.exists():
-        # Caller raises precise error; here we only normalize
         return preds
     try:
         if preds.stat().st_size == 0:
@@ -341,12 +437,61 @@ def _emit_config_snapshot(out_zip_file: Path, cfg: DictConfig, preds_file: Path)
             "predictions": str(preds_file),
             "predictions_sha256": _sha256_of_file(preds_file) if preds_file.exists() else "",
             "out_zip": str(out_zip_file),
-            "hydra_overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
+            "hydra_overrides": _extract_hydra_overrides(cfg),
         }
         meta_json = snap_dir / "config_snapshot.json"
-        meta_json.write_text(json.dumps(meta, indent=2))
+        meta_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     except Exception as e:  # pragma: no cover
         sys.stderr.write(f"[submit] warning: failed to write config snapshot: {e}\n")
+
+
+def _extract_hydra_overrides(cfg: DictConfig) -> list[str]:
+    try:
+        # Hydra stores overrides under cfg.hydra.overrides.task (list[str]) at runtime contexts.
+        # We tolerate absence in non-Hydra entrypoints.
+        overrides = []
+        hydra_node = getattr(cfg, "hydra", None)
+        if hydra_node and hasattr(hydra_node, "overrides"):
+            ov = getattr(hydra_node, "overrides")
+            # common patterns: ov.task (list[str]) or just list-like
+            if hasattr(ov, "task"):
+                overrides = list(ov.task)
+            else:
+                try:
+                    overrides = list(ov)
+                except Exception:
+                    overrides = []
+        return overrides
+    except Exception:
+        return []
+
+
+# ======================================================================================
+# Deterministic ZIP helpers
+# ======================================================================================
+
+_FIXED_ZIP_DATE = (1980, 1, 1, 0, 0, 0)  # DOS epoch; ensures byte-for-byte reproducibility
+_FIXED_PERMS = 0o644  # rw-r--r--
+
+
+def _zip_write_deterministic(zf: zipfile.ZipFile, src: Path, arcname: str) -> None:
+    """
+    Write a file into the zip with stable timestamp/permissions.
+    """
+    data = src.read_bytes()
+    zi = zipfile.ZipInfo(filename=arcname, date_time=_FIXED_ZIP_DATE)
+    zi.compress_type = zipfile.ZIP_DEFLATED
+    # Set Unix perms in external_attr (upper 16 bits)
+    zi.external_attr = (_FIXED_PERMS & 0xFFFF) << 16
+    zf.writestr(zi, data)
+
+
+def _zip_writestr_deterministic(zf: zipfile.ZipFile, arcname: str, text: str) -> None:
+    data = text.encode("utf-8")
+    zi = zipfile.ZipInfo(filename=arcname, date_time=_FIXED_ZIP_DATE)
+    zi.compress_type = zipfile.ZIP_DEFLATED
+    zi.external_attr = (_FIXED_PERMS & 0xFFFF) << 16
+    zf.writestr(zi, data)
 
 
 # ======================================================================================
@@ -365,6 +510,17 @@ def _sha256_of_file(path: Path, chunk: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def _resolve_existing_files(paths: Iterable[str], base_dir: Path) -> list[Path]:
+    out: list[Path] = []
+    for raw in paths:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = (base_dir / raw).resolve()
+        if p.exists() and p.is_file():
+            out.append(p)
+    return out
+
+
 def _find_repo_root() -> Path:
     """
     Heuristic: start from this file, walk up until we hit a project marker.
@@ -380,7 +536,7 @@ def _find_repo_root() -> Path:
             if p.name == "src":  # /root/src/… → project root is parent
                 return p.parent
             return p
-    # Fallback: best-effort three levels up (safe for notebook contexts)
+    # Fallback: best-effort three levels up (safe for notebook/Kaggle contexts)
     return here.parents[3]
 
 
