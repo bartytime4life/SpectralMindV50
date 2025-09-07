@@ -1,21 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Event JSONL",
+  "title": "SpectraMind V50 — Event JSONL",
+  "description": "Structured log event used across CLI, pipeline, and diagnostics. One JSON object per line in events.jsonl.",
   "type": "object",
+
   "properties": {
     "ts": {
-      "type": "number"
+      "type": "number",
+      "description": "Unix timestamp (float seconds since epoch). Required for ordering and replay."
     },
     "kind": {
-      "type": "string"
+      "type": "string",
+      "description": "Categorical event type, e.g. cli_invoked, stage_start, stage_end, metric, error."
     },
     "payload": {
-      "type": "object"
+      "type": "object",
+      "description": "Event-specific payload; schema depends on kind."
+    },
+
+    "run_id": {
+      "type": "string",
+      "description": "UUID or hash linking this event to a specific run/session."
+    },
+    "config_hash": {
+      "type": "string",
+      "description": "SHA256 or short hash of Hydra/DVC config snapshot for reproducibility."
+    },
+    "level": {
+      "type": "string",
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "description": "Logging severity level."
+    },
+    "msg": {
+      "type": "string",
+      "description": "Optional human-readable message for quick inspection."
+    },
+    "lineage": {
+      "type": "object",
+      "description": "Optional lineage block linking to inputs/outputs for audit trails.",
+      "properties": {
+        "inputs": { "type": "array", "items": { "type": "string" } },
+        "outputs": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
     }
   },
-  "required": [
-    "ts",
-    "kind",
-    "payload"
-  ]
+
+  "required": ["ts", "kind", "payload"],
+  "additionalProperties": false
 }
