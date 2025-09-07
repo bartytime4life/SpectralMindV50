@@ -7,39 +7,49 @@
 #
 # Notes:
 #   • Versions pinned for stability (Kaggle/CI reproducibility).
-#   • Keep in sync with pyproject.toml / setup.cfg.
-#   • Runtime deps (torch, numpy, etc.) live in requirements.txt.
+#   • Keep in sync with pyproject.toml / setup.cfg / pre-commit.
+#   • Runtime deps (e.g., torch, numpy, pandas, polars) live in runtime files.
 # =====================================================================
 
 # --- Testing ----------------------------------------------------------
-pytest>=8.1           # unit/integration tests
-pytest-cov>=5.0       # coverage reporting (optional but common)
+pytest==8.3.3              # unit/integration tests
+pytest-cov==5.0.0          # coverage reporting
+pytest-xdist==3.6.1        # parallel test execution
+pytest-timeout==2.3.1      # fail fast on hangs
+hypothesis==6.112.0        # property-based tests (optional but powerful)
 
 # --- Linting & Style --------------------------------------------------
-ruff>=0.6.8           # fast linter (replaces flake8/isort/black)
-toml-sort>=0.23       # keep pyproject.toml sorted/stable
+ruff==0.6.9                # linter + formatter (replaces flake8/isort/black)
+toml-sort==0.23.1          # keep pyproject.toml sorted/stable
+pre-commit==3.7.1          # run linters/formatters consistently
 
 # --- Type Checking ----------------------------------------------------
-mypy>=1.11            # static type checking
-types-PyYAML          # type hints for PyYAML
-types-requests        # type hints if requests used
+mypy==1.11.2               # static typing
+types-PyYAML==6.0.12.20240808
+types-requests==2.32.0.20240907
 
 # --- JSON / Schema Validation ----------------------------------------
-check-jsonschema>=0.28
-jsonschema>=4.22
+check-jsonschema==0.28.9
+jsonschema==4.23.0
 
 # --- Data Science Utils (dev convenience) -----------------------------
-pandas>=2.2           # ensure latest DataFrame API during dev
-polars>=1.5           # optional faster DataFrame engine for CI checks
+# Keep dev pins aligned with runtime to avoid env drift during tests.
+pandas==2.2.2
+polars==0.20.31
 
 # --- CLI / Rich Output ------------------------------------------------
-rich>=13.7            # colored logs, better CLI UX
+rich==13.7.1               # colored logs, improved CLI UX
 
 # --- Docs / Diagrams --------------------------------------------------
-mkdocs>=1.6
-mkdocs-material>=9.5
-pymdown-extensions>=10.8
+mkdocs==1.6.0
+mkdocs-material==9.5.39
+pymdown-extensions==10.8.1
+# Optional MkDocs plugins (uncomment if you use them)
+# mkdocs-mermaid2-plugin==1.1.1
+# mkdocs-gen-files==0.5.0
+# mkdocs-literate-nav==0.6.1
 
-# --- Security / SBOM (optional for CI) -------------------------------
-pip-audit>=2.7
-cyclonedx-bom>=4.3
+# --- Security / SBOM --------------------------------------------------
+pip-audit==2.7.3           # Python supply-chain vuln audit
+cyclonedx-bom==4.3.12      # SBOM generation (CycloneDX)
+# bandit==1.7.9             # (optional) static security analysis of Python code
