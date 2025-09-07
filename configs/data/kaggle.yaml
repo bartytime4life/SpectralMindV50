@@ -1,9 +1,41 @@
-name: kaggle
-paths:
-  raw: data/raw
-  processed: data/processed
-splits:
-  train: 0.8
-  val: 0.2
-norm:
-  method: zscore
+# configs/data/kaggle.yaml
+# ======================================================================
+# Kaggle Data Profile — SpectraMind V50
+# ======================================================================
+# Defines dataset configuration for Kaggle kernels. This profile
+# assumes the competition dataset is mounted at:
+#   /kaggle/input/ariel-data-challenge-2025/
+#
+# Usage:
+#   python -m spectramind.train +data=kaggle +env=kaggle
+#
+# Keys:
+#   _target_        : Python path to the datamodule implementation
+#   root            : base path to Kaggle dataset mount
+#   train_csv       : training labels / metadata
+#   test_csv        : test set metadata
+#   train_star_info : training star/planet info
+#   test_star_info  : test star/planet info
+#   adc_info        : ADC calibration parameters
+#   axis_info       : Wavelength/axis metadata
+#   num_workers     : DataLoader worker count (defaults from env)
+# ======================================================================
+
+_target_: spectramind.data.datamodule.ArielDataModule
+
+root: /kaggle/input/ariel-data-challenge-2025
+train_csv: ${data.root}/train.csv
+test_csv: ${data.root}/test.csv
+train_star_info: ${data.root}/train_star_info.csv
+test_star_info: ${data.root}/test_star_info.csv
+adc_info: ${data.root}/adc_info.csv
+axis_info: ${data.root}/axis_info.parquet
+
+# Kaggle kernels don’t usually ship splits.yaml, so disable by default.
+splits: null
+
+# DataLoader settings (resolved from env/kaggle.yaml)
+num_workers: ${env.num_workers}
+batch_size: 32
+pin_memory: true
+persistent_workers: true
