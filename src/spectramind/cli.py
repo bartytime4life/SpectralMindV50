@@ -51,6 +51,7 @@ except Exception:
 from spectramind.utils.logging import get_logger
 from spectramind.utils.io import p, read_yaml, read_json, ensure_dir  # YAML optional; JSON always works
 from spectramind.train.trainer import train_from_config
+from spectramind.submit.validate import validate_csv as _validate_submission_csv  # NEW
 
 __all__ = ["app", "main"]
 
@@ -695,6 +696,53 @@ def submit_package(
         _fail(str(e))
     except Exception as e:
         _fail(f"Packaging failed: {e}")
+
+@submit_app.command("validate")  # NEW
+def submit_validate(
+    csv: Path = typer.Argument(..., exists=True, help="Predictions CSV to validate"),
+    n_bins: int = typer.Option(283, "--n-bins", help="Expected number of spectral bins per id"),
+    strict_ids: bool = typer.Option(True, "--strict-ids/--no-strict-ids", help="Enforce non-empty and unique ids"),
+    chunksize: Optional[int] = typer.Option(None, help="Validate in chunks (rows per chunk) to reduce memory"),
+    show: int = typer.Option(20, help="Show first N errors"),
+    json_out: Optional[Path] = typer.Option(None, help="Write full validation report (JSON) to this path"),
+) -> None:
+    """
+    Validate a submission CSV against schema + SpectraMind semantic checks.
+
+    Supports:
+      1) Narrow: columns ['id', 'mu', 'sigma'] where mu/sigma are JSON arrays (or Python lists).
+      2) Wide:   columns ['id'] + mu_000..mu_{n_bins-1} + sigma_000..sigma_{n_bins-1}
+    """
+    try:
+        res = _validate_submission_csv(
+            csv_path=csv,
+            n_bins=n_bins,
+            strict_ids=strict_ids,
+            chunksize=chunksize,
+        )
+        report = {
+            "ok": res.ok,
+            "n_rows": res.n_rows,
+            "n_valid": res.n_valid,
+            "n_errors": len(res.errors),
+        }
+
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(json.dumps({**report, "errors": res.errors}, indent=2), encoding="utf-8")
+
+        if res.ok:
+            _ok(f"Validation OK: {res.n_valid}/{res.n_rows} rows valid.")
+        else:
+            _warn(f"Validation failed: {len(res.errors)} errors "
+                  f"(showing first {min(show, len(res.errors))}; use --show to adjust)")
+            for e in res.errors[:show]:
+                typer.echo(f"- {e}")
+            _fail("Submission CSV is invalid.")
+    except FileNotFoundError as e:
+        _fail(str(e))
+    except Exception as e:
+        _fail(f"Validation crashed: {e}")
 
 # ======================================================================================
 # entrypoint
