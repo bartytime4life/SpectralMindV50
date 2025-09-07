@@ -1,60 +1,104 @@
 flowchart LR
+  %% -----------------------------
+  %% RAW INPUTS
+  %% -----------------------------
   subgraph Raw["Raw Inputs"]
     A[FGS1 Time-Series]:::raw
     B[AIRS Spectra]:::raw
   end
 
+  %% -----------------------------
+  %% CALIBRATION CHAIN (branched)
+  %% -----------------------------
   subgraph Calib["Calibration Chain"]
-    C1[ADC] --> C2[Dark]
-    C2 --> C3[Flat]
-    C3 --> C4[CDS]
-    C4 --> C5[Photometry]
-    C5 --> C6[Trace]
-    C6 --> C7[Phase/Align]
+    direction LR
+
+    %% Common early steps (readout/ADC -> CDS)
+    C_ADC[ADC (bias/gain convert)] --> C_CDS[CDS (readout differencing)]
+
+    %% Branch: FGS1-specific
+    C_CDS --> C_DARK_F[Dark (FGS1)]
+    C_DARK_F --> C_PHOT[Photometry / Detrend]
+    C_PHOT --> C_PHASE_F[Phase / Align (FGS1)]
+
+    %% Branch: AIRS-specific
+    C_CDS --> C_DARK_A[Dark (AIRS)]
+    C_DARK_A --> C_FLAT[Flat-Field (AIRS)]
+    C_FLAT --> C_TRACE[Trace / Wavelength Solution]
+    C_TRACE --> C_PHASE_A[Phase / Align (AIRS)]
   end
 
+  %% -----------------------------
+  %% MODEL-READY TENSORS
+  %% -----------------------------
   subgraph Tensors["Model-Ready Tensors (DVC-tracked)"]
     T1[(FGS1 tensors)]
     T2[(AIRS tensors)]
   end
 
+  %% -----------------------------
+  %% ENCODERS
+  %% -----------------------------
   subgraph Encoders["Dual Encoders"]
     E1[FGS1 Encoder<br/>(SSM/Mamba, transit-aware)]:::enc
     E2[AIRS Encoder<br/>(CNN/GNN, spectral)]:::enc
   end
 
+  %% -----------------------------
+  %% FUSION + DECODER
+  %% -----------------------------
   subgraph Fusion["Fusion + Decoder"]
     F1[Cross-modal Fusion]:::fusion
     D1[Heteroscedastic Decoder<br/>per-bin μ, σ (283)]:::dec
   end
 
+  %% -----------------------------
+  %% OUTPUTS
+  %% -----------------------------
   subgraph Outputs["Outputs"]
     O1[(μ_0..μ_282)]
     O2[(σ_0..σ_282)]
   end
 
+  %% -----------------------------
+  %% CONSTRAINTS
+  %% -----------------------------
   subgraph Constraints["Symbolic / Physics Constraints"]
    S1[Non-negativity]
    S2[Smoothness]
    S3[Band Coherence]
   end
 
-  A --> C1
-  B --> C1
-  C7 --> T1
-  C7 --> T2
+  %% -----------------------------
+  %% WIRES
+  %% -----------------------------
+  %% Raw → Calibration (common ADC/CDS)
+  A --> C_ADC
+  B --> C_ADC
+
+  %% Calibration → Tensors
+  C_PHASE_F --> T1
+  C_PHASE_A --> T2
+
+  %% Tensors → Encoders
   T1 --> E1
   T2 --> E2
+
+  %% Encoders → Fusion → Decoder → Outputs
   E1 --> F1
   E2 --> F1
   F1 --> D1
   D1 --> O1
   D1 --> O2
 
+  %% Constraints → Decoder (dashed, labeled)
   S1 -. penalize .-> D1
   S2 -. penalize .-> D1
   S3 -. penalize .-> D1
 
+  %% -----------------------------
+  %% STYLES
+  %% -----------------------------
   classDef raw fill:#0b3d91,stroke:#0b3d91,color:#fff;
   classDef enc fill:#0a6,stroke:#0a6,color:#fff;
   classDef fusion fill:#a60,stroke:#a60,color:#fff;
