@@ -1,0 +1,15 @@
+flowchart TB
+  R[raw/]:::raw -->|dvc stage: calibrate| C[calibrated/]:::cal
+  C -->|dvc stage: preprocess| P[processed/tensors/]:::proc
+  P -->|dvc stage: train| M[artifacts/model.ckpt]:::art
+  P -->|dvc stage: train| L[artifacts/metrics.json]:::art
+  M -->|dvc stage: predict| Y[artifacts/preds/{mu.csv, sigma.csv}]:::art
+  Y -->|dvc stage: diagnose| D[artifacts/reports/diagnostics/]:::diag
+  Y -->|dvc stage: submit| S[submission/submission.csv]:::sub
+
+  classDef raw fill:#0b3d91,stroke:#0b3d91,color:#fff;
+  classDef cal fill:#1b6,stroke:#1b6,color:#fff;
+  classDef proc fill:#1aa,stroke:#1aa,color:#fff;
+  classDef art fill:#666,stroke:#666,color:#fff;
+  classDef diag fill:#a60,stroke:#a60,color:#fff;
+  classDef sub fill:#0a6,stroke:#0a6,color:#fff;
