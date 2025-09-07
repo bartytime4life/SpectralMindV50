@@ -1,81 +1,121 @@
 # ADR 0002 — Physics-Informed Losses
 
-**Status:** Proposed  
-**Date:** 2025-09-06  
-**Context:** NeurIPS 2025 Ariel Data Challenge — SpectraMind V50 repository
+* **Status:** ✅ Accepted
+* **Date:** 2025-09-06
+* **Project:** SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge
+* **Tags:** loss, physics-informed, reproducibility, exoplanet, astrophysics
+* **Owners:** ML/Physics WG (Lead: Andy Barta), Spectroscopy Science Council
 
 ---
 
-## 🎯 Decision
+## 1. Context
 
-We introduce **physics-informed composite loss functions** for the SpectraMind V50 pipeline.  
-These losses combine the baseline **Gaussian Log-Likelihood (GLL)** (competition metric) with **domain-specific priors** enforcing physical plausibility of exoplanet spectra.
+The NeurIPS 2025 Ariel Data Challenge requires predicting **283-bin transmission spectra (μ/σ)** with calibrated uncertainties.
 
----
+* The official metric is **Gaussian Log-Likelihood (GLL)**, with the **FGS1 bin weighted \~58×** relative to others.
+* Prior challenges (2024) showed leaderboard failures when models were **overconfident** or produced **physically invalid spectra** (negative depths, jagged noise).
+* Our repository design explicitly supports modular Hydra configs under `configs/loss/`.
+* Physics-informed priors (smoothness, positivity, coherence) are expected to improve generalization and credibility of outputs.
 
-## 🔍 Context
-
-- The Ariel challenge requires predicting **283-bin transmission spectra (μ/σ)** with well-calibrated uncertainties:contentReference[oaicite:0]{index=0}.  
-- The metric is GLL, heavily weighted on the **FGS1 channel (~58×)**:contentReference[oaicite:1]{index=1}.  
-- Prior challenges (2024) showed that **overconfident predictions** are penalized and that **physically valid constraints** (smoothness, positivity, coherence) improve generalization:contentReference[oaicite:2]{index=2}.  
-- Our repository design explicitly supports **modular loss configs** under `configs/loss/`:contentReference[oaicite:3]{index=3}.
-
-To outperform leaderboard baselines, we must **inject astrophysical priors** into training.
+Without these constraints, models may optimize for Kaggle score but yield **scientifically implausible spectra**.
 
 ---
 
-## 📐 Decision Details
+## 2. Decision
 
-We define a **composite physics-informed loss**:
+We introduce a **composite physics-informed loss**:
 
-\[
-\mathcal{L} = \mathcal{L}_{GLL} + \lambda_{smooth} \mathcal{L}_{smooth} + \lambda_{nonneg} \mathcal{L}_{nonneg} + \lambda_{band} \mathcal{L}_{band} + \lambda_{calib} \mathcal{L}_{calib}
-\]
+$$
+\mathcal{L} = \mathcal{L}_{GLL}
++ \lambda_{smooth} \mathcal{L}_{smooth}
++ \lambda_{nonneg} \mathcal{L}_{nonneg}
++ \lambda_{band} \mathcal{L}_{band}
++ \lambda_{calib} \mathcal{L}_{calib}
+$$
 
-- **\(\mathcal{L}_{GLL}\)** — Gaussian Log-Likelihood baseline:contentReference[oaicite:4]{index=4}.
-- **\(\mathcal{L}_{smooth}\)** — Penalizes high curvature in spectra (encourages broad molecular features:contentReference[oaicite:5]{index=5}).
-- **\(\mathcal{L}_{nonneg}\)** — Enforces non-negative transit depths (physical constraint: no negative absorption).
-- **\(\mathcal{L}_{band}\)** — Promotes **band coherence** across contiguous wavelength ranges (e.g. H₂O, CO₂ features:contentReference[oaicite:6]{index=6}).
-- **\(\mathcal{L}_{calib}\)** — Optional calibration loss aligning AIRS with FGS1 baseline (prevents cross-channel inconsistency:contentReference[oaicite:7]{index=7}).
+### Components
 
-All weights \(\lambda\) are configurable in `configs/loss/composite.yaml`.
+* **$\mathcal{L}_{GLL}$** — baseline Gaussian log-likelihood (competition metric).
+* **$\mathcal{L}_{smooth}$** — penalizes excessive curvature in spectra (encourages broad molecular features).
+* **$\mathcal{L}_{nonneg}$** — enforces non-negative transit depths (no negative absorption).
+* **$\mathcal{L}_{band}$** — encourages **band coherence** across contiguous bins for molecular signatures (H₂O, CO₂, CH₄).
+* **$\mathcal{L}_{calib}$** — cross-channel calibration loss aligning AIRS with FGS1 to avoid inconsistency.
 
----
-
-## ✅ Consequences
-
-**Pros:**
-- Improves leaderboard robustness under **OOD regimes**:contentReference[oaicite:8]{index=8}.  
-- Encourages **scientifically credible spectra** (smooth, positive, molecularly coherent).  
-- Fully modular — losses can be toggled or tuned via Hydra configs:contentReference[oaicite:9]{index=9}.  
-- Keeps alignment with Kaggle reproducibility and DVC pipeline:contentReference[oaicite:10]{index=10}.
-
-**Cons:**
-- Risk of underfitting if priors are too strong.  
-- Requires careful λ-tuning (sweeps increase compute).  
-- Must document scientific justification for each prior to avoid leaderboard over-engineering.
+All λ hyperparameters are tunable in `configs/loss/composite.yaml`.
 
 ---
 
-## 📂 Implementation
+## 3. Architecture
 
-- Add to `src/spectramind/models/losses.py`: physics-informed loss terms.  
-- YAML configs under `configs/loss/`:  
-  - `smoothness.yaml`  
-  - `nonneg.yaml`  
-  - `band_coherence.yaml`  
-  - `calibration.yaml`  
-  - `composite.yaml` (master composition).  
-- Log each loss component separately in JSONL and W&B:contentReference[oaicite:11]{index=11}.  
-- Add validation plots in diagnostics (FFT/UMAP + smoothness checks:contentReference[oaicite:12]{index=12}).
+```mermaid
+flowchart TD
+  A[GLL baseline (competition metric)] --> L[Composite Loss]
+  B[Smoothness prior] --> L
+  C[Non-negativity prior] --> L
+  D[Band coherence prior] --> L
+  E[Calibration prior (FGS1↔AIRS)] --> L
+  L --> F[Backpropagation → Model update]
+```
+
+* Each loss lives in `src/spectramind/losses/*.py`.
+* Configured via Hydra (`configs/loss/*.yaml`).
+* Logged separately in JSONL, W\&B, and diagnostics.
 
 ---
 
-## 📖 References
+## 4. Consequences
 
-- NeurIPS 2025 Ariel Challenge overview:contentReference[oaicite:13]{index=13}  
-- Lessons from 2024 challenge:contentReference[oaicite:14]{index=14}  
-- SpectraMind repository design:contentReference[oaicite:15]{index=15}:contentReference[oaicite:16]{index=16}  
-- Recent Nature spectroscopy papers (JWST, WASP-39b, SO₂ detection):contentReference[oaicite:17]{index=17}
+### ✅ Pros
+
+* Improves leaderboard robustness under **OOD regimes**.
+* Produces **scientifically credible spectra** (smooth, positive, coherent).
+* Modular: priors can be toggled on/off, tuned, or ablated via Hydra configs.
+* Aligned with reproducibility (DVC, Hydra, CI/CD).
+
+### ⚠️ Cons
+
+* Over-regularization risk → underfit spectra.
+* Requires λ sweeps (adds compute).
+* Must justify priors scientifically (avoid leaderboard over-engineering).
+
+---
+
+## 5. Implementation Plan
+
+1. **Loss terms** → `src/spectramind/losses/{smoothness,nonneg,band_coherence,calibration,composite}.py`.
+2. **Hydra configs** → `configs/loss/{smoothness.yaml,nonneg.yaml,band_coherence.yaml,calibration.yaml,composite.yaml}`.
+3. **Logging** → per-component loss values in JSONL + W\&B.
+4. **Diagnostics** → FFT/UMAP checks for smoothness & coherence.
+5. **Validation** → ablation runs to verify incremental contribution of each prior.
+
+---
+
+## 6. Risks & Mitigations
+
+| Risk                                        | Mitigation                                                    |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| Over-constraining leads to underfit         | Start with small λ, increase gradually; perform ablations.    |
+| Scientific overfitting to challenge dataset | Validate against synthetic OOD datasets (random atmospheres). |
+| Compute cost of sweeps                      | Use early stopping + Bayesian search for λ tuning.            |
+| Calibration mismatch (FGS1/AIRS)            | Regularize with weight annealing schedule.                    |
+
+---
+
+## 7. Compliance Gates (CI)
+
+* [ ] Composite loss unit tests (numerical stability, nonneg enforcement).
+* [ ] Each prior independently toggleable via Hydra.
+* [ ] JSONL logs include per-loss breakdown.
+* [ ] Diagnostic plots generated in `artifacts/reports/`.
+* [ ] Kaggle runtime guardrails ensure no internet calls during training.
+
+---
+
+## 8. References
+
+* NeurIPS 2025 Ariel Challenge docs
+* Lessons from 2024 challenge (smoothness + nonnegativity helped generalization)
+* SpectraMind repo design: ADR 0001 (Hydra+DVC), ADR 0003 (CI↔CUDA parity)
+* Recent Nature spectroscopy papers (JWST WASP-39b, SO₂ detection, CO₂ absorption)
 
 ---
