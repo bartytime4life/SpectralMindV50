@@ -1,1 +1,47 @@
-weight: 0.1
+# configs/loss/calibration.yaml
+# ----------------------------------------------------------------------
+# Calibration Loss — SpectraMind V50
+# ----------------------------------------------------------------------
+# Penalizes miscalibrated uncertainties from the heteroscedastic decoder.
+# Combines three optional components:
+#   - variance calibration   (σ² vs empirical residuals)
+#   - coverage calibration   (Gaussian CI coverage vs target)
+#   - ECE-style calibration  (empirical vs nominal quantile coverage)
+#
+# Enable by adding to your Hydra train config:
+#   python -m spectramind.train +loss=calibration
+#
+# Keys correspond to CalibrationLoss arguments:
+#   _target_: fully qualified class path
+#   var_lambda:   weight for variance calibration penalty
+#   cover_lambda: weight for coverage calibration penalty
+#   ece_lambda:   weight for ECE-style penalty
+#   alpha:        miscoverage rate for coverage calibration (target=1-α)
+#   fgs1_weight:  up-weight factor for bin 0 (FGS1 channel)
+#   eps:          numerical stability epsilon
+#   var_normalization: normalization mode for variance residual
+#   ece_bins:     number of quantile bins for ECE surrogate
+# ----------------------------------------------------------------------
+
+_target_: spectramind.losses.calibration.CalibrationLoss
+
+# Main switches (set ≥0.0; 0 disables term)
+var_lambda: 1.0e-3         # encourage σ² ≈ (μ - y)²
+cover_lambda: 0.0          # target coverage of Gaussian CI
+ece_lambda: 0.0            # ECE-style binning of standardized residuals
+
+# Coverage calibration settings
+alpha: 0.1                 # 90% nominal CI (1 - alpha)
+
+# FGS1 weighting (bin 0 importance)
+fgs1_weight: 58.0
+
+# Numerical stability
+eps: 1.0e-8
+
+# Normalization mode for variance residuals
+# Options: ["none", "per_bin", "per_batch"]
+var_normalization: "none"
+
+# Quantile bins for ECE penalty
+ece_bins: 10
