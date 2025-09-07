@@ -362,7 +362,7 @@ jobs:
         run: sha256sum -c SHA256SUMS.txt
 
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@v1.10.3
+        uses: pypa/gh-action-pypi-publish@v1.13.0
         with:
           repository-url: https://test.pypi.org/legacy/
           user: __token__
@@ -386,7 +386,7 @@ jobs:
         run: sha256sum -c SHA256SUMS.txt
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.10.3
+        uses: pypa/gh-action-pypi-publish@v1.13.0
         with:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
