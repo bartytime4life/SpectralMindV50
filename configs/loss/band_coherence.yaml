@@ -1,28 +1,30 @@
 # configs/loss/band_coherence.yaml
-# ----------------------------------------------------------------------
+# ======================================================================
 # Band Coherence Loss — SpectraMind V50
-# ----------------------------------------------------------------------
-# Encourages spectral smoothness and physical plausibility across
-# neighboring wavelength bins by penalizing incoherent jumps in μ/σ.
+# ======================================================================
+# Penalizes incoherent jumps across adjacent wavelength bins in μ/σ
+# predictions, enforcing physically plausible spectral structure.
 #
-# This config is designed to be merged into training configs via Hydra,
-# e.g.:
+# Usage:
 #   python -m spectramind.train +loss=band_coherence
 #
 # Keys:
-#   _target_: Python path to the loss implementation
-#   weight:   scalar multiplier for this term
-#   mode:     which coherence metric to apply ("l2", "cosine", etc.)
-#   window:   neighborhood size (in bins) for local coherence
-#   normalize: whether to normalize penalty by variance magnitude
-# ----------------------------------------------------------------------
+#   _target_     : Python path to the loss implementation
+#   weight       : scalar multiplier for this regularizer
+#   mode         : coherence metric ("l2", "cosine", "corr")
+#   window       : sliding window size (in bins)
+#   normalize    : normalize penalty by variance magnitude
+#   reduction    : aggregation across batch ("mean", "sum", "none")
+#   log_histograms: whether to log coherence statistics per epoch
+# ======================================================================
 
 _target_: spectramind.losses.band_coherence.BandCoherenceLoss
 
-weight: 1.0           # contribution to total loss
-mode: "l2"            # ["l2", "cosine", "corr"]
-window: 5             # sliding window size for coherence evaluation
-normalize: true       # normalize penalties for scale-invariance
+weight: 0.05           # relative contribution to total composite loss
+mode: "l2"             # ["l2", "cosine", "corr"]
+window: 7              # number of neighboring bins for local coherence
+normalize: true        # enforce scale-invariance
+reduction: "mean"      # ["mean", "sum", "none"]
 
 # Debug/diagnostics
-log_histograms: false # optionally log coherence stats per epoch
+log_histograms: false  # set true to log per-epoch coherence histograms
