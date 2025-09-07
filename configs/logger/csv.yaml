@@ -1,1 +1,35 @@
-path: ${env.log_dir}/metrics.csv
+# configs/logger/csv.yaml
+# ----------------------------------------------------------------------
+# CSV Logger — SpectraMind V50
+# ----------------------------------------------------------------------
+# Hydra config for experiment tracking with CSVLogger.
+# Produces per-run CSVs of metrics under logs_dir/version_x/metrics.csv
+#
+# Usage:
+#   python -m spectramind.train logger=csv
+#
+# References:
+#   - PyTorch Lightning CSVLogger
+#   - SpectraMind V50 design: reproducible lightweight logging:contentReference[oaicite:0]{index=0}
+# ----------------------------------------------------------------------
+
+_target_: pytorch_lightning.loggers.CSVLogger
+
+# Root directory where logs will be stored (relative or absolute)
+save_dir: "./logs"
+
+# Experiment name (subfolder under save_dir)
+# Typically set to match Hydra job name for clarity
+name: "spectramind"
+
+# Versioning: integer or "None"
+# - int   → use fixed version (e.g. 0, 1, 2…)
+# - null  → auto-increment (recommended)
+version: null
+
+# Prefix applied to metric keys in the CSV
+prefix: ""
+
+# Notes:
+# - Output path structure: {save_dir}/{name}/version_{version}/metrics.csv
+# - Kaggle/CI safe: no external services, local files only.
