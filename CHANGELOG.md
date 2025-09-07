@@ -1,7 +1,3 @@
-Here’s a **CHANGELOG.md** scaffold for your repo that follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions and semantic versioning. I aligned it with your SpectraMind V50 workflow (VERSION file, pyproject.toml, ADR governance).
-
----
-
 # 📜 Changelog — SpectraMind V50
 
 All notable changes to this project will be documented here.
@@ -65,9 +61,3 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 * ADR system bootstrapped (`ADR/`).
 
 ---
-
-Would you like me to also add a **GitHub Actions workflow (`.github/workflows/release.yml`)** that automatically:
-
-1. Reads `VERSION`
-2. Updates CHANGELOG on tag
-3. Publishes release notes with artifacts (Docker, Kaggle submission package)?
