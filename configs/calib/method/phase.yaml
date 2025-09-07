@@ -1,2 +1,26 @@
-# phase parameters
-enabled: true
+# configs/calib/method/phase.yaml
+# ======================================================================
+# Phase Alignment Calibration — SpectraMind V50
+# ======================================================================
+# Aligns calibrated time-series (FGS1 + AIRS) into a common phase grid
+# relative to the transit midpoint. This ensures consistent binning
+# across channels and observations.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib.method=phase
+#
+# Keys:
+#   _target_ : Python path to the phase calibration implementation
+#   n_bins   : number of bins for phase-folding
+#   center   : definition of phase zero ("mid_transit", "first_contact")
+#   wrap     : whether to wrap phases into [-0.5, 0.5]
+#   validate : run consistency checks on phase coverage
+# ======================================================================
+
+_target_: spectramind.pipeline.calibrate.methods.PhaseCalibration
+
+n_bins: 200             # number of bins for phase folding
+center: "mid_transit"   # phase zero definition
+wrap: true              # wrap to [-0.5, 0.5]
+validate: true          # ensure full coverage & no NaNs
+log_level: INFO
