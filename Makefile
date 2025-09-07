@@ -1,10 +1,17 @@
 # -----------------------------------------------------------------------------
-# SpectraMind V50 — Mission-grade Makefile
+# SpectraMind V50 — Mission-grade Makefile (Upgraded)
 # -----------------------------------------------------------------------------
 # Shell safety
 SHELL := /usr/bin/env bash
 .ONESHELL:
-.SHELLFLAGS := -eo pipefail -c
+.SHELLFLAGS := -Eeuo pipefail -c
+
+# Colors (friendly in CI too)
+C_RESET := \033[0m
+C_INFO  := \033[36m
+C_OK    := \033[32m
+C_WARN  := \033[33m
+C_ERR   := \033[31m
 
 # Python / package
 PKG        ?= spectramind
@@ -15,9 +22,14 @@ PIP        := $(VENV_BIN)/pip
 PYTHON     := $(VENV_BIN)/python
 PRECOMMIT  := $(VENV_BIN)/pre-commit
 
+# Optional: load .env into environment (no error if missing)
+ifneq ("$(wildcard .env)","")
+  export $(shell sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env)
+endif
+
 # DVC
-DVC_REMOTE ?= localcache
-DVC_REMOTE_PATH ?= ./dvc-remote
+DVC_REMOTE       ?= localcache
+DVC_REMOTE_PATH  ?= ./dvc-remote
 
 # Release & versioning
 VERSION_FILE ?= VERSION
@@ -25,40 +37,47 @@ TAG          ?=
 GPG_SIGN     ?= 0
 TAG_MSG      ?= "Release $(TAG)"
 
-# Misc
-export PYTHONHASHSEED = 0
-ARTIFACTS_DIR := artifacts
-
 # Kaggle bundle
+ARTIFACTS_DIR     ?= artifacts
 SUBMISSION_DIR    ?= $(ARTIFACTS_DIR)
 SUBMISSION_ZIP    ?= $(SUBMISSION_DIR)/submission.zip
 SUBMISSION_SCHEMA ?= schemas/submission.schema.json
 
+# Docker
+IMAGE_NAME        ?= spectramind-v50
+IMAGE_TAG         ?= local
+INSTALL_EXTRAS    ?= gpu,dev   # must match pyproject extras
+DOCKER_BUILDKIT   ?= 1
+GPU_FLAG          ?= --gpus all
+
+# Misc
+export PYTHONHASHSEED = 0
 .DEFAULT_GOAL := help
 
 # -----------------------------------------------------------------------------
 # Phony targets
 # -----------------------------------------------------------------------------
-.PHONY: help env ensure-venv ensure-tools dev precommit lint format type test check \
-        docs docs-serve \
+.PHONY: help env ensure-venv ensure-tools dev precommit lint format type test \
+        coverage check docs docs-serve \
         train calibrate predict submit \
         dvc-setup dvc-repro dvc-push dvc-pull \
-        sbom pip-audit trivy scan \
+        sbom pip-audit trivy scan licenses \
         kaggle-package kaggle-verify kaggle-clean kaggle \
+        docker-build docker-build-cpu docker-run docker-shell \
         version tag push-tag release bump \
-        clean distclean ci
+        diagrams clean distclean ci
 
 # -----------------------------------------------------------------------------
 # Help
 # -----------------------------------------------------------------------------
 help:
-	@awk 'BEGIN{FS=":.*##"; printf "\n\033[1mAvailable targets\033[0m\n"} \
-	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*##"; printf "\n$(C_INFO)Available targets$(C_RESET)\n"} \
+	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  $(C_INFO)%-22s$(C_RESET) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 # -----------------------------------------------------------------------------
 # Environment bootstrapping
 # -----------------------------------------------------------------------------
-env: ensure-venv ensure-tools ## Create .venv and install dev tools (fast if uv is available)
+env: ensure-venv ensure-tools ## Create .venv and install dev tools (fast if uv/rye exists)
 
 ensure-venv: ## Create virtualenv if missing
 	@if [ ! -d "$(VENV)" ]; then \
@@ -66,7 +85,7 @@ ensure-venv: ## Create virtualenv if missing
 	  $(PY) -m venv $(VENV); \
 	fi
 
-ensure-tools: ensure-venv ## Install dev dependencies and tools
+ensure-tools: ensure-venv ## Install dev dependencies and tools (prefers uv, falls back to pip)
 	@if command -v uv >/dev/null 2>&1; then \
 	  echo ">> Using uv for fast installs"; \
 	  uv pip install --system --python $(PYTHON) -U pip wheel || true; \
@@ -75,12 +94,11 @@ ensure-tools: ensure-venv ## Install dev dependencies and tools
 	  $(PIP) install -U pip wheel; \
 	  $(PIP) install -e . -r requirements-dev.txt; \
 	fi
-	@# install optional extras if present
 	@if [ -f requirements-kaggle.txt ]; then $(PIP) install -r requirements-kaggle.txt || true; fi
-	@# pre-commit hooks
 	$(PRECOMMIT) install || true
+	@echo "$(C_OK)Env ready$(C_RESET)"
 
-dev: env precommit ## Setup local dev env & install pre-commit
+dev: env precommit ## Setup local dev env & run pre-commit (once)
 
 precommit: ## Run pre-commit hooks on all files
 	$(PRECOMMIT) run --all-files
@@ -88,7 +106,7 @@ precommit: ## Run pre-commit hooks on all files
 # -----------------------------------------------------------------------------
 # Code quality
 # -----------------------------------------------------------------------------
-lint: ## Lint (Ruff, TOML sort check)
+lint: ## Lint (Ruff + TOML sort)
 	$(VENV_BIN)/ruff check src tests
 	$(VENV_BIN)/ruff format --check src tests || true
 	$(VENV_BIN)/toml-sort --check pyproject.toml || true
@@ -102,6 +120,10 @@ type: ## Type-check (mypy)
 test: ## Run tests (pytest -q)
 	$(VENV_BIN)/pytest -q
 
+coverage: ## Run tests with coverage HTML report
+	$(VENV_BIN)/pytest -q --cov=$(PKG) --cov-report=term --cov-report=html:$(ARTIFACTS_DIR)/coverage
+	@echo "::notice::Coverage HTML -> $(ARTIFACTS_DIR)/coverage/index.html"
+
 check: precommit lint type test ## Full local gate: pre-commit + lint + type + tests
 
 # -----------------------------------------------------------------------------
@@ -110,7 +132,7 @@ check: precommit lint type test ## Full local gate: pre-commit + lint + type + t
 docs: ## Build docs (MkDocs)
 	$(VENV_BIN)/mkdocs build -q
 
-docs-serve: ## Serve docs locally (MkDocs)
+docs-serve: ## Serve docs locally (MkDocs @ http://0.0.0.0:8000)
 	$(VENV_BIN)/mkdocs serve -a 0.0.0.0:8000
 
 # -----------------------------------------------------------------------------
@@ -135,6 +157,7 @@ dvc-setup: ## Initialize DVC and default remote
 	$(VENV_BIN)/dvc init -q || true
 	mkdir -p "$(DVC_REMOTE_PATH)"
 	$(VENV_BIN)/dvc remote add -d $(DVC_REMOTE) "$(DVC_REMOTE_PATH)" 2>/dev/null || true
+	@echo "::notice::DVC remote '$(DVC_REMOTE)' -> $(DVC_REMOTE_PATH)"
 
 dvc-repro: ## Reproduce DVC pipeline
 	$(VENV_BIN)/dvc repro
@@ -148,32 +171,39 @@ dvc-pull: ## Pull DVC-tracked data from remote
 # -----------------------------------------------------------------------------
 # Security / Supply Chain
 # -----------------------------------------------------------------------------
-sbom: ## Generate SBOM (CycloneDX via Syft or Python fallback)
+licenses: ## Export 3rd-party license manifest (pip-licenses)
+	@mkdir -p $(ARTIFACTS_DIR)
+	@if command -v $(VENV_BIN)/pip-licenses >/dev/null 2>&1; then \
+	  $(VENV_BIN)/pip-licenses --format=json --with-authors --with-urls > $(ARTIFACTS_DIR)/licenses.json; \
+	  echo "::notice::Licenses -> $(ARTIFACTS_DIR)/licenses.json"; \
+	else \
+	  echo "::warning::pip-licenses not installed (add to requirements-dev.txt)"; \
+	fi
+
+sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
 	mkdir -p $(ARTIFACTS_DIR)
 	if command -v syft >/dev/null 2>&1; then \
 	  syft packages dir:. -o cyclonedx-json > $(ARTIFACTS_DIR)/sbom.json; \
-	elif $(PYTHON) -c "import cyclonedx_py; print(1)" >/dev/null 2>&1; then \
-	  echo "::warning::syft not found; using CycloneDX Python fallback"; \
-	  $(PIP) install cyclonedx-bom >/dev/null 2>&1 || true; \
-	  cyclonedx-bom -o $(ARTIFACTS_DIR)/sbom.json || true; \
+	elif command -v $(VENV_BIN)/cyclonedx-bom >/dev/null 2>&1; then \
+	  $(VENV_BIN)/cyclonedx-bom -o $(ARTIFACTS_DIR)/sbom.json || true; \
 	else \
-	  echo "::warning::No SBOM tool available; skipping SBOM generation."; \
+	  echo "::warning::No SBOM tool available; skipping SBOM."; \
 	fi
-	@echo "::notice::SBOM → $(ARTIFACTS_DIR)/sbom.json"
+	@echo "::notice::SBOM -> $(ARTIFACTS_DIR)/sbom.json"
 
 pip-audit: ## Audit Python deps (pip-audit)
 	$(VENV_BIN)/pip-audit -r requirements-dev.txt || true
 	if [ -f requirements-kaggle.txt ]; then $(VENV_BIN)/pip-audit -r requirements-kaggle.txt || true; fi
 
-trivy: ## Scan repo & Dockerfile (Trivy; requires Docker + Trivy)
+trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	if command -v trivy >/dev/null 2>&1; then \
 	  trivy fs --exit-code 0 --severity HIGH,CRITICAL . || true; \
-	  if [ -f Dockerfile ]; then trivy config --exit-code 0 . || true; fi; \
+	  trivy config --exit-code 0 . || true; \
 	else \
-	  echo "Trivy not installed; skipping scan."; \
+	  echo "::warning::Trivy not installed; skipping scan."; \
 	fi
 
-scan: pip-audit sbom trivy ## Run all local security scans
+scan: pip-audit sbom trivy licenses ## Run all local security scans
 
 # -----------------------------------------------------------------------------
 # Kaggle packaging (submission.zip -> artifacts/submission.zip)
@@ -184,20 +214,20 @@ kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
 	  echo ">> Using project packaging script"; \
 	  bash scripts/package_submission.sh || exit 1; \
 	else \
-	  echo ">> Fallback packaging: looking for outputs"; \
-	  set -euo pipefail; \
+	  echo ">> Fallback packaging: collecting outputs"; \
+	  set -Eeuo pipefail; \
 	  files=""; \
 	  for f in outputs/* predictions/*; do \
 	    case "$$f" in *.csv|*.parquet|*.json) [ -e "$$f" ] && files="$$files $$f" ;; esac; \
 	  done; \
 	  if [ -z "$$files" ]; then \
-	    echo "::error::No output files found for Kaggle bundle. Provide scripts/package_submission.sh or ensure outputs exist."; \
+	    echo "::error::No output files found. Provide scripts/package_submission.sh or produce outputs."; \
 	    exit 1; \
 	  fi; \
 	  zip -j -r "$(SUBMISSION_ZIP)" $$files; \
 	fi
 	@if [ ! -f "$(SUBMISSION_ZIP)" ]; then \
-	  echo "::error::Expected bundle missing: $(SUBMISSION_ZIP)"; exit 1; \
+	  echo "::error::Missing bundle: $(SUBMISSION_ZIP)"; exit 1; \
 	else \
 	  echo "::notice::Kaggle bundle created: $(SUBMISSION_ZIP)"; \
 	fi
@@ -231,6 +261,53 @@ kaggle-clean: ## Remove local Kaggle bundle
 kaggle: kaggle-package kaggle-verify ## Package + verify submission
 
 # -----------------------------------------------------------------------------
+# Diagrams (Mermaid CLI, optional)
+# -----------------------------------------------------------------------------
+diagrams: ## Render Mermaid diagrams in assets/diagrams to PNG+SVG (requires mmdc)
+	@if ! command -v mmdc >/dev/null 2>&1; then \
+	  echo "::warning::Mermaid CLI (mmdc) not found; skipping diagrams."; \
+	else \
+	  mkdir -p assets/diagrams/rendered; \
+	  for m in assets/diagrams/*.mmd; do \
+	    [ -e "$$m" ] || continue; \
+	    base="$$(basename "$$m" .mmd)"; \
+	    mmdc -i "$$m" -o "assets/diagrams/rendered/$${base}.png"; \
+	    mmdc -i "$$m" -o "assets/diagrams/rendered/$${base}.svg"; \
+	    echo "Rendered: $$m"; \
+	  done; \
+	fi
+
+# -----------------------------------------------------------------------------
+# Docker (GPU + CPU)
+# -----------------------------------------------------------------------------
+docker-build: ## Build CUDA image (INSTALL_EXTRAS=$(INSTALL_EXTRAS))
+	@echo ">> Building $(IMAGE_NAME):$(IMAGE_TAG) with extras=$(INSTALL_EXTRAS)"
+	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build \
+	  --build-arg INSTALL_EXTRAS=$(INSTALL_EXTRAS) \
+	  -t $(IMAGE_NAME):$(IMAGE_TAG) .
+
+docker-build-cpu: ## Build CPU-only image (target=cpu in Dockerfile)
+	@echo ">> Building CPU image $(IMAGE_NAME):$(IMAGE_TAG)-cpu"
+	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build \
+	  --target cpu \
+	  -t $(IMAGE_NAME):$(IMAGE_TAG)-cpu .
+
+docker-run: ## Run container (GPU if available) -> spectramind --help
+	@if docker info >/dev/null 2>&1; then \
+	  echo ">> Running container"; \
+	  docker run --rm $(GPU_FLAG) -it $(IMAGE_NAME):$(IMAGE_TAG) --help; \
+	else \
+	  echo "::error::Docker not available."; exit 1; \
+	fi
+
+docker-shell: ## Interactive shell inside image
+	@if docker info >/dev/null 2>&1; then \
+	  docker run --rm $(GPU_FLAG) -it $(IMAGE_NAME):$(IMAGE_TAG) /bin/bash; \
+	else \
+	  echo "::error::Docker not available."; exit 1; \
+	fi
+
+# -----------------------------------------------------------------------------
 # Versioning & Releases
 # -----------------------------------------------------------------------------
 define _ensure_clean
@@ -254,25 +331,20 @@ define _read_version
 	fi
 endef
 
-# Sync VERSION -> pyproject.toml, commit, and (optionally) tag
-version: ## Sync VERSION to pyproject.toml and commit (optionally tags if TAG=vX.Y.Z)
-	@set -euo pipefail; \
-	ver="$$(cat $(VERSION_FILE) | tr -d '[:space:]')"; \
-	if [ -z "$$ver" ]; then echo "❌ ERROR: $(VERSION_FILE) is empty"; exit 1; fi; \
+version: ## Sync VERSION -> pyproject.toml and commit (optionally tags if TAG=vX.Y.Z)
+	@set -Eeuo pipefail; \
+	ver="$$(tr -d '[:space:]' < $(VERSION_FILE))"; \
+	[ -n "$$ver" ] || { echo "❌ $(VERSION_FILE) empty"; exit 1; }; \
 	echo "🔄 Setting version to $$ver"; \
 	pyproject="pyproject.toml"; \
-	if [ ! -f "$$pyproject" ]; then echo "❌ ERROR: $$pyproject not found"; exit 1; fi; \
+	[ -f "$$pyproject" ] || { echo "❌ $$pyproject missing"; exit 1; }; \
 	sed -i.bak -E "s/^(version\s*=\s*\").*(\")/\1$$ver\2/" "$$pyproject"; \
 	rm -f "$$pyproject.bak"; \
 	echo "✅ pyproject.toml version -> $$ver"; \
 	git add $(VERSION_FILE) "$$pyproject"; \
-	if ! git diff --cached --quiet; then \
-	  git commit -m "chore: set version $$ver"; \
-	else \
-	  echo "ℹ️  No changes to commit"; \
-	fi; \
+	git commit -m "chore: set version $$ver" || echo "ℹ️  No changes to commit"; \
 	if [ -n "$(TAG)" ]; then \
-	  if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo "⚠️  Tag $(TAG) already exists"; else git tag -a "$(TAG)" -m "Release $(TAG)"; fi; \
+	  if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo "⚠️  Tag $(TAG) exists"; else git tag -a "$(TAG)" -m "Release $(TAG)"; fi; \
 	fi
 
 tag: ## Create annotated/signed tag (TAG=vX.Y.Z, GPG_SIGN=0|1)
@@ -289,10 +361,10 @@ push-tag: ## Push tag to origin (triggers GH Actions release)
 
 release: tag push-tag ## Full release flow: tag + push
 
-bump: ## Bump semantic version (BUMP=patch|minor|major) & update CHANGELOG heading
+bump: ## Bump semver (BUMP=patch|minor|major) & update CHANGELOG header
 	@BUMP ?= patch; \
-	if [ ! -f $(VERSION_FILE) ]; then echo "0.1.0" > $(VERSION_FILE); fi; \
-	VER=$$(sed -e 's/[[:space:]]//g' $(VERSION_FILE)); \
+	[ -f $(VERSION_FILE) ] || echo "0.1.0" > $(VERSION_FILE); \
+	VER=$$(tr -d '[:space:]' < $(VERSION_FILE)); \
 	IFS=. read -r MAJ MIN PAT <<< "$$VER"; \
 	case "$$BUMP" in \
 	  major) MAJ=$$((MAJ+1)); MIN=0; PAT=0 ;; \
@@ -313,14 +385,15 @@ bump: ## Bump semantic version (BUMP=patch|minor|major) & update CHANGELOG headi
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+	rm -rf $(ARTIFACTS_DIR)/coverage
 
 distclean: clean ## Remove venv and artifacts
 	rm -rf $(VENV) $(ARTIFACTS_DIR)
 
 # -----------------------------------------------------------------------------
-# CI convenience (optional)
+# CI convenience
 # -----------------------------------------------------------------------------
-ci: check docs ## Run the same checks CI does locally
+ci: check docs diagrams ## Run the same checks CI does locally
 
 # -----------------------------------------------------------------------------
 # End of Makefile
