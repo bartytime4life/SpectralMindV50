@@ -221,4 +221,102 @@ class FusionXAttn(nn.Module):
 
         # Prepare queries: from AIRS tokens or learned queries
         if airs_tokens is not None:
-            assert airs_tokens.size(1) == self.bins, f_
+            assert airs_tokens.size(1) == self.bins, f"airs_tokens Nλ mismatch, expected {self.bins}"
+            q = self.proj_spec(airs_tokens)                                  # (B, Nλ, D)
+        else:
+            if self.spectral_queries is None:
+                raise ValueError("airs_tokens is None and learned spectral queries are disabled.")
+            q = self.spectral_queries.unsqueeze(0).expand(B, self.bins, self.d_model)  # (B, Nλ, D)
+
+        q = self.pe_spec(q)
+        q = self.drop_in(q)
+
+        # Cross-attention blocks: queries attend to time tokens (K,V)
+        for blk in self.blocks:
+            q = blk(query=q, key=k, value=k)                                 # (B, Nλ, D)
+
+        # Predict μ, σ (per token)
+        mu = self.out_mu(q).squeeze(-1)                                      # (B, Nλ)
+        sigma = self.softplus(self.out_sigma(q).squeeze(-1)) + self.cfg.sigma_floor  # (B, Nλ)
+
+        return {"mu": mu, "sigma": sigma, "tokens": q}
+
+    # --------------------------------------------------------------------------
+    # Convenience helpers
+    # --------------------------------------------------------------------------
+
+    @torch.no_grad()
+    def predict(
+        self,
+        fgs1_tokens: Tensor,
+        airs_tokens: Optional[Tensor] = None,
+        clamp_mu: Optional[Tuple[float, float]] = None,
+    ) -> Dict[str, Tensor]:
+        """Forward pass with optional clamping on μ (handy during inference)."""
+        self.eval()
+        out = self.forward(fgs1_tokens, airs_tokens)
+        if clamp_mu is not None:
+            lo, hi = clamp_mu
+            out["mu"] = out["mu"].clamp(min=lo, max=hi)
+        return out
+
+
+# --------------------------------------------------------------------------------------------------
+# Loss (Gaussian log-likelihood)
+# --------------------------------------------------------------------------------------------------
+
+
+def gll_loss(mu: Tensor, sigma: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
+    """
+    Gaussian log-likelihood loss (negative log-likelihood).
+
+    L = 0.5 * [ log(2πσ^2) + (y - μ)^2 / σ^2 ]
+    """
+    eps = 1e-12
+    var = sigma.clamp_min(eps) ** 2
+    nll = 0.5 * (torch.log(2 * torch.pi * var) + (target - mu) ** 2 / var)
+    if reduction == "none":
+        return nll
+    if reduction == "sum":
+        return nll.sum()
+    return nll.mean()
+
+
+# --------------------------------------------------------------------------------------------------
+# Small factory
+# --------------------------------------------------------------------------------------------------
+
+
+def build_fusion_xattn(cfg_dict: Dict[str, Any]) -> FusionXAttn:
+    """
+    Factory helper from a plain dict (e.g., from OmegaConf.to_container()).
+    """
+    cfg = FusionConfig(**cfg_dict)
+    return FusionXAttn(cfg)
+
+
+# --------------------------------------------------------------------------------------------------
+# Quick smoke test
+# --------------------------------------------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    cfg = FusionConfig(d_time=64, d_spec=96, d_model=128, nhead=4, num_layers=2, bins=283, use_learned_spectral_tokens=False)
+    model = FusionXAttn(cfg).to(device)
+
+    B, T = 2, 200       # batch, time steps
+    Nλ = cfg.bins
+
+    fgs1 = torch.randn(B, T, cfg.d_time, device=device)
+    airs = torch.randn(B, Nλ, cfg.d_spec, device=device)
+
+    out = model(fgs1, airs)
+    print("mu:", out["mu"].shape, "sigma:", out["sigma"].shape, "tokens:", out["tokens"].shape)
+
+    # dummy target and loss
+    y = torch.randn(B, Nλ, device=device)
+    loss = gll_loss(out["mu"], out["sigma"], y)
+    print("loss:", float(loss))
