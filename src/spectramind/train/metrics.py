@@ -4,34 +4,33 @@ SpectraMind V50 — Training Metrics
 ----------------------------------
 
 Implements metrics for the NeurIPS Ariel Data Challenge:
-- Gaussian Log-Likelihood (GLL) with dominant FGS1 weight on bin 0 (~58×)
+- Gaussian Negative Log-Likelihood (NLL/GLL) with dominant FGS1 weight on bin 0 (~58×)
 - MAE / RMSE
 - Uncertainty diagnostics: empirical coverage, sharpness (avg sigma)
 
-Supports both NumPy and (optional) PyTorch tensors and handles batched inputs.
-
-Notes
------
-- Challenge metric: Gaussian negative log-likelihood; bin 0 (FGS1) is up-weighted
-  around ~58× per problem statement [oai_citation:0‡NeurIPS 2025 Ariel Data Challenge_ Dual-Channel End-to-End Solution.pdf](file-service://file-SJeTx7mG2ppmDvLxR2cKzf).
-- This module is dependency-tolerant: NumPy is required; PyTorch functions are
-  available if `torch` is installed.
+Design goals
+------------
+- Kaggle/CI-safe: NumPy required; PyTorch is optional (auto-detected).
+- Batched + broadcast-friendly; robust masking that never divides by zero.
+- Deterministic, numerically-stable; eps clamps for log/variance.
+- Flexible per-bin weighting (default: w[0]≈58 for FGS1; others 1.0).
 
 Shapes
 ------
-- Unbatched: (B,) for y, mu, sigma → scalar metric
-- Batched: (N, D) or broadcastable shapes; reductions default to mean over all items.
+- Elementwise inputs broadcast to a common shape.
+- Reductions: {"mean","sum","none"}.
+- For (N, D) predictions: reductions aggregate across all elements.
 
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 
-try:  # optional: torch support
+try:  # optional torch support
     import torch
     _HAS_TORCH = True
 except Exception:  # pragma: no cover
@@ -39,61 +38,118 @@ except Exception:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------
+__all__ = [
+    "gaussian_nll",
+    "challenge_gll",
+    "weighted_gll",
+    "mae",
+    "rmse",
+    "coverage",
+    "sharpness",
+    "compute_all",
+]
+
+
+# ---------------------------------------------------------------------
+# Backend helpers
+# ---------------------------------------------------------------------
+def _is_tensor(x: Any) -> bool:
+    return _HAS_TORCH and isinstance(x, torch.Tensor)
+
+
+def _to_numpy(x: Any) -> np.ndarray:
+    if _HAS_TORCH and isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _nan_like(x: Any) -> Any:
+    if _is_tensor(x):
+        return torch.tensor(float("nan"), device=x.device, dtype=x.dtype)
+    return float("nan")
+
+
+def _finite_mask(x: Any) -> Any:
+    if _is_tensor(x):
+        return torch.isfinite(x)
+    return np.isfinite(x)
+
+
+def _logical_and(a: Any, b: Any) -> Any:
+    if _is_tensor(a) or _is_tensor(b):
+        a_t = a if _is_tensor(a) else torch.as_tensor(a, dtype=torch.bool, device=(b.device if _is_tensor(b) else None))
+        b_t = b if _is_tensor(b) else torch.as_tensor(b, dtype=torch.bool, device=(a.device if _is_tensor(a) else None))
+        return a_t & b_t
+    return np.logical_and(np.asarray(a, dtype=bool), np.asarray(b, dtype=bool))
+
+
+def _reduce(values: Any, reduction: str = "mean") -> Any:
+    """
+    Reduce with NaN-safety. 'none' returns input; 'sum' sums ignoring NaNs; 'mean' mean over finite.
+    """
+    if _is_tensor(values):
+        if reduction == "none":
+            return values
+        if reduction == "sum":
+            return torch.nansum(values)
+        # mean
+        finite = torch.isfinite(values)
+        denom = finite.sum()
+        return torch.nansum(torch.where(finite, values, torch.tensor(0.0, device=values.device, dtype=values.dtype))) / torch.clamp(denom, min=1)
+    # NumPy
+    v = np.asarray(values)
+    if reduction == "none":
+        return v
+    if reduction == "sum":
+        return float(np.nansum(v))
+    # mean
+    finite = np.isfinite(v)
+    denom = int(finite.sum())
+    if denom == 0:
+        return float("nan")
+    return float(np.nansum(np.where(finite, v, 0.0)) / denom)
+
+
+def _weighted_reduce(values: Any, weights: Any, reduction: str = "mean") -> Any:
+    """
+    Weighted reduction; supports broadcasting. For 'mean', computes sum(w*v)/sum(w) over valid elements.
+    NaN elements in values are ignored (not counted in denominator); weights at those positions are ignored too.
+    """
+    if reduction == "none":
+        # Return elementwise weight * value to allow caller to post-process
+        return values * weights
+
+    if _is_tensor(values) or _is_tensor(weights):
+        v = values if _is_tensor(values) else torch.as_tensor(values, dtype=torch.float32)
+        w = weights if _is_tensor(weights) else torch.as_tensor(weights, dtype=v.dtype, device=v.device)
+        v = v.to(dtype=w.dtype, device=w.device)
+        mask = torch.isfinite(v) & torch.isfinite(w)
+        v_masked = torch.where(mask, v, torch.tensor(0.0, device=v.device, dtype=v.dtype))
+        w_masked = torch.where(mask, w, torch.tensor(0.0, device=w.device, dtype=w.dtype))
+        if reduction == "sum":
+            return torch.sum(v_masked * w_masked)
+        # mean
+        denom = torch.sum(w_masked)
+        return torch.sum(v_masked * w_masked) / torch.clamp(denom, min=torch.finfo(v.dtype).eps)
+    # NumPy
+    v = np.asarray(values, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    mask = np.isfinite(v) & np.isfinite(w)
+    v_masked = np.where(mask, v, 0.0)
+    w_masked = np.where(mask, w, 0.0)
+    if reduction == "sum":
+        return float(np.sum(v_masked * w_masked))
+    denom = np.sum(w_masked)
+    if denom <= 0:
+        return float("nan")
+    return float(np.sum(v_masked * w_masked) / denom)
+
+
+# ---------------------------------------------------------------------
 # Core Gaussian NLL (negative log-likelihood)
 # ---------------------------------------------------------------------
-
-def _np_gaussian_nll(
-    y: np.ndarray,
-    mu: np.ndarray,
-    sigma: np.ndarray,
-    *,
-    mask: Optional[np.ndarray] = None,
-    reduction: str = "mean",
-    eps: float = 1e-8,
-) -> float:
-    y, mu, sigma = np.asarray(y), np.asarray(mu), np.asarray(sigma)
-    var = np.maximum(sigma, eps) ** 2
-    nll = 0.5 * (np.log(2.0 * math.pi * var) + (y - mu) ** 2 / var)
-
-    if mask is not None:
-        nll = np.where(mask, nll, np.nan)
-
-    # drop NaNs
-    nll = nll[np.isfinite(nll)]
-    if nll.size == 0:
-        return float("nan")
-
-    if reduction == "sum":
-        return float(np.sum(nll))
-    elif reduction == "none":
-        return nll  # type: ignore[return-value]
-    else:
-        return float(np.mean(nll))
-
-
-def _np_weighted(
-    values: np.ndarray,
-    weights: Optional[np.ndarray],
-    *,
-    reduction: str = "mean",
-) -> float:
-    v = np.asarray(values)
-    if weights is not None:
-        w = np.asarray(weights, dtype=np.float64)
-        v = v * w
-    if reduction == "sum":
-        return float(np.sum(v))
-    elif reduction == "none":
-        return v  # type: ignore[return-value]
-    else:
-        if weights is not None:
-            denom = np.sum(np.asarray(weights))
-            if denom <= 0:
-                return float("nan")
-            return float(np.sum(v) / denom)
-        return float(np.mean(v))
-
-
 def gaussian_nll(
     y: Union[np.ndarray, "torch.Tensor"],
     mu: Union[np.ndarray, "torch.Tensor"],
@@ -107,116 +163,144 @@ def gaussian_nll(
     Gaussian Negative Log-Likelihood:
         nll = 0.5 * [ log(2πσ²) + (y - μ)² / σ² ]
 
-    Handles NumPy arrays or PyTorch tensors; reduction in {"mean","sum","none"}.
+    - Works with NumPy arrays or PyTorch tensors.
+    - 'mask' (bool) selects valid elements; invalids are ignored in reductions.
+    - 'eps' clamps σ to avoid log(0) and div-by-zero.
     """
-    # PyTorch path
-    if _HAS_TORCH and isinstance(y, torch.Tensor):
-        mu_t = mu if isinstance(mu, torch.Tensor) else torch.as_tensor(mu, device=y.device, dtype=y.dtype)
-        sig_t = sigma if isinstance(sigma, torch.Tensor) else torch.as_tensor(sigma, device=y.device, dtype=y.dtype)
-        var = torch.clamp(sig_t, min=eps) ** 2
-        nll = 0.5 * (torch.log(2.0 * math.pi * var) + (y - mu_t) ** 2 / var)
+    if _HAS_TORCH and any(_is_tensor(t) for t in (y, mu, sigma, mask)):
+        y_t = y if _is_tensor(y) else torch.as_tensor(y)
+        mu_t = mu if _is_tensor(mu) else torch.as_tensor(mu, device=y_t.device, dtype=y_t.dtype)
+        sg_t = sigma if _is_tensor(sigma) else torch.as_tensor(sigma, device=y_t.device, dtype=y_t.dtype)
+
+        var = torch.clamp(sg_t, min=eps) ** 2
+        nll = 0.5 * (torch.log(2.0 * math.pi * var) + (y_t - mu_t) ** 2 / var)
+
         if mask is not None:
-            m = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask, device=y.device, dtype=torch.bool)
-            nll = torch.where(m, nll, torch.tensor(float("nan"), device=y.device, dtype=y.dtype))
-        # drop NaNs
-        nll = nll[torch.isfinite(nll)]
-        if nll.numel() == 0:
-            return torch.tensor(float("nan"), device=y.device, dtype=y.dtype)
-        if reduction == "sum":
-            return nll.sum()
-        elif reduction == "none":
-            return nll
-        else:
-            return nll.mean()
+            m = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
+            nll = torch.where(m, nll, torch.tensor(float("nan"), device=y_t.device, dtype=y_t.dtype))
+
+        # Drop NaNs in reduction paths; keep as-is for 'none'
+        return _reduce(nll, reduction=reduction)
 
     # NumPy path
-    return _np_gaussian_nll(
-        np.asarray(y),
-        np.asarray(mu),
-        np.asarray(sigma),
-        mask=np.asarray(mask) if mask is not None else None,
-        reduction=reduction,
-        eps=eps,
-    )
+    y_n = np.asarray(y)
+    mu_n = np.asarray(mu)
+    sg_n = np.asarray(sigma)
+    var = np.maximum(sg_n, eps) ** 2
+    nll = 0.5 * (np.log(2.0 * math.pi * var) + (y_n - mu_n) ** 2 / var)
+
+    if mask is not None:
+        nll = np.where(np.asarray(mask, dtype=bool), nll, np.nan)
+
+    return _reduce(nll, reduction=reduction)
 
 
 # ---------------------------------------------------------------------
-# Challenge GLL with FGS1 weight
+# Weighted challenge GLL
 # ---------------------------------------------------------------------
+def _build_weights(
+    D: int,
+    *,
+    fgs1_weight: float = 58.0,
+    custom: Optional[Union[np.ndarray, "torch.Tensor", Tuple[float, ...]]] = None,
+    like: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
+) -> Union[np.ndarray, "torch.Tensor"]:
+    """
+    Build per-bin weights of length D. By default, sets w[0]=fgs1_weight and w[1:]=1.
+    If 'custom' is provided, it overrides the entire vector.
+    """
+    if custom is not None:
+        if _is_tensor(like) or _is_tensor(custom):
+            c = custom if _is_tensor(custom) else torch.as_tensor(custom, dtype=(like.dtype if _is_tensor(like) else torch.float32),
+                                                                  device=(like.device if _is_tensor(like) else None))
+            if c.numel() != D:
+                raise ValueError(f"custom weights length {c.numel()} != D={D}")
+            return c
+        c = np.asarray(custom, dtype=np.float64)
+        if c.size != D:
+            raise ValueError(f"custom weights length {c.size} != D={D}")
+        return c
+
+    if _is_tensor(like):
+        w = torch.ones(D, dtype=like.dtype, device=like.device)
+        w[0] = float(fgs1_weight)
+        return w
+    w = np.ones(D, dtype=np.float64)
+    w[0] = float(fgs1_weight)
+    return w
+
+
+def weighted_gll(
+    y: Union[np.ndarray, "torch.Tensor"],
+    mu: Union[np.ndarray, "torch.Tensor"],
+    sigma: Union[np.ndarray, "torch.Tensor"],
+    *,
+    weights: Optional[Union[np.ndarray, "torch.Tensor", Tuple[float, ...]]] = None,
+    fgs1_weight: float = 58.0,
+    reduction: str = "mean",
+    eps: float = 1e-8,
+    mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
+) -> Union[float, "torch.Tensor", np.ndarray]:
+    """
+    Gaussian NLL with per-bin weights.
+
+    - If 'weights' is None, uses default challenge weights (w[0]=~58, others=1).
+    - Supports broadcasting of weights over batch dims (e.g., (D,) applied to (N,D)).
+    - Reductions: 'mean' computes weighted mean (sum(w*nll)/sum(w)).
+    """
+    # Elementwise NLL (no reduction)
+    nll = gaussian_nll(y, mu, sigma, mask=mask, reduction="none", eps=eps)
+
+    # Infer D from last dimension (required)
+    if _is_tensor(nll):
+        if nll.dim() == 0:
+            raise ValueError("Expected at least 1D for NLL; got scalar.")
+        D = nll.shape[-1]
+        w = _build_weights(D, fgs1_weight=fgs1_weight, custom=weights, like=nll)
+        # Align weights for broadcasting against nll
+        while w.dim() < nll.dim():
+            w = w.unsqueeze(0)
+        # Weighted reduction
+        return _weighted_reduce(nll, w.expand_as(nll), reduction=reduction)
+    # NumPy
+    nll_n = np.asarray(nll)
+    if nll_n.ndim == 0:
+        raise ValueError("Expected at least 1D for NLL; got scalar.")
+    D = nll_n.shape[-1]
+    w = _build_weights(D, fgs1_weight=fgs1_weight, custom=weights, like=None)
+    # Broadcast weights over batch dimensions
+    w_shape = (1,) * (nll_n.ndim - 1) + (D,)
+    w_b = np.reshape(w, w_shape)
+    return _weighted_reduce(nll_n, np.broadcast_to(w_b, nll_n.shape), reduction=reduction)
+
 
 def challenge_gll(
     y: Union[np.ndarray, "torch.Tensor"],
     mu: Union[np.ndarray, "torch.Tensor"],
     sigma: Union[np.ndarray, "torch.Tensor"],
     *,
-    fgs1_weight: float = 58.0,   # ~58× weighting for FGS1 bin 0 [oai_citation:1‡NeurIPS 2025 Ariel Data Challenge_ Dual-Channel End-to-End Solution.pdf](file-service://file-SJeTx7mG2ppmDvLxR2cKzf)
+    fgs1_weight: float = 58.0,   # default ~58× for bin 0 (FGS1)
     reduction: str = "mean",
     eps: float = 1e-8,
     mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
-) -> Union[float, "torch.Tensor"]:
+) -> Union[float, "torch.Tensor", np.ndarray]:
     """
-    Gaussian NLL with per-bin weighting for the Ariel challenge.
-    Bin 0 (FGS1) is up-weighted (default ~58×); other bins weight=1.
-
-    Accepts (N, D) or (D,) shapes; broadcasting is supported.
+    Convenience wrapper for weighted GLL using the Ariel challenge default:
+    w = [fgs1_weight, 1, 1, ..., 1].
     """
-    D = y.shape[-1] if hasattr(y, "shape") else None
-
-    # Build weights vector [w0, 1, 1, ..., 1]
-    if _HAS_TORCH and isinstance(y, torch.Tensor):
-        # Attempt to infer D; fallback to vectorized approach
-        if D is None:
-            raise ValueError("Cannot infer last-dimension size for y.")
-        w = torch.ones(D, dtype=y.dtype, device=y.device)
-        w[0] = float(fgs1_weight)
-
-        # Compute per-element NLL without reduction
-        nll = gaussian_nll(y, mu, sigma, mask=mask, reduction="none", eps=eps)  # type: ignore
-        # If reduced "none", may still be flattened; ensure last dim alignment:
-        # We assume broadcasting kept shape; reshape weights for broadcast
-        while w.dim() < nll.dim():
-            w = w.unsqueeze(0)
-        nll_w = nll * w
-
-        if reduction == "sum":
-            return torch.nansum(nll_w)
-        elif reduction == "none":
-            return nll_w
-        else:
-            # weighted mean: sum(w*nll)/sum(w) accounting for mask/NaNs
-            denom = torch.nansum(w.expand_as(nll_w))
-            return torch.nansum(nll_w) / denom.clamp_min(1e-12)
-
-    # NumPy path
-    y_np, mu_np, sig_np = np.asarray(y), np.asarray(mu), np.asarray(sigma)
-    if D is None:
-        D = y_np.shape[-1]
-    w = np.ones((D,), dtype=np.float64)
-    w[0] = float(fgs1_weight)
-
-    # Raw per-element NLL
-    nll = gaussian_nll(y_np, mu_np, sig_np, mask=mask, reduction="none", eps=eps)  # type: ignore
-    # Align weights to nll's last dimension
-    w_shape = [1] * nll.ndim
-    w_shape[-1] = D
-    w_ = w.reshape(w_shape)
-    nll_w = nll * w_
-
-    if reduction == "sum":
-        return float(np.nansum(nll_w))
-    elif reduction == "none":
-        return nll_w  # type: ignore[return-value]
-    else:
-        denom = np.nansum(np.broadcast_to(w_, nll_w.shape))
-        if denom <= 0:
-            return float("nan")
-        return float(np.nansum(nll_w) / denom)
+    return weighted_gll(
+        y, mu, sigma,
+        weights=None,
+        fgs1_weight=fgs1_weight,
+        reduction=reduction,
+        eps=eps,
+        mask=mask,
+    )
 
 
 # ---------------------------------------------------------------------
-# Pointwise metrics
+# Pointwise errors
 # ---------------------------------------------------------------------
-
 def mae(
     y: Union[np.ndarray, "torch.Tensor"],
     mu: Union[np.ndarray, "torch.Tensor"],
@@ -224,28 +308,20 @@ def mae(
     mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
     reduction: str = "mean",
 ) -> Union[float, "torch.Tensor", np.ndarray]:
-    """Mean absolute error."""
-    if _HAS_TORCH and isinstance(y, torch.Tensor):
-        diff = torch.abs(y - (mu if isinstance(mu, torch.Tensor) else torch.as_tensor(mu, device=y.device, dtype=y.dtype)))
+    """Mean Absolute Error with NaN/Mask safety."""
+    if _HAS_TORCH and any(_is_tensor(t) for t in (y, mu, mask)):
+        y_t = y if _is_tensor(y) else torch.as_tensor(y)
+        m_t = mu if _is_tensor(mu) else torch.as_tensor(mu, device=y_t.device, dtype=y_t.dtype)
+        diff = torch.abs(y_t - m_t)
         if mask is not None:
-            m = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask, device=y.device, dtype=torch.bool)
-            diff = torch.where(m, diff, torch.tensor(float("nan"), device=y.device, dtype=y.dtype))
-        if reduction == "sum":
-            return torch.nansum(diff)
-        elif reduction == "none":
-            return diff
-        else:
-            return torch.nanmean(diff)
+            mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
+            diff = torch.where(mm, diff, torch.tensor(float("nan"), device=y_t.device, dtype=diff.dtype))
+        return _reduce(diff, reduction=reduction)
     # NumPy
     diff = np.abs(np.asarray(y) - np.asarray(mu))
     if mask is not None:
-        diff = np.where(np.asarray(mask), diff, np.nan)
-    if reduction == "sum":
-        return float(np.nansum(diff))
-    elif reduction == "none":
-        return diff  # type: ignore[return-value]
-    else:
-        return float(np.nanmean(diff))
+        diff = np.where(np.asarray(mask, dtype=bool), diff, np.nan)
+    return _reduce(diff, reduction=reduction)
 
 
 def rmse(
@@ -255,34 +331,30 @@ def rmse(
     mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
     reduction: str = "mean",
 ) -> Union[float, "torch.Tensor", np.ndarray]:
-    """Root mean squared error."""
-    if _HAS_TORCH and isinstance(y, torch.Tensor):
-        sq = (y - (mu if isinstance(mu, torch.Tensor) else torch.as_tensor(mu, device=y.device, dtype=y.dtype))) ** 2
+    """Root Mean Squared Error with NaN/Mask safety."""
+    if _HAS_TORCH and any(_is_tensor(t) for t in (y, mu, mask)):
+        y_t = y if _is_tensor(y) else torch.as_tensor(y)
+        m_t = mu if _is_tensor(mu) else torch.as_tensor(mu, device=y_t.device, dtype=y_t.dtype)
+        sq = (y_t - m_t) ** 2
         if mask is not None:
-            m = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask, device=y.device, dtype=torch.bool)
-            sq = torch.where(m, sq, torch.tensor(float("nan"), device=y.device, dtype=y.dtype))
-        if reduction == "sum":
-            return torch.sqrt(torch.nansum(sq))
-        elif reduction == "none":
+            mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
+            sq = torch.where(mm, sq, torch.tensor(float("nan"), device=y_t.device, dtype=sq.dtype))
+        # Reduce after sqrt for correct RMSE
+        if reduction == "none":
             return torch.sqrt(sq)
-        else:
-            return torch.sqrt(torch.nanmean(sq))
+        return _reduce(torch.sqrt(sq), reduction=reduction)
     # NumPy
     sq = (np.asarray(y) - np.asarray(mu)) ** 2
     if mask is not None:
-        sq = np.where(np.asarray(mask), sq, np.nan)
-    if reduction == "sum":
-        return float(np.sqrt(np.nansum(sq)))
-    elif reduction == "none":
-        return np.sqrt(sq)  # type: ignore[return-value]
-    else:
-        return float(np.sqrt(np.nanmean(sq)))
+        sq = np.where(np.asarray(mask, dtype=bool), sq, np.nan)
+    if reduction == "none":
+        return np.sqrt(sq)
+    return _reduce(np.sqrt(sq), reduction=reduction)
 
 
 # ---------------------------------------------------------------------
 # Uncertainty diagnostics
 # ---------------------------------------------------------------------
-
 def coverage(
     y: Union[np.ndarray, "torch.Tensor"],
     mu: Union[np.ndarray, "torch.Tensor"],
@@ -292,33 +364,45 @@ def coverage(
     mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
 ) -> Union[float, "torch.Tensor"]:
     """
-    Empirical coverage of the nominal (1-alpha) interval under Normal assumption:
-    interval = μ ± z * σ, where z = Φ^{-1}((1+alpha)/2).
-
-    Returns fraction of points within the interval.
+    Empirical coverage of the central interval with nominal mass=alpha under Normal assumption:
+        interval = μ ± z * σ, where z = Φ^{-1}((1+alpha)/2).
+    Returns the fraction of VALID elements falling inside the interval.
     """
     z = float(_z_from_alpha(alpha))
-    if _HAS_TORCH and isinstance(y, torch.Tensor):
-        mu_t = mu if isinstance(mu, torch.Tensor) else torch.as_tensor(mu, device=y.device, dtype=y.dtype)
-        sig_t = sigma if isinstance(sigma, torch.Tensor) else torch.as_tensor(sigma, device=y.device, dtype=y.dtype)
-        lo, hi = mu_t - z * sig_t, mu_t + z * sig_t
-        inside = (y >= lo) & (y <= hi)
+
+    if _HAS_TORCH and any(_is_tensor(t) for t in (y, mu, sigma, mask)):
+        y_t = y if _is_tensor(y) else torch.as_tensor(y)
+        m_t = mu if _is_tensor(mu) else torch.as_tensor(mu, device=y_t.device, dtype=y_t.dtype)
+        s_t = sigma if _is_tensor(sigma) else torch.as_tensor(sigma, device=y_t.device, dtype=y_t.dtype)
+
+        lo, hi = m_t - z * s_t, m_t + z * s_t
+        inside = (y_t >= lo) & (y_t <= hi)
+
+        valid = torch.ones_like(inside, dtype=torch.bool)
         if mask is not None:
-            m = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask, device=y.device, dtype=torch.bool)
-            inside = torch.where(m, inside, torch.tensor(False, device=y.device))
-        numer = inside.sum()
-        denom = inside.numel() if mask is None else m.sum()  # type: ignore[name-defined]
-        denom = torch.clamp(denom, min=1)
-        return (numer.to(dtype=y.dtype) / denom.to(dtype=y.dtype))
+            mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
+            valid = valid & mm
+        # Also exclude non-finite inputs from the denominator
+        valid = valid & _finite_mask(y_t) & _finite_mask(m_t) & _finite_mask(s_t)
+
+        numer = (inside & valid).sum()
+        denom = torch.clamp(valid.sum(), min=1)
+        return numer.to(dtype=y_t.dtype) / denom.to(dtype=y_t.dtype)
+
     # NumPy
-    y_np, mu_np, sig_np = np.asarray(y), np.asarray(mu), np.asarray(sigma)
-    lo, hi = mu_np - z * sig_np, mu_np + z * sig_np
-    inside = (y_np >= lo) & (y_np <= hi)
+    y_n, m_n, s_n = np.asarray(y), np.asarray(mu), np.asarray(sigma)
+    lo, hi = m_n - z * s_n, m_n + z * s_n
+    inside = (y_n >= lo) & (y_n <= hi)
+
+    valid = np.ones_like(inside, dtype=bool)
     if mask is not None:
-        inside = inside & np.asarray(mask)
-    denom = np.sum(inside | ~inside) if mask is None else np.sum(np.asarray(mask))
-    denom = max(int(denom), 1)
-    return float(np.sum(inside) / denom)
+        valid = valid & np.asarray(mask, dtype=bool)
+    valid = valid & np.isfinite(y_n) & np.isfinite(m_n) & np.isfinite(s_n)
+
+    numer = int(np.sum(inside & valid))
+    denom = int(np.sum(valid))
+    denom = max(denom, 1)
+    return float(numer / denom)
 
 
 def sharpness(
@@ -327,68 +411,74 @@ def sharpness(
     mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
     reduction: str = "mean",
 ) -> Union[float, "torch.Tensor", np.ndarray]:
-    """
-    Sharpness = average predictive sigma (lower is sharper).
-    """
-    if _HAS_TORCH and isinstance(sigma, torch.Tensor):
+    """Sharpness = average predictive σ (lower is sharper)."""
+    if _HAS_TORCH and _is_tensor(sigma):
         s = sigma
         if mask is not None:
-            m = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask, device=s.device, dtype=torch.bool)
-            s = torch.where(m, s, torch.tensor(float("nan"), device=s.device, dtype=s.dtype))
-        if reduction == "sum":
-            return torch.nansum(s)
-        elif reduction == "none":
-            return s
-        else:
-            return torch.nanmean(s)
+            mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=s.device, dtype=torch.bool)
+            s = torch.where(mm, s, torch.tensor(float("nan"), device=s.device, dtype=s.dtype))
+        return _reduce(s, reduction=reduction)
     # NumPy
     s = np.asarray(sigma)
     if mask is not None:
-        s = np.where(np.asarray(mask), s, np.nan)
-    if reduction == "sum":
-        return float(np.nansum(s))
-    elif reduction == "none":
-        return s  # type: ignore[return-value]
-    else:
-        return float(np.nanmean(s))
+        s = np.where(np.asarray(mask, dtype=bool), s, np.nan)
+    return _reduce(s, reduction=reduction)
 
 
 # ---------------------------------------------------------------------
-# Helpers
+# Utilities
 # ---------------------------------------------------------------------
-
 def _z_from_alpha(alpha: float) -> float:
     """
-    Two-sided z-score for central coverage alpha.
-
-    Uses an approximation (Acklam's inverse CDF); accurate for typical alpha.
+    Two-sided z-score for central coverage alpha (Acklam's inverse-normal approximation).
+    Accurate for typical alpha in (0.5, 0.9999).
     """
-    # Convert alpha central coverage -> tail probability
-    p = 0.5 * (1.0 + alpha)
-    # Acklam's approximation of inverse normal CDF
-    # https://web.archive.org/web/20150910044719/http://home.online.no/~pjacklam/notes/invnorm/
-    a1, a2, a3 = -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02
-    a4, a5, a6 = 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00
-    b1, b2, b3 = -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02
-    b4, b5, b6 = 6.680131188771972e+01, -1.328068155288572e+01, 1.0
-    c1, c2, c3 = -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00
-    c4, c5, c6 = -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00
-    d1, d2, d3 = 7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00
-    d4 = 3.754408661907416e+00
+    p = 0.5 * (1.0 + alpha)  # central mass -> upper-tail CDF point
+
+    a1, a2, a3 = -39.69683028665376, 220.9460984245205, -275.9285104469687
+    a4, a5, a6 = 138.3577518672690, -30.66479806614716, 2.506628277459239
+    b1, b2, b3 = -54.47609879822406, 161.5858368580409, -155.6989798598866
+    b4, b5, b6 = 66.80131188771972, -13.28068155288572, 1.0
+    c1, c2, c3 = -0.007784894002430293, -0.3223964580411365, -2.400758277161838
+    c4, c5, c6 = -2.549732539343734, 4.374664141464968, 2.938163982698783
+    d1, d2, d3 = 0.007784695709041462, 0.3224671290700398, 2.445134137142996
+    d4 = 3.754408661907416
 
     plow = 0.02425
-    phigh = 1 - plow
+    phigh = 1.0 - plow
+
     if p < plow:
-        q = math.sqrt(-2 * math.log(p))
-        x = (((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) / \
-            ((((d1 * q + d2) * q + d3) * q + d4) * q + 1)
-    elif phigh < p:
-        q = math.sqrt(-2 * math.log(1 - p))
-        x = -(((((c1 * q + c2) * q + c3) * q + c4) * q + c5) * q + c6) / \
-            ((((d1 * q + d2) * q + d3) * q + d4) * q + 1)
-    else:
-        q = p - 0.5
-        r = q * q
-        x = (((((a1 * r + a2) * r + a3) * r + a4) * r + a5) * r + a6) * q / \
-            (((((b1 * r + b2) * r + b3) * r + b4) * r + b5) * r + b6)
+        q = math.sqrt(-2.0 * math.log(p))
+        x = (((((c1*q + c2)*q + c3)*q + c4)*q + c5)*q + c6) / ((((d1*q + d2)*q + d3)*q + d4)*q + 1.0)
+        return float(x)
+    if p > phigh:
+        q = math.sqrt(-2.0 * math.log(1.0 - p))
+        x = -(((((c1*q + c2)*q + c3)*q + c4)*q + c5)*q + c6) / ((((d1*q + d2)*q + d3)*q + d4)*q + 1.0)
+        return float(x)
+    q = p - 0.5
+    r = q * q
+    x = (((((a1*r + a2)*r + a3)*r + a4)*r + a5)*r + a6) * q / (((((b1*r + b2)*r + b3)*r + b4)*r + b5)*r + b6)
     return float(x)
+
+
+def compute_all(
+    y: Union[np.ndarray, "torch.Tensor"],
+    mu: Union[np.ndarray, "torch.Tensor"],
+    sigma: Union[np.ndarray, "torch.Tensor"],
+    *,
+    mask: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
+    alpha: float = 0.95,
+    fgs1_weight: float = 58.0,
+) -> Dict[str, Union[float, "torch.Tensor"]]:
+    """
+    Convenience bundle for training/validation loops.
+    Returns a dict of scalar metrics (NumPy floats or 0-dim torch tensors).
+    """
+    results: Dict[str, Union[float, "torch.Tensor"]] = {}
+    results["gll"] = gaussian_nll(y, mu, sigma, mask=mask, reduction="mean")
+    results["challenge_gll"] = challenge_gll(y, mu, sigma, mask=mask, fgs1_weight=fgs1_weight, reduction="mean")
+    results["mae"] = mae(y, mu, mask=mask, reduction="mean")
+    results["rmse"] = rmse(y, mu, mask=mask, reduction="mean")
+    results["coverage"] = coverage(y, mu, sigma, alpha=alpha, mask=mask)
+    results["sharpness"] = sharpness(sigma, mask=mask, reduction="mean")
+    return results
