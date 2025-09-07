@@ -1,13 +1,16 @@
 # src/spectramind/cli.py
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import random
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import typer
 
@@ -15,6 +18,8 @@ import typer
 try:
     from rich import print as rprint
     from rich.traceback import install as rich_install
+    from rich.panel import Panel
+    from rich.table import Table
     _HAS_RICH = True
     rich_install(show_locals=False, suppress=["typer", "click"])
 except Exception:
@@ -28,17 +33,37 @@ try:
 except Exception:
     _HAS_OMEGA = False
 
+# Optional scientific libs for deterministic seeds (never required at import)
+_HAS_TORCH = False
+_HAS_NUMPY = False
+try:
+    import torch  # type: ignore
+    _HAS_TORCH = True
+except Exception:
+    pass
+
+try:
+    import numpy as _np  # type: ignore
+    _HAS_NUMPY = True
+except Exception:
+    pass
+
 from spectramind.utils.logging import get_logger
 from spectramind.utils.io import p, read_yaml, read_json, ensure_dir  # YAML optional; JSON always works
 from spectramind.train.trainer import train_from_config
 
 __all__ = ["app", "main"]
 
+# ======================================================================================
+# App declaration
+# ======================================================================================
+
 app = typer.Typer(
     name="spectramind",
     help="SpectraMind V50 — Mission-grade CLI for the NeurIPS 2025 Ariel Data Challenge.",
     add_completion=True,
     no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
 )
 
 # Subapps
@@ -47,7 +72,7 @@ train_app = typer.Typer(help="Model training")
 predict_app = typer.Typer(help="Prediction / inference")
 diagnose_app = typer.Typer(help="Diagnostics & reporting")
 submit_app = typer.Typer(help="Submission packaging / validation")
-sys_app = typer.Typer(help="System utilities (doctor, version, env)")
+sys_app = typer.Typer(help="System utilities (doctor, version, env, cfg-tools)")
 
 app.add_typer(calib_app, name="calibrate")
 app.add_typer(train_app, name="train")
@@ -94,6 +119,25 @@ def _fail(msg: str, code: int = 1) -> None:
 def _ensure_exists(pth: Optional[Path], label: str) -> None:
     if pth is not None and not Path(pth).exists():
         raise SpectraMindError(f"{label} not found: {pth}")
+
+# ======================================================================================
+# Determinism / seeding
+# ======================================================================================
+
+def _set_seeds(seed: Optional[int]) -> None:
+    if seed is None:
+        return
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    if _HAS_NUMPY:
+        _np.random.seed(seed)  # type: ignore[attr-defined]
+    if _HAS_TORCH:
+        torch.manual_seed(seed)  # type: ignore[name-defined]
+        if torch.cuda.is_available():  # type: ignore[name-defined]
+            torch.cuda.manual_seed_all(seed)  # type: ignore[attr-defined]
+        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+        torch.backends.cudnn.benchmark = False     # type: ignore[attr-defined]
+    _ok(f"Deterministic seeds set → {seed}")
 
 # ======================================================================================
 # Config loading / overrides
@@ -173,14 +217,46 @@ def _merge_overrides(base: Dict[str, Any], overrides: List[str]) -> Dict[str, An
         _set_in(result, key.strip(), _coerce_value(raw))
     return result
 
+def _hash_config_dict(d: Dict[str, Any]) -> str:
+    """Stable sha256 over a canonicalized JSON representation of a dict."""
+    enc = json.dumps(d, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(enc).hexdigest()
+
+# ======================================================================================
+# JSONL event logging (offline telemetry)
+# ======================================================================================
+
+@dataclass
+class Event:
+    t: float
+    kind: str
+    msg: str
+    extra: Dict[str, Any]
+
+def _write_event(path: Path, kind: str, msg: str, **extra: Any) -> None:
+    ensure_dir(path)
+    rec = Event(t=time.time(), kind=kind, msg=msg, extra=extra)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(asdict(rec), sort_keys=False) + "\n")
+
 # ======================================================================================
 # DVC
 # ======================================================================================
 
-def _run_dvc(stage: str, cwd: Optional[Path] = None, extra: Optional[List[str]] = None) -> None:
+def _run_dvc(
+    stage: str,
+    cwd: Optional[Path] = None,
+    extra: Optional[List[str]] = None,
+    dry_run: bool = False,
+    print_cmd: bool = False,
+) -> None:
     cmd = ["dvc", "repro", "-f", "-s", stage]
     if extra:
         cmd += extra
+    if print_cmd or dry_run:
+        rprint(cmd) if _HAS_RICH else typer.echo(" ".join(cmd))
+    if dry_run:
+        return
     try:
         subprocess.run(cmd, check=True, cwd=str(cwd) if cwd else None)
     except FileNotFoundError:
@@ -189,14 +265,68 @@ def _run_dvc(stage: str, cwd: Optional[Path] = None, extra: Optional[List[str]] 
         raise SpectraMindError(f"DVC stage '{stage}' failed: {e}")
 
 # ======================================================================================
-# sys: version / doctor / env
+# Global flags / callback
 # ======================================================================================
+
+@app.callback()
+def _global(
+    ctx: typer.Context,
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging (INFO)"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Quiet mode (errors only)"),
+    log_file: Optional[Path] = typer.Option(None, help="Optional log file to tee messages"),
+    seed: Optional[int] = typer.Option(None, help="Deterministic seed for all stages"),
+    events_path: Path = typer.Option(Path("artifacts/logs/events.jsonl"), help="JSONL event stream path"),
+) -> None:
+    """
+    Global flags for logging, determinism, and event stream.
+    """
+    # Wire seeds early
+    _set_seeds(seed)
+
+    # Set logger level
+    if quiet:
+        os.environ["SPECTRAMIND_LOGLEVEL"] = "ERROR"
+    elif verbose:
+        os.environ["SPECTRAMIND_LOGLEVEL"] = "INFO"
+    else:
+        os.environ.setdefault("SPECTRAMIND_LOGLEVEL", "WARNING")
+
+    # Tee to file if requested
+    if log_file:
+        try:
+            ensure_dir(log_file)
+            # simple tee: append startup banner
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] spectramind start pid={os.getpid()}\n")
+        except Exception as e:
+            _warn(f"Failed to open log_file: {e}")
+
+    # Stash in context
+    ctx.obj = {
+        "events_path": events_path,
+        "log_file": log_file,
+        "seed": seed,
+    }
+
+# ======================================================================================
+# sys: version / doctor / env / cfg-tools
+# ======================================================================================
+
+def _read_version() -> str:
+    vf = Path("VERSION")
+    if vf.exists():
+        try:
+            return vf.read_text(encoding="utf-8").strip()
+        except Exception:
+            return "unknown"
+    return "unknown"
 
 @sys_app.command("version")
 def sys_version() -> None:
-    """Print CLI and Python versions."""
+    """Print CLI, package, and Python versions."""
     info = {
         "spectramind_cli": "v50",
+        "package_version": _read_version(),
         "python": sys.version.split()[0],
         "platform": sys.platform,
     }
@@ -208,6 +338,7 @@ def sys_env() -> None:
     info = {
         "ci": bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS")),
         "kaggle": bool("KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle").exists()),
+        "cwd": str(Path.cwd()),
     }
     rprint(info) if _HAS_RICH else typer.echo(json.dumps(info, indent=2))
 
@@ -231,46 +362,80 @@ def sys_doctor() -> None:
         results["dvc"] = False
     rprint(results) if _HAS_RICH else typer.echo(json.dumps(results, indent=2))
 
+@sys_app.command("print-config")
+def sys_print_config(
+    config: Optional[Path] = typer.Option(None, help="Config (.yaml/.json)"),
+    set: List[str] = typer.Option([], "--set", "-s", help="Overrides: key=value (repeatable)"),
+) -> None:
+    """Print merged config after applying overrides (OmegaConf if available)."""
+    cfg = _merge_overrides(_load_config_any(config), set)
+    if _HAS_RICH:
+        rprint(Panel.fit(json.dumps(cfg, indent=2)))
+    else:
+        typer.echo(json.dumps(cfg, indent=2))
+
+@sys_app.command("hash-config")
+def sys_hash_config(
+    config: Optional[Path] = typer.Option(None, help="Config (.yaml/.json)"),
+    set: List[str] = typer.Option([], "--set", "-s", help="Overrides: key=value (repeatable)"),
+) -> None:
+    """Emit a stable sha256 for the merged config (reproducibility aid)."""
+    cfg = _merge_overrides(_load_config_any(config), set)
+    h = _hash_config_dict(cfg)
+    typer.echo(h)
+
 # ======================================================================================
 # calibrate
 # ======================================================================================
 
 @calib_app.command("run")
 def calibrate_run(
+    ctx: typer.Context,
     raw_dir: Path = typer.Argument(..., exists=True, help="Directory with raw telescope inputs"),
     out_dir: Path = typer.Option(Path("data/interim/calibrated"), help="Output directory for calibrated cubes"),
     config: Optional[Path] = typer.Option(None, help="Optional config (.yaml/.json)"),
     set: List[str] = typer.Option([], "--set", "-s", help="Config overrides: key=value (repeatable)"),
     use_dvc: bool = typer.Option(False, help="Reproduce via DVC stage 'calibrate' if available"),
+    dvc_print_cmd: bool = typer.Option(False, help="Print DVC command"),
+    dry_run: bool = typer.Option(False, help="Don't execute, just show actions"),
     max_runtime_min: int = typer.Option(540, help="Runtime fence (minutes) for Kaggle (default 9h)"),
 ) -> None:
     """
     Run calibration (ADC → dark → flat → CDS → photometry → trace → phase).
     """
     t0 = time.time()
+    events_path: Path = ctx.obj["events_path"]
     try:
         cfg = _merge_overrides(_load_config_any(config), set)
+        cfg_hash = _hash_config_dict(cfg)
         _ensure_exists(raw_dir, "raw_dir")
         ensure_dir(out_dir)
 
+        _write_event(events_path, "calibrate:start", "begin", cfg_hash=cfg_hash, raw=str(raw_dir), out=str(out_dir))
+
         if use_dvc:
-            _run_dvc("calibrate")
+            _run_dvc("calibrate", dry_run=dry_run, print_cmd=dvc_print_cmd)
         else:
-            # Delegate to your real calibrator
-            # from spectramind.pipeline.calibrate import run as calib_impl
-            # calib_impl(raw_dir=raw_dir, out_dir=out_dir, cfg=cfg)
-            _warn("Using placeholder calibrator — wire spectramind.pipeline.calibrate.run(...)")
-            if not any(Path(raw_dir).iterdir()):
-                raise SpectraMindError("raw_dir is empty — no files to calibrate.")
-            (Path(out_dir) / "_calibration_done.txt").write_text("ok\n", encoding="utf-8")
+            if dry_run:
+                _ok("DRY-RUN: would call spectramind.pipeline.calibrate.run(...)")
+            else:
+                # Delegate to your real calibrator
+                # from spectramind.pipeline.calibrate import run as calib_impl
+                # calib_impl(raw_dir=raw_dir, out_dir=out_dir, cfg=cfg)
+                _warn("Using placeholder calibrator — wire spectramind.pipeline.calibrate.run(...)")
+                if not any(Path(raw_dir).iterdir()):
+                    raise SpectraMindError("raw_dir is empty — no files to calibrate.")
+                (Path(out_dir) / "_calibration_done.txt").write_text("ok\n", encoding="utf-8")
 
         elapsed = (time.time() - t0) / 60.0
-        if elapsed > max_runtime_min:
+        if elapsed > max_runtime_min and not dry_run:
             raise SpectraMindError(
                 f"Calibration exceeded runtime fence: {elapsed:.1f} min > {max_runtime_min} min"
             )
+        _write_event(events_path, "calibrate:end", "done", elapsed_min=elapsed)
         _ok(f"Calibration completed → {out_dir} (elapsed {elapsed:.1f} min)")
     except SpectraMindError as e:
+        _write_event(events_path, "calibrate:error", str(e))
         _fail(str(e))
 
 # ======================================================================================
@@ -279,20 +444,32 @@ def calibrate_run(
 
 @train_app.command("run")
 def train_run(
+    ctx: typer.Context,
     config: Optional[Path] = typer.Option(None, help="Training config (.yaml/.json)"),
     set: List[str] = typer.Option([], "--set", "-s", help="Config overrides: key=value (repeatable)"),
     use_dvc: bool = typer.Option(False, help="Reproduce via DVC stage 'train' if available"),
+    dvc_print_cmd: bool = typer.Option(False, help="Print DVC command"),
+    dry_run: bool = typer.Option(False, help="Don't execute, just show actions"),
 ) -> None:
     """
     Train the dual-encoder model (FGS1 encoder + AIRS encoder + heteroscedastic decoder).
     """
+    events_path: Path = ctx.obj["events_path"]
     try:
         if use_dvc:
-            _run_dvc("train")
-            _ok("Training (DVC) completed")
+            _run_dvc("train", dry_run=dry_run, print_cmd=dvc_print_cmd)
+            if not dry_run:
+                _ok("Training (DVC) completed")
             return
 
         cfg = _merge_overrides(_load_config_any(config), set)
+        cfg_hash = _hash_config_dict(cfg)
+        _write_event(events_path, "train:start", "begin", cfg_hash=cfg_hash)
+
+        if dry_run:
+            _ok("DRY-RUN: would call train_from_config(cfg)")
+            return
+
         ckpt_path, metrics = train_from_config(cfg)
         # Pretty summary
         logger.info("===== Training Summary =====")
@@ -306,10 +483,14 @@ def train_run(
         else:
             logger.info("Validation metrics: (none reported)")
         logger.info("============================")
+
+        _write_event(events_path, "train:end", "done", ckpt=str(ckpt_path) if ckpt_path else "", metrics=metrics or {})
         _ok("Training completed")
     except SpectraMindError as e:
+        _write_event(events_path, "train:error", str(e))
         _fail(str(e))
     except Exception as e:
+        _write_event(events_path, "train:error", f"unhandled: {e}")
         _fail(f"Training failed: {e}")
 
 # ======================================================================================
@@ -318,34 +499,52 @@ def train_run(
 
 @predict_app.command("run")
 def predict_run(
+    ctx: typer.Context,
     ckpt: Path = typer.Argument(..., exists=True, help="Checkpoint to load"),
     data_dir: Path = typer.Option(Path("data/processed/tensors_eval"), help="Eval tensors directory"),
     out_csv: Path = typer.Option(Path("artifacts/predictions/preds.csv"), help="Output predictions CSV"),
     config: Optional[Path] = typer.Option(None, help="Optional inference config"),
     set: List[str] = typer.Option([], "--set", "-s", help="Config overrides: key=value (repeatable)"),
     use_dvc: bool = typer.Option(False, help="Reproduce via DVC stage 'predict' if available"),
+    dvc_print_cmd: bool = typer.Option(False, help="Print DVC command"),
+    dry_run: bool = typer.Option(False, help="Don't execute, just show actions"),
 ) -> None:
     """
     Predict spectral μ/σ per bin (283 bins per id) for submission.
     """
+    events_path: Path = ctx.obj["events_path"]
     try:
         _ensure_exists(ckpt, "ckpt")
         ensure_dir(out_csv)
-        if use_dvc:
-            _run_dvc("predict")
-        else:
-            cfg = _merge_overrides(_load_config_any(config), set)
-            # Delegate to your inference
-            # from spectramind.inference.predict import run as impl
-            # impl(ckpt=ckpt, data_dir=data_dir, out_csv=out_csv, cfg=cfg)
-            _warn("Using placeholder predictor — wire spectramind.inference.predict.run(...)")
-            out_csv.parent.mkdir(parents=True, exist_ok=True)
-            out_csv.write_text("id,bin,mu,sigma\n", encoding="utf-8")
 
+        if use_dvc:
+            _run_dvc("predict", dry_run=dry_run, print_cmd=dvc_print_cmd)
+            if not dry_run:
+                _ok("Prediction (DVC) completed")
+            return
+
+        cfg = _merge_overrides(_load_config_any(config), set)
+        cfg_hash = _hash_config_dict(cfg)
+        _write_event(events_path, "predict:start", "begin", cfg_hash=cfg_hash, ckpt=str(ckpt))
+
+        if dry_run:
+            _ok(f"DRY-RUN: would run inference and write → {out_csv}")
+            return
+
+        # Delegate to your inference
+        # from spectramind.inference.predict import run as impl
+        # impl(ckpt=ckpt, data_dir=data_dir, out_csv=out_csv, cfg=cfg)
+        _warn("Using placeholder predictor — wire spectramind.inference.predict.run(...)")
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_csv.write_text("id,bin,mu,sigma\n", encoding="utf-8")
+
+        _write_event(events_path, "predict:end", "done", out_csv=str(out_csv))
         _ok(f"Predictions written → {out_csv}")
     except SpectraMindError as e:
+        _write_event(events_path, "predict:error", str(e))
         _fail(str(e))
     except Exception as e:
+        _write_event(events_path, "predict:error", f"unhandled: {e}")
         _fail(f"Prediction failed: {e}")
 
 # ======================================================================================
@@ -388,6 +587,13 @@ def diagnose_report(
 # submit
 # ======================================================================================
 
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 @submit_app.command("package")
 def submit_package(
     preds: Path = typer.Argument(..., exists=True, help="Predictions CSV to package"),
@@ -403,7 +609,7 @@ def submit_package(
         _ensure_exists(preds, "preds")
         if schema:
             _ensure_exists(schema, "schema")
-            # Optionally validate via your reports helpers (best-effort)
+            # Optional validation via reports helpers (best-effort)
             try:
                 from spectramind.reports import Predictions, _validate_submission_schema, _read_csv
                 df = _read_csv(preds)
@@ -421,13 +627,20 @@ def submit_package(
         ensure_dir(out_zip)
         import zipfile
         with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # Required predictions
             zf.write(preds, arcname=preds.name)
+
+            # MANIFEST
             manifest = {
                 "name": name,
                 "generated_by": "spectramind submit package",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "package_version": _read_version(),
+                "predictions_sha256": _sha256_file(preds),
             }
             zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
+
+            # Extras
             for ef in extra_file:
                 if Path(ef).exists():
                     zf.write(ef, arcname=Path(ef).name)
