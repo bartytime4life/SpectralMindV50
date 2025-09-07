@@ -1,35 +1,36 @@
+%%{init: {'flowchart': {'htmlLabels': false}}}%%
 flowchart LR
   %% =============================
   %% RAW INPUTS
   %% =============================
-  subgraph Raw["Raw Inputs"]
-    A[FGS1 Time-Series]:::raw
+  subgraph Raw [Raw Inputs]
+    A[FGS1 Time Series]:::raw
     B[AIRS Spectra]:::raw
   end
 
   %% =============================
   %% CALIBRATION CHAIN (branched)
   %% =============================
-  subgraph Calib["Calibration Chain · spectramind calibrate"]
+  subgraph Calib [Calibration Chain - spectramind calibrate]
     direction LR
-    C_ADC[ADC (bias/gain convert)] --> C_CDS[CDS (readout differencing)]
+    C_ADC[ADC bias and gain convert] --> C_CDS[CDS readout differencing]
 
     %% FGS1 branch
-    C_CDS --> C_DARK_F[Dark (FGS1)]
-    C_DARK_F --> C_PHOT[Photometry / Detrend]
-    C_PHOT --> C_PHASE_F[Phase / Align (FGS1)]
+    C_CDS --> C_DARK_F[Dark FGS1]
+    C_DARK_F --> C_PHOT[Photometry and Detrend]
+    C_PHOT --> C_PHASE_F[Phase and Align FGS1]
 
     %% AIRS branch
-    C_CDS --> C_DARK_A[Dark (AIRS)]
-    C_DARK_A --> C_FLAT[Flat-Field (AIRS)]
-    C_FLAT --> C_TRACE[Trace / Wavelength Solution]
-    C_TRACE --> C_PHASE_A[Phase / Align (AIRS)]
+    C_CDS --> C_DARK_A[Dark AIRS]
+    C_DARK_A --> C_FLAT[Flat Field AIRS]
+    C_FLAT --> C_TRACE[Trace and Wavelength Solution]
+    C_TRACE --> C_PHASE_A[Phase and Align AIRS]
   end
 
   %% =============================
   %% MODEL-READY TENSORS
   %% =============================
-  subgraph Tensors["Model-Ready Tensors (DVC-tracked)"]
+  subgraph Tensors [Model Ready Tensors DVC tracked]
     T1[(FGS1 tensors)]
     T2[(AIRS tensors)]
   end
@@ -37,66 +38,66 @@ flowchart LR
   %% =============================
   %% ENCODERS
   %% =============================
-  subgraph Encoders["Dual Encoders"]
-    E1[FGS1 Encoder<br/>(SSM/Mamba, transit-aware)]:::enc
-    E2[AIRS Encoder<br/>(CNN/GNN, spectral)]:::enc
+  subgraph Encoders [Dual Encoders]
+    E1[FGS1 Encoder SSM or Mamba transit aware]:::enc
+    E2[AIRS Encoder CNN or GNN spectral]:::enc
   end
 
   %% =============================
   %% FUSION + DECODER
   %% =============================
-  subgraph Fusion["Fusion + Decoder · spectramind train/predict"]
-    F1[Cross-modal Fusion]:::fusion
-    D1[Heteroscedastic Decoder<br/>per-bin μ, σ (283)]:::dec
+  subgraph Fusion [Fusion and Decoder - spectramind train or predict]
+    F1[Cross modal Fusion]:::fusion
+    D1[Heteroscedastic Decoder per bin mu and sigma 283]:::dec
   end
 
   %% =============================
   %% OUTPUTS
   %% =============================
-  subgraph Outputs["Outputs"]
-    O1[(μ_0..μ_282)]
-    O2[(σ_0..σ_282)]
+  subgraph Outputs [Outputs]
+    O1[(mu_0..mu_282)]
+    O2[(sigma_0..sigma_282)]
   end
 
   %% =============================
   %% CONSTRAINTS / LOSSES
   %% =============================
-  subgraph Constraints["Symbolic / Physics Priors & Losses"]
+  subgraph Constraints [Symbolic and Physics Priors and Losses]
     direction TB
-    S1[Non-negativity]
+    S1[Non negativity]
     S2[Smoothness]
     S3[Band Coherence]
-    S4[Instrument/Pipeline priors]
-    Lmain[Supervised Loss (e.g., NLL)]:::loss
+    S4[Instrument and Pipeline priors]
+    Lmain[Supervised Loss for example NLL]:::loss
   end
 
   %% =============================
   %% REPRO & TELEMETRY
   %% =============================
-  subgraph Repro["Reproducibility & Telemetry"]
+  subgraph Repro [Reproducibility and Telemetry]
     direction TB
-    H1[Hydra Config Snapshot<br/>configs → .hydra/]:::meta
-    DVC[DVC Lineage<br/>raw→calib→tensors→models]:::meta
-    LOG[Event Log (JSONL)<br/>metrics, hashes, timings]:::meta
-    ART[Artifacts Registry<br/>plots/, submissions/, sboms/]:::meta
+    H1[Hydra Config Snapshot saved to hydra]:::meta
+    DVC[DVC Lineage raw to calib to tensors to models]:::meta
+    LOG[Event Log JSONL metrics hashes timings]:::meta
+    ART[Artifacts Registry plots submissions sboms]:::meta
   end
 
   %% =============================
   %% WIRES
   %% =============================
-  %% Raw → Calibration
+  %% Raw -> Calibration
   A --> C_ADC
   B --> C_ADC
 
-  %% Calibration → Tensors
+  %% Calibration -> Tensors
   C_PHASE_F --> T1
   C_PHASE_A --> T2
 
-  %% Tensors → Encoders
+  %% Tensors -> Encoders
   T1 --> E1
   T2 --> E2
 
-  %% Encoders → Fusion → Decoder → Outputs
+  %% Encoders -> Fusion -> Decoder -> Outputs
   E1 --> F1
   E2 --> F1
   F1 --> D1
@@ -111,12 +112,19 @@ flowchart LR
   S4 -. regularize .-> Lmain
 
   %% Repro wiring
-  Calib -. snapshot .-> H1
-  Encoders -. snapshot .-> H1
-  Fusion -. snapshot .-> H1
-  Raw -. tracked .-> DVC
-  Tensors -. tracked .-> DVC
+  %% link to concrete nodes, not subgraphs
+  A -. tracked .-> DVC
+  B -. tracked .-> DVC
+  T1 -. tracked .-> DVC
+  T2 -. tracked .-> DVC
   D1 -. tracked .-> DVC
+
+  %% take snapshot when stages run
+  C_ADC -. snapshot .-> H1
+  E1 -. snapshot .-> H1
+  E2 -. snapshot .-> H1
+  F1 -. snapshot .-> H1
+
   Lmain -. metrics .-> LOG
   D1 -. artifacts .-> ART
 
