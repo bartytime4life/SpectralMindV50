@@ -1,8 +1,40 @@
-offset:
-  method: per_channel
-  table_path: data/external/calib/adc/offsets.npy
-linearization:
-  method: lut
-  lut_path: data/external/calib/adc/lin_lut.npy
-overscan:
-  enabled: false
+# configs/calib/method/adc.yaml
+# ======================================================================
+# ADC (Analog-to-Digital Conversion) Calibration — SpectraMind V50
+# ======================================================================
+# Converts raw detector counts (ADU) to physical flux units using
+# provided gain/offset calibration files. This is the first step in
+# the calibration chain and ensures physical scaling before dark,
+# flat, and trace corrections.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib.method=adc
+#
+# Keys:
+#   _target_     : Python path to the ADC calibration implementation
+#   mode         : "linear" | "poly" | "lookup"
+#   gain_file    : path to gain coefficients
+#   offset_file  : path to bias/offset coefficients
+#   normalize    : whether to normalize outputs to mean flux
+#   clip_min/max : clamp ADC outputs for stability
+#   validate     : run sanity checks after conversion
+#   log_level    : logging verbosity
+# ======================================================================
+
+_target_: spectramind.pipeline.calibrate.methods.ADCCalibration
+
+# --- Conversion mode ---
+mode: "linear"                      # ["linear", "poly", "lookup"]
+
+# --- Calibration inputs ---
+gain_file: ${paths.data}/calib/adc_gain.csv
+offset_file: ${paths.data}/calib/adc_offset.csv
+
+# --- Options ---
+normalize: true                     # scale to median baseline
+clip_min: 0.0                       # clamp lower bound
+clip_max: null                      # optional upper bound (null = disabled)
+
+# --- Safety & logging ---
+validate: true                      # check for NaNs/inf after conversion
+log_level: INFO
