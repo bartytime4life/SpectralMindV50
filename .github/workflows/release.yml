@@ -3,13 +3,13 @@ name: release
 on:
   push:
     tags:
-      - 'v*'           # e.g., v0.1.1
+      - 'v*'                # e.g., v0.1.1 or v1.2.0-rc.1
   workflow_dispatch:
 
 permissions:
-  contents: write      # create release, upload assets
-  packages: write      # push GHCR image
-  id-token: write      # OIDC if needed
+  contents: write           # create releases, upload assets
+  packages: write           # push GHCR image
+  id-token: write           # OIDC for provenance / cosign keyless
   actions: read
 
 concurrency:
@@ -17,45 +17,75 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}   # e.g., ghcr.io/org/repo
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
   PYTHON_VERSION: '3.10'
   KAGGLE_BUNDLE: artifacts/submission.zip
   VERSION_FILE: VERSION
 
 jobs:
   validate:
-    name: Validate tag & version
+    name: Validate tag & VERSION
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      ver: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.prerelease.outputs.prerelease }}
     steps:
-      - name: Checkout
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Extract tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Read VERSION
         id: version
         run: |
-          VER=$(cat "${VERSION_FILE}" | tr -d ' \n')
-          echo "version=${VER}" >> $GITHUB_OUTPUT
+          if [ ! -f "${VERSION_FILE}" ]; then
+            echo "::error::Missing ${VERSION_FILE} file."
+            exit 1
+          fi
+          VER=$(tr -d ' \n' < "${VERSION_FILE}")
+          if [ -z "$VER" ]; then
+            echo "::error::VERSION file is empty."
+            exit 1
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "VERSION file => ${VER}"
 
-      - name: Validate tag == VERSION
+      - name: Validate tag == v$(cat VERSION)
         run: |
-          TAG="${GITHUB_REF##*/}"              # e.g., v0.1.1
+          TAG="${{ steps.tag.outputs.tag }}"
           VER="${{ steps.version.outputs.version }}"
           if [ "${TAG}" != "v${VER}" ]; then
             echo "::error title=Tag/Version mismatch::Tag ${TAG} != v${VER} (from ${VERSION_FILE})"
             exit 1
           fi
-          echo "Tag ${TAG} matches VERSION v${VER}"
+          echo "✅ Tag ${TAG} matches VERSION v${VER}"
+
+      - name: Determine pre-release (contains hyphen in semver)
+        id: prerelease
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "prerelease=$(cat $GITHUB_OUTPUT | tail -n1)"
 
   build:
     name: Build & Package
     needs: validate
     runs-on: ubuntu-latest
-
+    outputs:
+      ver: ${{ steps.v.outputs.ver }}
     steps:
-      - name: Checkout
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -64,11 +94,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
-      - name: Install build deps (optional)
+      - name: Install build deps
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel
+          pip install build twine
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt || true; fi
+
+      - name: Build wheel + sdist
+        run: |
+          python -m build
+          ls -l dist
+
+      - name: Generate SHA256SUMS for dist/*
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          : > SHA256SUMS.txt
+          for f in *; do
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
 
       - name: Make Kaggle submission bundle (if script exists)
         run: |
@@ -81,10 +128,18 @@ jobs:
               echo "::warning title=Kaggle bundle missing::Expected ${KAGGLE_BUNDLE}"
             fi
           else
-            echo "No package_submission.sh; skipping Kaggle bundle."
+            echo "No scripts/package_submission.sh; skipping Kaggle bundle."
           fi
 
-      - name: Upload Kaggle bundle artifact (if present)
+      - name: Upload Python dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Kaggle bundle (if present)
         if: ${{ hashFiles(env.KAGGLE_BUNDLE) != '' }}
         uses: actions/upload-artifact@v4
         with:
@@ -93,13 +148,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Upload CHANGELOG (always attach for release)
+      - name: Upload CHANGELOG (if present)
         uses: actions/upload-artifact@v4
         with:
           name: changelog
           path: CHANGELOG.md
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Upload metrics & reports (if present)
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-and-metrics
+          path: |
+            artifacts/**/*.html
+            artifacts/**/*.json
+            metrics/**/*.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Log in to GHCR (Docker)
         uses: docker/login-action@v3
@@ -111,14 +177,18 @@ jobs:
       - name: Extract version
         id: v
         run: |
-          VER=$(cat "${VERSION_FILE}" | tr -d ' \n')
-          echo "ver=${VER}" >> $GITHUB_OUTPUT
+          VER=$(tr -d ' \n' < "${VERSION_FILE}")
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Build & Push Docker image
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push Docker image (with SBOM + provenance)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+          platforms: linux/amd64    # set to linux/amd64,linux/arm64 if you build multi-arch
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:latest
@@ -127,45 +197,127 @@ jobs:
             org.opencontainers.image.source=${{ github.repositoryUrl }}
             org.opencontainers.image.version=${{ steps.v.outputs.ver }}
             org.opencontainers.image.revision=${{ github.sha }}
+          sbom: true
+          provenance: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-  release:
-    name: Create GitHub Release
-    needs: [validate, build]
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Cosign sign (keyless OIDC)
+        if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign --yes ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}
+          cosign sign --yes ${{ env.IMAGE_NAME }}:latest
+
+      - name: Cosign sign (key-based)
+        if: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          cosign sign --key cosign.key ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}
+          cosign sign --key cosign.key ${{ env.IMAGE_NAME }}:latest
+
+  sbom:
+    name: Generate SBOMs (CycloneDX)
+    needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download artifacts
+      - name: SBOM for repo (Anchore sbom-action → CycloneDX JSON)
+        uses: anchore/sbom-action@v0.16.0
+        with:
+          path: .
+          output-file: sbom-repo.json
+          format: cyclonedx-json
+
+      - name: SBOM for Python deps (CycloneDX)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+      - run: |
+          pip install cyclonedx-bom
+          cyclonedx-bom -o sbom-python.json || true
+          ls -l sbom-*.json || true
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: |
+            sbom-repo.json
+            sbom-python.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: [validate, build, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
 
-      - name: Gather assets
-        id: assets
+      - name: Flatten artifacts into assets/
+        id: gather
         run: |
-          files=()
-          # Gather all files from downloaded artifacts
-          while IFS= read -r -d '' f; do files+=("$f"); done < <(find release-assets -type f -print0)
-          printf '%s\n' "${files[@]}" > assets.txt
-          echo "asset_count=$(wc -l < assets.txt)" >> $GITHUB_OUTPUT
-          echo "Assets:"
-          cat assets.txt
+          mkdir -p assets
+          shopt -s globstar nullglob
+          for f in release-assets/**/*; do
+            [ -f "$f" ] && cp -v "$f" assets/
+          done
+          echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
+          ls -l assets || true
 
       - name: Create Release (auto release notes)
         id: gh_release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}               # tag as title
-          tag_name: ${{ github.ref_name }}
+          name: ${{ needs.validate.outputs.tag }}
+          tag_name: ${{ needs.validate.outputs.tag }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.validate.outputs.prerelease }}
           generate_release_notes: true
           files: |
-            $(cat assets.txt)
+            assets/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log Release URL
         run: echo "Release => ${{ steps.gh_release.outputs.url }}"
+
+  pypi-publish:
+    name: Publish to PyPI (optional)
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    if: ${{ secrets.PYPI_API_TOKEN != '' }}
+    steps:
+      - name: Download python dist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: |
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.10.3
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
