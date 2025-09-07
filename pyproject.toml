@@ -42,8 +42,8 @@ dependencies = [
   "jsonschema>=4.22"
 ]
 
-# Optional extras for local GPU hosts / non-Kaggle runners.
 [project.optional-dependencies]
+# Optional extras for local GPU hosts / non-Kaggle runners.
 gpu = [
   "torch>=2.2",
   "torchvision>=0.17",
@@ -68,20 +68,23 @@ dev = [
 Homepage = "https://github.com/your-org/spectramind-v50"
 Repository = "https://github.com/your-org/spectramind-v50"
 
+# Expose a robust console script. We delegate to __main__.py:main so both
+# `spectramind` and `python -m spectramind` behave identically.
 [project.scripts]
-spectramind = "spectramind.cli:app"
+spectramind = "spectramind.__main__:main"
 
 # -------------------------- Setuptools packaging --------------------------
 [tool.setuptools]
-# Use auto-discovery for packages, exclude tests/examples data
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["spectramind*"]
-exclude = ["tests*","examples*"]
+exclude = ["tests*", "examples*", "docs*"]
 
-# Include static/config assets shipped with the package
+# NOTE: These paths are relative to the *package* location. Ensure you place
+# configs/schemas under `src/spectramind/` (e.g., `src/spectramind/configs/...`).
 [tool.setuptools.package-data]
 spectramind = [
   "schemas/*.json",
@@ -113,6 +116,12 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unused_configs = true
 show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_typed = true
+warn_required_dynamic_aliases = true
+warn_untyped_fields = true
 
 # -------------------------------- Pytest -----------------------------------
 [tool.pytest.ini_options]
@@ -121,10 +130,10 @@ addopts = "-q --disable-warnings"
 testpaths = ["tests", "src/spectramind"]
 
 # ------------------------------ TOML Sort ----------------------------------
-# Keep pyproject.toml deterministically formatted in CI/pre-commit
 [tool.tomlsort]
 in_place = false
 check = true
 sort_inline_tables = true
 trailing_comma_inline_array = true
 spaces_indent_inline_array = 0
+```
