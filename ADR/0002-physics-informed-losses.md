@@ -53,8 +53,9 @@ flowchart TD
   B["Smoothness prior"] --> L
   C["Non-negativity prior"] --> L
   D["Band coherence prior"] --> L
-  E["Calibration prior (FGS1<->AIRS)"] --> L
+  E["Calibration prior (FGS1⟷AIRS)"] --> L
   L --> F["Backpropagation → Model update"]
+
 
 
 * Each loss lives in `src/spectramind/losses/*.py`.
