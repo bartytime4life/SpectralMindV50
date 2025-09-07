@@ -1,0 +1,9 @@
+name: kaggle
+paths:
+  raw: data/raw
+  processed: data/processed
+splits:
+  train: 0.8
+  val: 0.2
+norm:
+  method: zscore
