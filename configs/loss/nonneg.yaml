@@ -1,1 +1,34 @@
-weight: 0.2
+# configs/loss/nonneg.yaml
+# ---------------------------------------------------------------------
+# SpectraMind V50 — Non-Negativity Loss
+# ---------------------------------------------------------------------
+# Enforces physical plausibility of exoplanet spectra by penalizing
+# negative transit depths (μ predictions). All predicted bins must be
+# ≥ 0, since absorption cannot be negative.
+#
+# References:
+# - NeurIPS 2025 Ariel Data Challenge docs:contentReference[oaicite:2]{index=2}
+# - SpectraMind V50 design philosophy (physics-informed loss terms):contentReference[oaicite:3]{index=3}
+# ---------------------------------------------------------------------
+
+_target_: spectramind.losses.nonneg.NonNegativityLoss
+
+# Loss weighting factor (relative to other symbolic loss terms).
+# Typical range: 0.01 – 1.0
+weight: 0.1
+
+# Penalty mode: "relu" (default) applies ReLU(x<0) penalty,
+# "square" penalizes squared negative depth, "absolute" penalizes |x|.
+mode: "relu"
+
+# Bin mask (optional): allow selective enforcement (e.g. ignore masked bins).
+# Default: null → enforce across all 283 bins.
+mask: null
+
+# Reduction strategy: "mean" (default), "sum", or "none".
+# "mean" keeps loss scale invariant to batch size.
+reduction: "mean"
+
+# Debugging options
+log_violations: true   # log if any spectrum has negative values
+violation_threshold: -1e-8  # tolerance for floating point rounding
