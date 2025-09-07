@@ -1,3 +1,104 @@
+# configs/predict.yaml
+# SpectraMind V50 — Inference / Prediction Config
+# Top-level composed Hydra configuration for batch prediction & submission formatting
+
 defaults:
-  - env: local
-  - model: v50
+  - env: local            # or kaggle / debug
+  - data: kaggle          # dataset profile for test-set loading
+  - calib: nominal        # (if inference needs calibrated tensors)
+  - model: v50            # model architecture used at train time
+  - logger: jsonl         # logging backend (jsonl/csv/wandb)
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+experiment:
+  name: "spectramind_v50_predict"
+  tags: ["v50", "predict", "submission"]
+
+paths:
+  work_dir: ${hydra:runtime.cwd}
+  artifacts: ${paths.work_dir}/artifacts
+  logs: ${paths.artifacts}/logs
+  ckpt: ${paths.artifacts}/checkpoints      # default; can be overridden via CLI
+  outputs: ${paths.artifacts}/predictions   # where predictions will be written
+  schema_dir: ${paths.work_dir}/schemas
+
+runtime:
+  seed: 42
+  deterministic: true
+  device: "auto"          # "auto" | "cuda:0" | "cpu"
+  precision: 32           # 16-mixed if tested stable for inference
+
+dataloader:
+  batch_size: 16
+  num_workers: 2          # Kaggle-safe
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 2
+
+checkpoint:
+  # Primary checkpoint (override via CLI: +checkpoint.path=/path/to.ckpt)
+  path: ${paths.ckpt}/last.ckpt
+  strict: true            # require exact key match unless migrating
+
+tta:
+  enabled: false
+  n: 4                    # number of TTA draws when enabled
+  flips: false            # e.g., temporal/spectral flips if defined in dataset
+  jitter:
+    enabled: false
+    sigma: 0.005          # small input noise if robust and allowed
+
+ensemble:
+  enabled: false
+  # If enabled, average μ and combine σ by variance-mean law across these checkpoints
+  checkpoints: []         # e.g., ["${paths.ckpt}/fold1.ckpt","${paths.ckpt}/fold2.ckpt"]
+
+postprocess:
+  clamp_nonneg_sigma: true     # enforce σ >= 0 (safety)
+  epsilon_sigma: 1.0e-9        # lower bound for σ to avoid degenerate GLL
+  enforce_nonneg_mu: false     # set true if using strictly positive targets
+  smooth_mu:
+    enabled: false             # optional mild spectral smoothing
+    weight: 0.05               # if enabled, Savitzky–Golay or Laplacian prior strength
+
+submission:
+  validate_schema: true
+  schema_path: ${paths.schema_dir}/submission.schema.json   # JSON Schema (id, mu[283], sigma[283])
+  format: "jsonl"               # "jsonl" | "wide_csv"
+  jsonl:
+    filename: "submission.jsonl"
+    indent: 0
+  wide_csv:
+    filename: "submission.csv"
+    mu_prefix: "mu_"
+    sigma_prefix: "sigma_"
+    digits: 6                  # float precision for CSV export
+    include_header: true
+
+metrics:
+  # Optional offline eval when labels are available (dev/holdout)
+  compute_offline: false
+  gll:
+    enabled: true
+  summary:
+    save_json: true
+    path: ${paths.outputs}/metrics.json
+
+logger:
+  jsonl:
+    log_dir: ${paths.logs}/jsonl
+  csv:
+    save_dir: ${paths.logs}/csv
+  wandb:
+    project: "spectramind-v50"
+    entity: null
+    mode: disabled
+
+# Hydra runtime
+hydra:
+  run:
+    dir: ${paths.artifacts}/runs/${now:%Y-%m-%d_%H-%M-%S}_predict
+  sweep:
+    dir: ${paths.artifacts}/sweeps
+    subdir: ${hydra.job.num}
