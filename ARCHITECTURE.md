@@ -1,7 +1,7 @@
 # 🛰️ SpectraMind V50 — Architecture Overview
 
 Mission-grade, **physics-informed**, **neuro-symbolic** pipeline for the **NeurIPS 2025 Ariel Data Challenge**.  
-Implements multi-sensor fusion of **FGS1 time-series** + **AIRS spectroscopy**, producing calibrated per-bin **μ/σ predictions across 283 spectral channels**.
+Implements multi-sensor fusion of **FGS1 time-series** + **AIRS spectroscopy**, producing calibrated per-bin **μ/σ predictions across 283 spectral channels**:contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}:contentReference[oaicite:2]{index=2}.
 
 ---
 
@@ -10,12 +10,12 @@ Implements multi-sensor fusion of **FGS1 time-series** + **AIRS spectroscopy**, 
 * Unified entrypoint: `spectramind` (Typer-based CLI).
 * Subcommands:
   - `calibrate` → raw telescope → calibrated cubes
-  - `train` → dual encoders + decoder optimization
+  - `train` → dual encoders + heteroscedastic decoder
   - `predict` → checkpoint → submission outputs
   - `diagnose` → reproducibility & debug tooling
   - `submit` → Kaggle/CI-ready packages
 
-✅ **Principle:** All pipeline logic exposed through CLI + Hydra overrides. *No hidden params, no code edits.*
+✅ **Principle:** All logic exposed through CLI + Hydra overrides. *No hidden params, no code edits*:contentReference[oaicite:3]{index=3}:contentReference[oaicite:4]{index=4}.
 
 ---
 
@@ -30,7 +30,7 @@ Implements multi-sensor fusion of **FGS1 time-series** + **AIRS spectroscopy**, 
   - `loss/` → smoothness, non-negativity, coherence, uncertainty terms
   - `logger/` → JSONL, tensorboard, wandb
 
-✅ **Guarantee:** *One config = one reproducible experiment*. Snapshotted + hashed against schema.
+✅ **Guarantee:** *One config = one reproducible experiment*. Snapshotted + hashed against schema:contentReference[oaicite:5]{index=5}:contentReference[oaicite:6]{index=6}.
 
 ---
 
@@ -60,7 +60,7 @@ raw (FGS1 + AIRS)
   * `airs_encoder.py` → wavelength-structured CNN/GNN.
 * **Fusion:** cross-attention or concat → latent joint space.
 * **Decoder:** heteroscedastic regression head (μ, σ per bin).
-* **Constraints:** symbolic loss engine enforces non-negativity, smoothness, coherence.
+* **Constraints:** symbolic loss engine (non-negativity, smoothness, coherence).
 
 ✅ **Hybrid overlays:** symbolic + neural → interpretable + leaderboard-safe.
 
@@ -71,9 +71,9 @@ raw (FGS1 + AIRS)
 * **DVC pipelines:** calib → tensors → train → predict → submit (all hashed & cached).
 * **Event logs:** structured JSONL (`schemas/events.schema.json`).
 * **Run manifests:** config hash + git commit + artifact digests.
-* **CI/CD:** Kaggle notebook smoke tests, SBOM refresh, lint/type gates, determinism checks.
+* **CI/CD:** Kaggle smoke tests, SBOM refresh, lint/type gates, determinism checks.
 
-✅ *Every artifact, config, and run is lineage-linked.*
+✅ *Every artifact, config, and run is lineage-linked*.
 
 ---
 
@@ -88,8 +88,8 @@ raw (FGS1 + AIRS)
 
 ## 7. Challenge Alignment
 
-* **≤ 9h runtime on Kaggle GPUs.**
-* **Offline-safe:** no internet; bootstrap via `bin/kaggle-boot.sh`.
+* **≤ 9h runtime on Kaggle GPUs**.
+* **Offline-safe**: no internet; bootstrap via `bin/kaggle-boot.sh`.
 * **283 spectral bins** enforced via schema.
 * **μ/σ outputs** with calibrated uncertainty (heteroscedastic regression).
 
