@@ -1,3 +1,51 @@
-type: gnn
-hidden: 128
-depth: 3
+# configs/model/airs_encoder.yaml
+# ======================================================================
+# SpectraMind V50 — AIRS Encoder Config
+# ======================================================================
+# Defines the encoder architecture for the AIRS spectrometer channel.
+# The AIRS encoder processes 283 wavelength channels of calibrated
+# spectra, extracting latent features for downstream fusion/decoding.
+# ======================================================================
+
+airs_encoder:
+  _target_: spectramind.models.airs_gnn.AIRSEncoder
+
+  # Input dimensionality (fixed by Ariel simulation: 283 bins)
+  input_bins: 283
+
+  # Embedding dimension for spectral features
+  embed_dim: 128
+
+  # Graph construction parameters
+  graph:
+    type: knn              # nearest-neighbor spectral graph
+    k: 8                   # number of neighbors per node
+    distance: cosine       # similarity metric (cosine or euclidean)
+    self_loops: true
+
+  # Graph neural network (GNN) layers
+  gnn:
+    layers: 4              # number of GNN layers
+    hidden_dim: 128
+    dropout: 0.1
+    norm: batch            # layer normalization: batch|layer|none
+    activation: relu       # relu|gelu|elu
+
+  # Optional spectral convolution (hybrid CNN+GNN)
+  cnn:
+    enabled: true
+    kernel_sizes: [3, 5, 7]
+    channels: [64, 64, 128]
+    dropout: 0.1
+
+  # Output latent dimension (fed to fusion module)
+  latent_dim: 256
+
+  # Regularization
+  dropout: 0.1
+  weight_decay: 1e-4
+
+# Hydra runtime
+hydra:
+  run:
+    dir: outputs/model/airs_encoder/${now:%Y-%m-%d_%H-%M-%S}
