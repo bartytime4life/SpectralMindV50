@@ -1,1 +1,42 @@
-inherit: kaggle
+# configs/data/nominal.yaml
+# ======================================================================
+# Nominal Data Profile — SpectraMind V50
+# ======================================================================
+# Defines the canonical dataset configuration for the Ariel 2025
+# challenge. This is the default ("nominal") profile used in most
+# experiments. It assumes full-resolution training/test sets with
+# calibration metadata and star info CSVs.
+#
+# Usage:
+#   python -m spectramind.train +data=nominal
+#
+# Keys:
+#   _target_     : Python path to the datamodule implementation
+#   root         : base path to data (env-specific)
+#   train_csv    : training labels / metadata
+#   test_csv     : test set metadata
+#   star_info    : star/planet info (train/test)
+#   adc_info     : analog-to-digital conversion params
+#   axis_info    : wavelength/axis metadata
+#   splits       : optional split config (Hydra composition)
+#   num_workers  : DataLoader worker count (defaults from env)
+# ======================================================================
+
+_target_: spectramind.data.datamodule.ArielDataModule
+
+root: ${paths.data}                 # resolves via env (local/kaggle)
+train_csv: ${data.root}/train.csv
+test_csv: ${data.root}/test.csv
+train_star_info: ${data.root}/train_star_info.csv
+test_star_info: ${data.root}/test_star_info.csv
+adc_info: ${data.root}/adc_info.csv
+axis_info: ${data.root}/axis_info.parquet
+
+# Splits config (optional override)
+splits: ${data.root}/splits.yaml
+
+# DataLoader defaults (can be overridden by env.num_workers)
+num_workers: ${env.num_workers}
+batch_size: 32
+pin_memory: true
+persistent_workers: true
