@@ -1,0 +1,8 @@
+offset:
+  method: per_channel
+  table_path: data/external/calib/adc/offsets.npy
+linearization:
+  method: lut
+  lut_path: data/external/calib/adc/lin_lut.npy
+overscan:
+  enabled: false
