@@ -1,0 +1,2 @@
+stages: [adc, dark, flat, cds, photometry, trace, phase]
+diagnostics: true
