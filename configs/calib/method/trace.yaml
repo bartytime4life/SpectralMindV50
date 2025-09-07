@@ -1,2 +1,24 @@
-# trace parameters
-enabled: true
+# configs/calib/method/trace.yaml
+# ======================================================================
+# Trace / Wavelength Solution Calibration — SpectraMind V50
+# ======================================================================
+# Derives the wavelength solution for AIRS spectrometer channels.
+# This step maps detector pixels to physical wavelength bins using
+# instrument-provided trace functions and reference metadata.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib.method=trace
+#
+# Keys:
+#   _target_ : Python path to the trace calibration implementation
+#   order    : polynomial/spline order for wavelength fit
+#   smooth   : apply optional smoothing to the wavelength solution
+#   validate : enable wavelength-grid sanity checks
+# ======================================================================
+
+_target_: spectramind.pipeline.calibrate.methods.TraceCalibration
+
+order: 3              # polynomial order for wavelength fitting
+smooth: true          # apply smoothing to reduce pixel jitter
+validate: true        # sanity-check wavelength monotonicity
+log_level: INFO       # per-step logging level
