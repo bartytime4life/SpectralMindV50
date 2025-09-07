@@ -1,6 +1,24 @@
 # src/spectramind/pipeline/predict.py
 from __future__ import annotations
 
+"""
+SpectraMind V50 — Prediction Runner (Hydra + Inference Orchestrator)
+====================================================================
+
+Key capabilities
+----------------
+• Hydra config composition with robust defaults
+• Kaggle/CI guardrails (workers, batch-size, determinism, low-mem)
+• Checkpoint & output path resolution (DVC-/CI-friendly)
+• Config snapshot + artifact manifest + SHA256
+• Optional JSONL event logging (start/end) and run manifest
+
+Notes
+-----
+• CLI stays thin; this module holds the orchestration/business logic.
+• The actual inference is delegated to `spectramind.inference.predict.run(cfg)`.
+"""
+
 import hashlib
 import json
 import os
@@ -10,8 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from hydra import compose, initialize
+from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
+
+# SpectraMind optional logging backplane (manifest + JSONL events)
+try:
+    from spectramind.logging.manifest import generate_manifest, save_manifest  # type: ignore
+    from spectramind.logging.event_logger import EventLogger  # type: ignore
+
+    _HAS_SM_LOGGING = True
+except Exception:  # pragma: no cover
+    _HAS_SM_LOGGING = False
 
 __all__ = ["run"]
 
@@ -24,6 +51,7 @@ __all__ = ["run"]
 @dataclass(frozen=True, slots=True)
 class PredictPayload:
     """Strongly-typed prediction invocation payload."""
+
     config_name: str
     overrides: list[str]
     checkpoint: Optional[str]
@@ -57,7 +85,7 @@ def run(
     • Resolve/validate checkpoint and output destination
     • Apply Kaggle/CI guardrails (workers, batch size, deterministic flags)
     • Emit config snapshot & call internal orchestrator
-    • Verify output was written; persist inference manifest
+    • Verify output was written; persist inference manifest & JSONL events
     """
     payload = PredictPayload(
         config_name=config_name,
@@ -89,7 +117,28 @@ def run(
     ckpt_file = _resolve_checkpoint(repo_root, cfg, strict=payload.strict)
     out_file = _prepare_output_path(repo_root, cfg)
 
+    # Config snapshot (human+machine)
     _emit_config_snapshot(out_file, cfg)
+
+    # Optional JSONL event logger (linked to output dir/version)
+    evt_logger: Optional[EventLogger] = None
+    run_id = out_file.stem
+    if _HAS_SM_LOGGING:
+        evt_logger = EventLogger.for_run(stage="predict", run_id=run_id)
+        evt_logger.info(
+            "predict/start",
+            data={
+                "config_name": payload.config_name,
+                "overrides": payload.overrides,
+                "checkpoint": str(ckpt_file),
+                "out_path": str(out_file),
+                "env": payload.env,
+                "batch_size": int(cfg.predict.batch_size),
+                "num_workers": int(cfg.predict.num_workers),
+                "deterministic": bool(cfg.runtime.deterministic),
+                "low_mem_mode": bool(cfg.runtime.low_mem_mode),
+            },
+        )
 
     # Dispatch to user orchestrator
     try:
@@ -120,10 +169,38 @@ def run(
 
     # Verify output exists
     if not out_file.exists():
+        if evt_logger is not None:
+            evt_logger.error("predict/error", message="output_missing", data={"expected_path": str(out_file)})
+            evt_logger.close()
         raise RuntimeError(f"[predict] orchestrator did not produce output: {out_file}")
 
     # Persist an inference manifest (DVC/CI-friendly)
     _write_inference_manifest(out_file, cfg)
+
+    # Optional: save a richer run manifest
+    if _HAS_SM_LOGGING:
+        manifest = generate_manifest(
+            stage="predict",
+            config_snapshot=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
+            extra={
+                "predictions_path": str(out_file),
+                "predictions_sha256": _sha256_of_file(out_file),
+                "checkpoint": str(cfg.predict.get("checkpoint") or ""),
+                "hydra_overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
+                "env": payload.env,
+            },
+        )
+        save_manifest(manifest, out_file.parent / "manifest.json")
+
+    if evt_logger is not None:
+        evt_logger.info(
+            "predict/end",
+            data={
+                "predictions_path": str(out_file),
+                "predictions_sha256": _sha256_of_file(out_file),
+            },
+        )
+        evt_logger.close()
 
 
 # ======================================================================================
@@ -140,7 +217,8 @@ def _compose_hydra_config(repo_root: Path, payload: PredictPayload) -> DictConfi
             "(expected at repo root per repo blueprint)"
         )
 
-    with initialize(config_path=str(config_dir), version_base=None):
+    # Prefer absolute-dir initializer (stable CWD)
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         try:
             cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
         except Exception:
@@ -337,8 +415,8 @@ def _find_repo_root() -> Path:
             if p.name == "src":
                 return p.parent
             return p
-    # Fallback: best-effort three levels up (keeps notebooks happy)
-    return here.parents[3]
+    # Fallback: best-effort two levels up (keeps notebooks happy)
+    return here.parents[2]
 
 
 def _as_path(p: str | os.PathLike[str]) -> Path:
