@@ -1,2 +1,107 @@
-seed: 1337
-method: stratified
+# configs/data/splits.yaml
+# ----------------------------------------------------------------------
+# Dataset split configuration — SpectraMind V50
+# ----------------------------------------------------------------------
+# Controls how training/validation/test splits are created or loaded.
+# This file is consumed by the data module before dataloaders are built.
+#
+# Supported schemes:
+#   - "holdout"     → random split with optional stratify/group
+#   - "kfold"       → (Stratified)KFold or GroupKFold based on columns
+#   - "timeseries"  → TimeSeriesSplit (ordered by a time column)
+#   - "precomputed" → read split assignments from a CSV/Parquet file
+#
+# Usage examples:
+#   python -m spectramind.train data.splits.scheme=holdout
+#   python -m spectramind.train data.splits.scheme=kfold data.splits.n_splits=5
+#   python -m spectramind.train data.splits.scheme=precomputed \
+#       data.splits.precomputed.path=configs/data/splits/train_folds.csv
+# ----------------------------------------------------------------------
+
+splits:
+
+  # One of: ["holdout", "kfold", "timeseries", "precomputed"]
+  scheme: "kfold"
+
+  # RNG seed for reproducibility (used when shuffling or assigning folds)
+  seed: 1337
+
+  # Column mapping (as present in your metadata/dataframe)
+  columns:
+    id: "id"                  # unique sample id
+    group: "star_id"          # optional; if set, enables GroupKFold/blocked holdout
+    stratify: "target_bucket" # optional; discrete label for stratified splits
+    time: "obs_mjd"           # optional; monotonically increasing numeric/time for TimeSeriesSplit
+
+  # KFold settings (used when scheme=="kfold")
+  kfold:
+    n_splits: 5               # number of folds
+    shuffle: true             # shuffle before split (ignored if groups set)
+    # Strategy resolution:
+    #   - If columns.group is set → use GroupKFold
+    #   - Else if columns.stratify is set → use StratifiedKFold
+    #   - Else → plain KFold
+    # For group+stratify together, group takes precedence (leak-safe).
+
+  # Holdout settings (used when scheme=="holdout")
+  holdout:
+    val_size: 0.1             # fraction in (0,1) or integer count
+    test_size: 0.0            # optional separate test holdout (0 disables)
+    shuffle: true             # shuffle before split
+    # Strategy resolution (same precedence as kfold):
+    #   - group column → grouped holdout (no group leakage)
+    #   - else stratify column → stratified holdout
+    #   - else → random holdout
+
+  # Time series split (used when scheme=="timeseries")
+  timeseries:
+    n_splits: 5               # number of folds (walk-forward)
+    max_train_size: null      # optional cap on train window (int or null)
+    # Notes:
+    #   - Requires columns.time to be set.
+    #   - Data must be sortable by the time column (ascending).
+
+  # Precomputed split locations (used when scheme=="precomputed")
+  # Expected format: contains at least {id, split} or {id, fold}
+  #   - For kfold-like usage, provide "fold" integer in [0..n_splits-1]
+  #   - For holdout-like usage, provide "split" with values in {"train","val","test"}
+  precomputed:
+    path: null                # set to CSV or Parquet path when used
+    format: "csv"             # "csv" | "parquet"
+    id_col: "id"
+    fold_col: "fold"
+    split_col: "split"
+
+  # Constraints / safety rails to avoid leakage and enforce scientific realism
+  constraints:
+    disjoint_groups_across_splits: true   # never put same group in train & val/test
+    disjoint_time_future_leak: true       # when timeseries, enforce train_time_max < val_time_min
+    enforce_min_per_fold: 1               # minimum samples per fold
+    # Optional: ensure each fold keeps stratification support bins
+    enforce_strata_balance: true          # if stratify is provided
+
+  # Optional export of computed splits for reproducibility / DVC tracking
+  export:
+    enable: true
+    dir: "./configs/data/splits_artifacts"
+    # Filenames will include scheme, seed, and timestamp, e.g.:
+    #   splits_kfold_s5_seed1337_YYYYMMDD_HHMM.csv
+    format: "csv"             # "csv" | "parquet"
+    include_columns:          # extra columns to emit (if present in metadata)
+      - "${splits.columns.id}"
+      - "${splits.columns.group}"
+      - "${splits.columns.stratify}"
+      - "${splits.columns.time}"
+
+  # Diagnostics (printed once when splits are made/loaded)
+  diagnostics:
+    show_class_balance: true      # requires stratify column to exist
+    show_group_overlap: true
+    show_time_windows: true
+    print_head: 5                 # preview first rows of assignments (0 disables)
+
+  # Runtime checks (raise if violated)
+  strict:
+    require_columns: true         # error if referenced columns are missing
+    require_precomputed_path: true  # when scheme=="precomputed"
+    error_on_empty_fold: true
