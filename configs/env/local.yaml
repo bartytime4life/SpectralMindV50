@@ -1,0 +1,2 @@
+device: cpu
+log_dir: ${run.workdir}/logs
