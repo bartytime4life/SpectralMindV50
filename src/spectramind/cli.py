@@ -124,20 +124,37 @@ def _ensure_exists(pth: Optional[Path], label: str) -> None:
 # Determinism / seeding
 # ======================================================================================
 
-def _set_seeds(seed: Optional[int]) -> None:
+def _set_seeds(seed: Optional[int], *, deterministic_torch: bool = True) -> None:
+    """
+    Set global RNG seeds for Python, NumPy, and (optionally) PyTorch.
+
+    Parameters
+    ----------
+    seed : int | None
+        Seed value to set. If None, nothing is changed.
+    deterministic_torch : bool, default=True
+        If True, configures PyTorch for deterministic ops
+        (cudnn.deterministic=True, cudnn.benchmark=False).
+    """
     if seed is None:
         return
+
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
+
     if _HAS_NUMPY:
         _np.random.seed(seed)  # type: ignore[attr-defined]
+
     if _HAS_TORCH:
         torch.manual_seed(seed)  # type: ignore[name-defined]
         if torch.cuda.is_available():  # type: ignore[name-defined]
             torch.cuda.manual_seed_all(seed)  # type: ignore[attr-defined]
-        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
-        torch.backends.cudnn.benchmark = False     # type: ignore[attr-defined]
-    _ok(f"Deterministic seeds set → {seed}")
+        if deterministic_torch:
+            torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+            torch.backends.cudnn.benchmark = False     # type: ignore[attr-defined]
+
+    _ok(f"Deterministic seeds set → {seed}"
+        + ("" if not _HAS_TORCH else f" (torch deterministic={deterministic_torch})"))
 
 # ======================================================================================
 # Config loading / overrides
@@ -281,7 +298,7 @@ def _global(
     Global flags for logging, determinism, and event stream.
     """
     # Wire seeds early
-    _set_seeds(seed)
+    _set_seeds(seed, deterministic_torch=True)
 
     # Set logger level
     if quiet:
@@ -383,6 +400,32 @@ def sys_hash_config(
     cfg = _merge_overrides(_load_config_any(config), set)
     h = _hash_config_dict(cfg)
     typer.echo(h)
+
+@sys_app.command("seed")
+def sys_seed(
+    value: int = typer.Option(..., "--value", "-v", help="Seed value to set globally"),
+    deterministic_torch: bool = typer.Option(
+        True,
+        "--deterministic-torch/--no-deterministic-torch",
+        help="Configure PyTorch for deterministic ops (cudnn.deterministic=True, benchmark=False).",
+    ),
+) -> None:
+    """
+    Set a global random seed across libraries used in this process.
+
+    Examples
+    --------
+    spectramind sys seed -v 42
+    spectramind sys seed --value 2025 --no-deterministic-torch
+    """
+    try:
+        _set_seeds(value, deterministic_torch=deterministic_torch)
+        _ok(f"Global seed set to {value} "
+            f"({'deterministic torch' if deterministic_torch else 'non-deterministic torch'})")
+        # NOTE: environment changes here affect only this process and its children.
+        # For persistence across shells, export PYTHONHASHSEED in your shell profile if desired.
+    except Exception as e:
+        _fail(f"Failed to set seed: {e}")
 
 # ======================================================================================
 # calibrate
