@@ -8,7 +8,7 @@ SHELL := /usr/bin/env bash
 
 # Python / package
 PKG        ?= spectramind
-PY         ?= python
+PY         ?= python3
 VENV       ?= .venv
 VENV_BIN   := $(VENV)/bin
 PIP        := $(VENV_BIN)/pip
@@ -17,8 +17,9 @@ PRECOMMIT  := $(VENV_BIN)/pre-commit
 
 # DVC
 DVC_REMOTE ?= localcache
+DVC_REMOTE_PATH ?= ./dvc-remote
 
-# Release
+# Release & versioning
 VERSION_FILE ?= VERSION
 TAG          ?=
 GPG_SIGN     ?= 0
@@ -38,12 +39,13 @@ SUBMISSION_SCHEMA ?= schemas/submission.schema.json
 # -----------------------------------------------------------------------------
 # Phony targets
 # -----------------------------------------------------------------------------
-.PHONY: help dev precommit lint format type test check docs docs-serve \
+.PHONY: help env ensure-venv ensure-tools dev precommit lint format type test check \
+        docs docs-serve \
         train calibrate predict submit \
         dvc-setup dvc-repro dvc-push dvc-pull \
         sbom pip-audit trivy scan \
         kaggle-package kaggle-verify kaggle-clean kaggle \
-        tag push-tag release bump \
+        version tag push-tag release bump \
         clean distclean ci
 
 # -----------------------------------------------------------------------------
@@ -51,20 +53,41 @@ SUBMISSION_SCHEMA ?= schemas/submission.schema.json
 # -----------------------------------------------------------------------------
 help:
 	@awk 'BEGIN{FS=":.*##"; printf "\n\033[1mAvailable targets\033[0m\n"} \
-	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 # -----------------------------------------------------------------------------
-# Dev / toolchain
+# Environment bootstrapping
 # -----------------------------------------------------------------------------
-dev: ## Setup local dev environment (.venv, dev deps, pre-commit)
-	$(PY) -m venv $(VENV)
-	$(PIP) install -U pip wheel
-	$(PIP) install -e . -r requirements-dev.txt
-	$(PRECOMMIT) install
+env: ensure-venv ensure-tools ## Create .venv and install dev tools (fast if uv is available)
+
+ensure-venv: ## Create virtualenv if missing
+	@if [ ! -d "$(VENV)" ]; then \
+	  echo ">> Creating venv: $(VENV)"; \
+	  $(PY) -m venv $(VENV); \
+	fi
+
+ensure-tools: ensure-venv ## Install dev dependencies and tools
+	@if command -v uv >/dev/null 2>&1; then \
+	  echo ">> Using uv for fast installs"; \
+	  uv pip install --system --python $(PYTHON) -U pip wheel || true; \
+	  uv pip install --system --python $(PYTHON) -e . -r requirements-dev.txt; \
+	else \
+	  $(PIP) install -U pip wheel; \
+	  $(PIP) install -e . -r requirements-dev.txt; \
+	fi
+	@# install optional extras if present
+	@if [ -f requirements-kaggle.txt ]; then $(PIP) install -r requirements-kaggle.txt || true; fi
+	@# pre-commit hooks
+	$(PRECOMMIT) install || true
+
+dev: env precommit ## Setup local dev env & install pre-commit
 
 precommit: ## Run pre-commit hooks on all files
 	$(PRECOMMIT) run --all-files
 
+# -----------------------------------------------------------------------------
+# Code quality
+# -----------------------------------------------------------------------------
 lint: ## Lint (Ruff, TOML sort check)
 	$(VENV_BIN)/ruff check src tests
 	$(VENV_BIN)/ruff format --check src tests || true
@@ -81,6 +104,9 @@ test: ## Run tests (pytest -q)
 
 check: precommit lint type test ## Full local gate: pre-commit + lint + type + tests
 
+# -----------------------------------------------------------------------------
+# Docs
+# -----------------------------------------------------------------------------
 docs: ## Build docs (MkDocs)
 	$(VENV_BIN)/mkdocs build -q
 
@@ -107,7 +133,8 @@ submit: ## Build submission artifacts (CLI submit command)
 # -----------------------------------------------------------------------------
 dvc-setup: ## Initialize DVC and default remote
 	$(VENV_BIN)/dvc init -q || true
-	$(VENV_BIN)/dvc remote add -d $(DVC_REMOTE) ./dvc-remote 2>/dev/null || true
+	mkdir -p "$(DVC_REMOTE_PATH)"
+	$(VENV_BIN)/dvc remote add -d $(DVC_REMOTE) "$(DVC_REMOTE_PATH)" 2>/dev/null || true
 
 dvc-repro: ## Reproduce DVC pipeline
 	$(VENV_BIN)/dvc repro
@@ -121,13 +148,18 @@ dvc-pull: ## Pull DVC-tracked data from remote
 # -----------------------------------------------------------------------------
 # Security / Supply Chain
 # -----------------------------------------------------------------------------
-sbom: ## Generate SBOM (CycloneDX via Syft)
+sbom: ## Generate SBOM (CycloneDX via Syft or Python fallback)
 	mkdir -p $(ARTIFACTS_DIR)
 	if command -v syft >/dev/null 2>&1; then \
 	  syft packages dir:. -o cyclonedx-json > $(ARTIFACTS_DIR)/sbom.json; \
+	elif $(PYTHON) -c "import cyclonedx_py; print(1)" >/dev/null 2>&1; then \
+	  echo "::warning::syft not found; using CycloneDX Python fallback"; \
+	  $(PIP) install cyclonedx-bom >/dev/null 2>&1 || true; \
+	  cyclonedx-bom -o $(ARTIFACTS_DIR)/sbom.json || true; \
 	else \
-	  echo "Syft not installed; skipping SBOM generation."; \
+	  echo "::warning::No SBOM tool available; skipping SBOM generation."; \
 	fi
+	@echo "::notice::SBOM → $(ARTIFACTS_DIR)/sbom.json"
 
 pip-audit: ## Audit Python deps (pip-audit)
 	$(VENV_BIN)/pip-audit -r requirements-dev.txt || true
@@ -155,8 +187,8 @@ kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
 	  echo ">> Fallback packaging: looking for outputs"; \
 	  set -euo pipefail; \
 	  files=""; \
-	  for f in outputs/*.csv outputs/*.parquet predictions/*.csv predictions/*.parquet; do \
-	    [ -e "$$f" ] && files="$$files $$f"; \
+	  for f in outputs/* predictions/*; do \
+	    case "$$f" in *.csv|*.parquet|*.json) [ -e "$$f" ] && files="$$files $$f" ;; esac; \
 	  done; \
 	  if [ -z "$$files" ]; then \
 	    echo "::error::No output files found for Kaggle bundle. Provide scripts/package_submission.sh or ensure outputs exist."; \
@@ -174,11 +206,7 @@ kaggle-verify: ## Verify submission bundle integrity (schema if present)
 	@if [ ! -f "$(SUBMISSION_ZIP)" ]; then \
 	  echo "::error::Bundle not found: $(SUBMISSION_ZIP). Run 'make kaggle-package' first."; exit 1; \
 	fi
-	@if command -v unzip >/dev/null 2>&1; then \
-	  echo ">> Inspecting archive:"; unzip -l "$(SUBMISSION_ZIP)"; \
-	else \
-	  echo ">> 'unzip' not found; skipping listing."; \
-	fi
+	@if command -v unzip >/dev/null 2>&1; then unzip -l "$(SUBMISSION_ZIP)"; else echo ">> 'unzip' not found; skipping listing."; fi
 	@if [ -f "$(SUBMISSION_SCHEMA)" ]; then \
 	  echo ">> Schema detected: $(SUBMISSION_SCHEMA)"; \
 	  if [ -x "$(VENV_BIN)/check-jsonschema" ]; then \
@@ -203,7 +231,7 @@ kaggle-clean: ## Remove local Kaggle bundle
 kaggle: kaggle-package kaggle-verify ## Package + verify submission
 
 # -----------------------------------------------------------------------------
-# Releases (pairs with .github/workflows/release.yml)
+# Versioning & Releases
 # -----------------------------------------------------------------------------
 define _ensure_clean
 	@git update-index -q --refresh
@@ -217,6 +245,7 @@ endef
 define _read_version
 	@VER=$$(sed -e 's/[[:space:]]//g' $(VERSION_FILE)); \
 	echo "VERSION=$(VERSION_FILE) => $$VER"; \
+	if [ -z "$$VER" ]; then echo >&2 "::error::VERSION file is empty"; exit 1; fi; \
 	if [ -z "$(TAG)" ]; then \
 	  echo >&2 "::error::TAG is required (e.g. make release TAG=v$$VER)"; exit 1; \
 	fi; \
@@ -225,17 +254,32 @@ define _read_version
 	fi
 endef
 
+# Sync VERSION -> pyproject.toml, commit, and (optionally) tag
+version: ## Sync VERSION to pyproject.toml and commit (optionally tags if TAG=vX.Y.Z)
+	@set -euo pipefail; \
+	ver="$$(cat $(VERSION_FILE) | tr -d '[:space:]')"; \
+	if [ -z "$$ver" ]; then echo "❌ ERROR: $(VERSION_FILE) is empty"; exit 1; fi; \
+	echo "🔄 Setting version to $$ver"; \
+	pyproject="pyproject.toml"; \
+	if [ ! -f "$$pyproject" ]; then echo "❌ ERROR: $$pyproject not found"; exit 1; fi; \
+	sed -i.bak -E "s/^(version\s*=\s*\").*(\")/\1$$ver\2/" "$$pyproject"; \
+	rm -f "$$pyproject.bak"; \
+	echo "✅ pyproject.toml version -> $$ver"; \
+	git add $(VERSION_FILE) "$$pyproject"; \
+	if ! git diff --cached --quiet; then \
+	  git commit -m "chore: set version $$ver"; \
+	else \
+	  echo "ℹ️  No changes to commit"; \
+	fi; \
+	if [ -n "$(TAG)" ]; then \
+	  if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo "⚠️  Tag $(TAG) already exists"; else git tag -a "$(TAG)" -m "Release $(TAG)"; fi; \
+	fi
+
 tag: ## Create annotated/signed tag (TAG=vX.Y.Z, GPG_SIGN=0|1)
 	$(_ensure_clean)
 	$(_read_version)
-	@if git rev-parse "$(TAG)" >/dev/null 2>&1; then \
-	  echo >&2 "::error::Tag $(TAG) already exists."; exit 1; \
-	fi
-	@if [ "$(GPG_SIGN)" = "1" ]; then \
-	  git tag -s "$(TAG)" -m "$(TAG_MSG)"; \
-	else \
-	  git tag -a "$(TAG)" -m "$(TAG_MSG)"; \
-	fi
+	@if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo >&2 "::error::Tag $(TAG) already exists."; exit 1; fi
+	@if [ "$(GPG_SIGN)" = "1" ]; then git tag -s "$(TAG)" -m "$(TAG_MSG)"; else git tag -a "$(TAG)" -m "$(TAG_MSG)"; fi
 	@echo "::notice::Created tag $(TAG)"
 
 push-tag: ## Push tag to origin (triggers GH Actions release)
@@ -245,7 +289,7 @@ push-tag: ## Push tag to origin (triggers GH Actions release)
 
 release: tag push-tag ## Full release flow: tag + push
 
-bump: ## Bump semantic version (patch|minor|major) & update CHANGELOG heading
+bump: ## Bump semantic version (BUMP=patch|minor|major) & update CHANGELOG heading
 	@BUMP ?= patch; \
 	if [ ! -f $(VERSION_FILE) ]; then echo "0.1.0" > $(VERSION_FILE); fi; \
 	VER=$$(sed -e 's/[[:space:]]//g' $(VERSION_FILE)); \
@@ -258,7 +302,7 @@ bump: ## Bump semantic version (patch|minor|major) & update CHANGELOG heading
 	esac; \
 	NEW_VER="$$MAJ.$$MIN.$$PAT"; \
 	echo "$$NEW_VER" > $(VERSION_FILE); \
-	sed -i.bak "1s/.*/## [$$NEW_VER] — $$(date +%Y-%m-%d)/" CHANGELOG.md || true; rm -f CHANGELOG.md.bak; \
+	if [ -f CHANGELOG.md ]; then sed -i.bak "1s/.*/## [$$NEW_VER] — $$(date +%Y-%m-%d)/" CHANGELOG.md; rm -f CHANGELOG.md.bak; fi; \
 	git add $(VERSION_FILE) CHANGELOG.md || true; \
 	git commit -m "chore(release): bump version to $$NEW_VER" || true; \
 	echo "::notice::Bumped to $$NEW_VER"
