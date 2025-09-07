@@ -1,2 +1,72 @@
-type: cross_attention
-heads: 4
+# configs/model/fusion.yaml
+# ======================================================================
+# SpectraMind V50 — Fusion Module Config
+# ======================================================================
+# Fuses latent features from the FGS1 temporal encoder and the AIRS spectral
+# encoder before decoding to per-bin μ/σ. Supports cross-attention (default)
+# or concat+MLP. Includes optional FGS1-biased gating to reflect metric
+# asymmetry (~58× weight on the FGS1 channel).
+# ======================================================================
+
+fusion:
+  # Select fusion strategy: "xattn" (cross-attention) or "concat_mlp"
+  kind: ${oc.env:SM_FUSION_KIND, "xattn"}
+
+  # Latent dims from encoders; typically set in their configs
+  d_fgs1: ${model.fgs1_encoder.d_model}
+  d_airs: ${model.airs_encoder.d_model}
+
+  # Common fusion embedding size
+  d_fusion: ${oc.env:SM_D_FUSION, 512}
+
+  # -------- Pooling (align token shapes from each encoder) ---------------
+  pooling:
+    # FGS1: long time-series → pooled temporal token(s)
+    fgs1: ${oc.env:SM_POOL_FGS1, "attn_pool"}   # "attn_pool"|"mean"|"cls"
+    # AIRS: per-wavelength features → pooled spectral token(s)
+    airs: ${oc.env:SM_POOL_AIRS, "mean"}        # "mean"|"attn_pool"|"cls"
+    n_tokens: ${oc.env:SM_POOL_NTOK, 1}         # tokens kept per stream if using attn_pool
+
+  # -------- Cross-Attention fusion --------------------------------------
+  cross_attention:
+    # Only used if kind == "xattn"
+    n_layers: ${oc.env:SM_XAT_LAYERS, 2}
+    n_heads: ${oc.env:SM_XAT_HEADS, 4}
+    dropout: ${oc.env:SM_XAT_DROPOUT, 0.1}
+    # Query/key/value roles. Default: let FGS1 query AIRS to imprint global
+    # transit shape onto spectral features (FGS1-first strategy).
+    fgs1_as_query: ${oc.env:SM_XAT_FQS, true}
+    # Feed-forward sublayer inside each xattn block
+    mlp_hidden_mul: ${oc.env:SM_XAT_FF_MUL, 4}   # FFN size = mul * d_fusion
+    mlp_dropout: ${oc.env:SM_XAT_FF_DROPOUT, 0.1}
+    activation: ${oc.env:SM_XAT_ACT, "gelu"}
+
+  # -------- Concat + MLP fusion -----------------------------------------
+  concat_mlp:
+    # Only used if kind == "concat_mlp"
+    hidden: ${oc.env:SM_CMLP_HID, "[512, 256]"}
+    activation: ${oc.env:SM_CMLP_ACT, "gelu"}
+    dropout: ${oc.env:SM_CMLP_DROPOUT, 0.1}
+    layernorm: ${oc.env:SM_CMLP_LN, true}
+
+  # -------- Gating / FGS1 bias ------------------------------------------
+  gating:
+    enabled: ${oc.env:SM_GATE_EN, true}
+    type: ${oc.env:SM_GATE_TYPE, "sigmoid"}   # "sigmoid"|"softmax"
+    # Bias gate toward FGS1 to reflect metric weighting (~58× for FGS1 bin)
+    fgs1_bias: ${oc.env:SM_GATE_FGS1_BIAS, 1.5}  # >1 upweights FGS1 stream
+    dropout: ${oc.env:SM_GATE_DROPOUT, 0.0}
+
+  # -------- Normalization / residuals -----------------------------------
+  normalization:
+    type: ${oc.env:SM_FUSION_NORM, "layernorm"}  # "layernorm"|"rmsnorm"|"none"
+  residual: ${oc.env:SM_FUSION_RESID, true}
+
+  # -------- Projection to decoder input ---------------------------------
+  projection:
+    out_dim: ${model.decoder.d_in}
+    dropout: ${oc.env:SM_FUSION_PROJ_DROPOUT, 0.0}
+
+  # -------- Regularization knobs ----------------------------------------
+  dropout: ${oc.env:SM_FUSION_DROPOUT, 0.0}
+  weight_decay: ${oc.env:SM_FUSION_WD, 0.0}
