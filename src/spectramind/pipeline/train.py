@@ -4,9 +4,12 @@ from __future__ import annotations
 import os
 import sys
 import time
+import json
+import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
@@ -21,13 +24,15 @@ try:
 except Exception:  # pragma: no cover
     WandbLogger = None  # type: ignore
 
+__all__ = ["run"]
 
-# --------------------------------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------------------
 # Payload & Entrypoint
-# --------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TrainPayload:
     config_name: str
     overrides: List[str]
@@ -59,18 +64,20 @@ def run(
     env: Dict[str, Any] | None = None,
 ) -> None:
     """
-    Training runner (Hydra + Lightning). This is called by the CLI thin wrapper.
+    Training runner (Hydra + Lightning). Called by the CLI thin wrapper.
 
-    Responsibilities:
-      • Compose Hydra config (config_name + overrides)
-      • Set seeds & deterministic behavior when requested
-      • Instantiate DataModule, LightningModule, loggers, callbacks
-      • Enforce Kaggle/CI guardrails (no internet, reduced workers/verbosity)
-      • Launch PL.Trainer.fit() and persist artifacts/metrics
+    Responsibilities
+    ---------------
+    • Compose Hydra config (config_name + overrides)
+    • Set seeds & deterministic behavior when requested
+    • Instantiate DataModule, LightningModule, loggers, callbacks
+    • Enforce Kaggle/CI guardrails (no internet, reduced workers/verbosity, stable precision)
+    • Launch PL.Trainer.fit() and persist artifacts/metrics
 
-    Notes:
-      • Business logic lives here; CLI remains thin and import-cheap.
-      • Config/schema should remain the single source of truth.
+    Notes
+    -----
+    • Business logic lives here; CLI remains thin and import-cheap.
+    • Config/schema should remain the single source of truth.
     """
     payload = TrainPayload(
         config_name=config_name,
@@ -84,7 +91,7 @@ def run(
         dry_run=dry_run,
         strict=strict,
         quiet=quiet,
-        env=env or {},
+        env=dict(env or {}),
     )
 
     repo_root = _find_repo_root()
@@ -104,7 +111,7 @@ def run(
     if payload.resume_from is not None:
         cfg.training.resume_from = payload.resume_from
 
-    # Kaggle/CI Guardrails
+    # Kaggle/CI guardrails
     _apply_env_guardrails(cfg, payload.env, payload.quiet, payload.dry_run)
 
     # Seeds & determinism
@@ -112,12 +119,10 @@ def run(
 
     # Instantiate components (keep imports local to provide clear errors)
     try:
-        from spectramind.data.datamodule import SpectraDataModule  # type: ignore
-        from spectramind.models.system import SpectraSystem  # type: ignore
+        from spectramind.data.datamodule import SpectraDataModule  # type: ignore[attr-defined]
+        from spectramind.models.system import SpectraSystem  # type: ignore[attr-defined]
     except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            f"Failed to import pipeline modules: {type(e).__name__}: {e}"
-        ) from e
+        raise RuntimeError(f"Failed to import pipeline modules: {type(e).__name__}: {e}") from e
 
     # Data
     datamodule = SpectraDataModule(cfg.data, cfg.calib, num_workers=cfg.training.num_workers)
@@ -148,9 +153,9 @@ def run(
     _persist_config_snapshot(cfg, repo_root, loggers)
 
 
-# --------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Hydra & Config Utilities
-# --------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
 
 def _compose_hydra_config(repo_root: Path, payload: TrainPayload) -> DictConfig:
@@ -162,14 +167,15 @@ def _compose_hydra_config(repo_root: Path, payload: TrainPayload) -> DictConfig:
     with initialize(config_path=str(config_dir), version_base=None):
         try:
             cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
-        except Exception as e:  # pragma: no cover
+        except Exception:
             if payload.strict:
                 raise
-            # Non-strict: try composing without validation as a fallback
-            cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
+            # Non-strict: try a minimal compose without overrides
+            cfg = compose(config_name=payload.config_name, overrides=[])
 
     # Enforce minimally expected sections with safe defaults
     _ensure_defaults(cfg)
+    _validate_minimal_schema(cfg, strict=payload.strict)
 
     # Emit k/v for debugging if not quiet
     if not payload.quiet:
@@ -191,10 +197,19 @@ def _ensure_defaults(cfg: DictConfig) -> None:
     cfg.training.setdefault("optimizer", {})
     cfg.training.setdefault("scheduler", {})
     cfg.training.setdefault("metrics", {})
-    cfg.training.setdefault("early_stopping", {"enabled": True, "monitor": "val/loss", "patience": 10, "mode": "min"})
-    cfg.training.setdefault("checkpoint", {"monitor": "val/loss", "mode": "min", "save_top_k": 1})
+    cfg.training.setdefault(
+        "early_stopping",
+        {"enabled": True, "monitor": "val/loss", "patience": 10, "mode": "min"},
+    )
+    cfg.training.setdefault(
+        "checkpoint",
+        {"monitor": "val/loss", "mode": "min", "save_top_k": 1},
+    )
+    # Optional extras
+    cfg.training.setdefault("grad_clip_val", None)
+    cfg.training.setdefault("detect_anomaly", False)
 
-    # Logger defaults
+    # Logger defaults (DVC-friendly)
     cfg.setdefault("logger", {})
     cfg.logger.setdefault("dir", "outputs")
     cfg.logger.setdefault("name", "train")
@@ -207,9 +222,25 @@ def _ensure_defaults(cfg: DictConfig) -> None:
     cfg.setdefault("loss", {})
 
 
-# --------------------------------------------------------------------------------------------------
+def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
+    missing: List[str] = []
+    for key in ("training", "logger", "data", "model", "loss"):
+        if key not in cfg:
+            missing.append(key)
+    for key in ("epochs", "devices", "precision", "num_workers"):
+        if "training" in cfg and key not in cfg.training:
+            missing.append(f"training.{key}")
+
+    if missing:
+        msg = f"[train] Missing required config keys: {', '.join(missing)}"
+        if strict:
+            raise KeyError(msg)
+        sys.stderr.write(msg + " (continuing)\n")
+
+
+# --------------------------------------------------------------------------------------
 # Trainer / Loggers / Callbacks
-# --------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
 
 def _build_trainer(
@@ -276,7 +307,7 @@ def _build_callbacks(cfg: DictConfig) -> List[pl.Callback]:
     if cfg.training.early_stopping.enabled:
         callbacks.append(
             EarlyStopping(
-                monitor=cfg.training.early_stopping.monitor,
+                monitor=str(cfg.training.early_stopping.monitor),
                 patience=int(cfg.training.early_stopping.patience),
                 mode=str(cfg.training.early_stopping.mode),
                 verbose=False,
@@ -284,13 +315,14 @@ def _build_callbacks(cfg: DictConfig) -> List[pl.Callback]:
         )
 
     ck = cfg.training.checkpoint
+    filename_tmpl = "{epoch:03d}-{" + str(ck.monitor) + ":.5f}"
     callbacks.append(
         ModelCheckpoint(
             monitor=str(ck.monitor),
             mode=str(ck.mode),
             save_top_k=int(ck.save_top_k),
             save_last=True,
-            filename="{epoch:03d}-{" + str(ck.monitor) + ":.5f}",
+            filename=filename_tmpl,
             auto_insert_metric_name=False,
         )
     )
@@ -298,9 +330,9 @@ def _build_callbacks(cfg: DictConfig) -> List[pl.Callback]:
     return callbacks
 
 
-# --------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Guardrails, Seeding, Utils
-# --------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
 
 def _apply_env_guardrails(cfg: DictConfig, env: Dict[str, Any], quiet: bool, dry_run: bool) -> None:
@@ -316,7 +348,7 @@ def _apply_env_guardrails(cfg: DictConfig, env: Dict[str, Any], quiet: bool, dry
         cfg.training.num_workers = min(int(cfg.training.num_workers), 2)
 
     # Precision defaults on Kaggle T4/CPU
-    if is_kaggle and str(cfg.training.precision).lower() in {"16", "16-mixed"}:
+    if is_kaggle and str(cfg.training.precision).lower() in {"16", "16-mixed", "fp16"}:
         # Avoid surprise OOM / missing AMP
         cfg.training.precision = "32"
 
@@ -348,7 +380,7 @@ def _normalize_precision(p: str | int | None) -> str | int:
     return s
 
 
-def _parse_devices(spec: Any) -> tuple[str, Any]:
+def _parse_devices(spec: Any) -> Tuple[str, Any]:
     """
     Returns (accelerator, devices) suitable for PL.Trainer.
     """
@@ -356,7 +388,7 @@ def _parse_devices(spec: Any) -> tuple[str, Any]:
         return "auto", "auto"
 
     if isinstance(spec, int):
-        return "gpu" if torch.cuda.is_available() else "cpu", spec
+        return ("gpu" if torch.cuda.is_available() else "cpu"), spec
 
     s = str(spec).strip().lower()
     if s in {"cpu", "gpu", "auto"}:
@@ -375,11 +407,19 @@ def _parse_devices(spec: Any) -> tuple[str, Any]:
 
 
 def _find_repo_root() -> Path:
+    """
+    Heuristic: start from this file, walk up until we hit a project marker.
+
+    Accepts:
+      • pyproject.toml (preferred)
+      • setup.cfg
+      • .git
+    """
     here = Path(__file__).resolve()
     for p in [here, *here.parents]:
         if (p / "pyproject.toml").exists() or (p / "setup.cfg").exists() or (p / ".git").exists():
             return p.parent if (p / "src").exists() and (p.name == "src") else p
-    # Fallback: two levels up from this file
+    # Fallback: three levels up from this file (keeps Kaggle/Colab from exploding)
     return here.parents[3]
 
 
@@ -404,7 +444,7 @@ def _print_banner(cfg: DictConfig, payload: TrainPayload, repo_root: Path, quiet
 
 
 def _persist_config_snapshot(cfg: DictConfig, repo_root: Path, loggers: List[pl.loggers.Logger]) -> None:
-    # Determine run directory from first logger
+    # Determine run directory from first CSV logger
     run_dir: Optional[Path] = None
     for lg in loggers:
         if isinstance(lg, CSVLogger):
@@ -414,22 +454,28 @@ def _persist_config_snapshot(cfg: DictConfig, repo_root: Path, loggers: List[pl.
         return
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    # Save the fully resolved config
+    # Save the fully resolved config (YAML)
     (run_dir / "config_resolved.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True))
 
-    # Save a minimal manifest
+    # Save a minimal manifest (JSON) with git SHA + timestamp
     manifest = {
+        "schema": "spectramind/train_manifest@v1",
         "run_dir": str(run_dir),
-        "created_at": int(time.time()),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_sha": _git_sha(repo_root),
+        "overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
+        "training": {
+            "epochs": int(cfg.training.get("epochs", 0)),
+            "devices": str(cfg.training.get("devices", "auto")),
+            "precision": str(cfg.training.get("precision", "32")),
+            "num_workers": int(cfg.training.get("num_workers", 0)),
+        },
     }
-    (run_dir / "run_manifest.yaml").write_text(OmegaConf.to_yaml(manifest))
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
 def _git_sha(repo_root: Path) -> str:
     try:
-        import subprocess
-
         return (
             subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(repo_root))
             .decode("utf-8")
