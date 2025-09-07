@@ -1,1 +1,28 @@
-weight: 0.05
+# configs/loss/band_coherence.yaml
+# ----------------------------------------------------------------------
+# Band Coherence Loss — SpectraMind V50
+# ----------------------------------------------------------------------
+# Encourages spectral smoothness and physical plausibility across
+# neighboring wavelength bins by penalizing incoherent jumps in μ/σ.
+#
+# This config is designed to be merged into training configs via Hydra,
+# e.g.:
+#   python -m spectramind.train +loss=band_coherence
+#
+# Keys:
+#   _target_: Python path to the loss implementation
+#   weight:   scalar multiplier for this term
+#   mode:     which coherence metric to apply ("l2", "cosine", etc.)
+#   window:   neighborhood size (in bins) for local coherence
+#   normalize: whether to normalize penalty by variance magnitude
+# ----------------------------------------------------------------------
+
+_target_: spectramind.losses.band_coherence.BandCoherenceLoss
+
+weight: 1.0           # contribution to total loss
+mode: "l2"            # ["l2", "cosine", "corr"]
+window: 5             # sliding window size for coherence evaluation
+normalize: true       # normalize penalties for scale-invariance
+
+# Debug/diagnostics
+log_histograms: false # optionally log coherence stats per epoch
