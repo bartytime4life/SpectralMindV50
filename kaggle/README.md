@@ -52,10 +52,11 @@ This directory contains **Kaggle-specific assets** for the
 ```mermaid
 flowchart LR
   A[Calibration: FGS1 + AIRS] --> B[Encoders: FGS1 & AIRS]
-  B --> C[Decoder -> mu & sigma (283 bins)]
+  B --> C[Decoder -> mu &amp; sigma (283 bins)]
   C --> D[Diagnostics: GLL, FFT, UMAP, checks]
   D --> E[Submission Bundle: CSV + manifest]
   E --> F[Kaggle Leaderboard]
+
 ```
 
 ---
