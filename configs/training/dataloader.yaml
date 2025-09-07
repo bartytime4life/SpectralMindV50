@@ -1,0 +1,4 @@
+num_workers: 8
+persistent_workers: true
+pin_memory: true
+prefetch_factor: 4

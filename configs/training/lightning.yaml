@@ -1,0 +1,2 @@
+max_epochs: 3
+grad_clip: 1.0

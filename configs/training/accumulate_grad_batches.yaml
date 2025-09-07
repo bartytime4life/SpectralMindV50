@@ -1,0 +1,5 @@
+train: 1
+val: 1
+test: 1
+notes: |
+  • Validation/Test ignore accumulation; retained for Hydra group consistency.
