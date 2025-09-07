@@ -1,6 +1,7 @@
 # src/spectramind/pipeline/predict.py
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -15,7 +16,9 @@ from omegaconf import DictConfig, OmegaConf
 __all__ = ["run"]
 
 
-# ----------------------------- Data model -------------------------------------
+# ======================================================================================
+# Data model
+# ======================================================================================
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +33,9 @@ class PredictPayload:
     env: Dict[str, Any]
 
 
-# --------------------------------- API ----------------------------------------
+# ======================================================================================
+# Public API
+# ======================================================================================
 
 
 def run(
@@ -44,37 +49,15 @@ def run(
     env: Dict[str, Any] | None = None,
 ) -> None:
     """
-    Inference runner: checkpoint + test data → predictions CSV/Parquet.
+    Inference runner: checkpoint + test data → predictions (CSV/Parquet).
 
     Responsibilities
-    ---------------
+    ----------------
     • Compose Hydra config (predict + data + model refs)
-    • Dispatch to internal inference pipeline
-    • Write artifacts in a DVC-friendly structure
-
-    Parameters
-    ----------
-    config_name
-        Name of the top-level Hydra config under `configs/` (default: "predict").
-    overrides
-        Hydra override strings, e.g. `["env=kaggle", "predict.batch_size=32"]`.
-    checkpoint
-        Optional explicit checkpoint path; overrides `cfg.predict.checkpoint`.
-    out_path
-        Optional output file path (CSV/Parquet). Overrides `cfg.predict.out_path`.
-    strict
-        If True, propagate composition/validation errors; else warn and continue with defaults.
-    quiet
-        Suppress resolved config echoing to stderr.
-    env
-        Optional execution context, e.g. {"is_kaggle": True, "is_ci": False}.
-
-    Raises
-    ------
-    FileNotFoundError
-        When `configs/` cannot be found at repo root.
-    RuntimeError
-        When the internal inference orchestrator is missing.
+    • Resolve/validate checkpoint and output destination
+    • Apply Kaggle/CI guardrails (workers, batch size, deterministic flags)
+    • Emit config snapshot & call internal orchestrator
+    • Verify output was written; persist inference manifest
     """
     payload = PredictPayload(
         config_name=config_name,
@@ -89,22 +72,28 @@ def run(
     repo_root = _find_repo_root()
     cfg = _compose_hydra_config(repo_root, payload)
 
-    # honor explicit CLI overrides
+    # Honor explicit CLI overrides
     if payload.checkpoint is not None:
         cfg.predict.checkpoint = payload.checkpoint
     if payload.out_path is not None:
         cfg.predict.out_path = payload.out_path
 
+    # Detect CI/Kaggle if not explicitly set
+    _auto_env_flags(payload.env)
+
+    # Apply guardrails & check minimal schema
     _apply_guardrails(cfg, payload.env)
     _validate_minimal_schema(cfg, strict=payload.strict)
 
-    # Prepare output destination (DVC-friendly) + snapshot config for traceability
+    # Resolve paths & compose traceability
+    ckpt_file = _resolve_checkpoint(repo_root, cfg, strict=payload.strict)
     out_file = _prepare_output_path(repo_root, cfg)
+
     _emit_config_snapshot(out_file, cfg)
 
+    # Dispatch to user orchestrator
     try:
-        # Expect orchestrator:
-        # `spectramind.inference.predict.run(cfg=cfg)`
+        # Expected orchestrator: spectramind.inference.predict.run(cfg=cfg)
         from spectramind.inference.predict import run as run_inference  # type: ignore[attr-defined]
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
@@ -116,12 +105,30 @@ def run(
     if not payload.quiet:
         sys.stderr.write("\n[hydra] Resolved prediction config:\n")
         sys.stderr.write(OmegaConf.to_yaml(cfg, resolve=True) + "\n")
-        sys.stderr.write(f"[predict] out_path = {out_file}\n")
+        sys.stderr.write(f"[predict] checkpoint = {ckpt_file}\n")
+        sys.stderr.write(f"[predict] out_path   = {out_file}\n")
 
-    run_inference(cfg=cfg)
+    # Orchestrator may optionally return the final artifact path (string/Path)
+    result = run_inference(cfg=cfg)
+    if result:
+        try:
+            candidate = Path(str(result)).resolve()
+            if candidate.is_file():
+                out_file = candidate  # prefer orchestrator's path if present
+        except Exception:
+            pass
+
+    # Verify output exists
+    if not out_file.exists():
+        raise RuntimeError(f"[predict] orchestrator did not produce output: {out_file}")
+
+    # Persist an inference manifest (DVC/CI-friendly)
+    _write_inference_manifest(out_file, cfg)
 
 
-# ---------------------------- Hydra / Utils ----------------------------------
+# ======================================================================================
+# Hydra / Defaults / Guardrails
+# ======================================================================================
 
 
 def _compose_hydra_config(repo_root: Path, payload: PredictPayload) -> DictConfig:
@@ -154,8 +161,12 @@ def _ensure_defaults(cfg: DictConfig) -> None:
     cfg.predict.setdefault("checkpoint", None)
     # DVC-/Kaggle-friendly default under repo
     cfg.predict.setdefault("out_path", "outputs/predictions/predictions.csv")
+
+    # runtime toggles (determinism & low-memory hints)
     cfg.setdefault("runtime", {})
     cfg.runtime.setdefault("seed", 42)
+    cfg.runtime.setdefault("deterministic", False)
+    cfg.runtime.setdefault("low_mem_mode", False)
 
 
 def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
@@ -178,6 +189,14 @@ def _validate_minimal_schema(cfg: DictConfig, *, strict: bool) -> None:
         sys.stderr.write(msg + " (continuing)\n")
 
 
+def _auto_env_flags(env: Dict[str, Any]) -> None:
+    """Detect Kaggle/CI if not given."""
+    if "is_kaggle" not in env:
+        env["is_kaggle"] = bool(os.environ.get("KAGGLE_URL_BASE") or os.environ.get("KAGGLE_KERNEL_INTEGRATIONS"))
+    if "is_ci" not in env:
+        env["is_ci"] = bool(os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"))
+
+
 def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
     """Apply environment-aware guardrails (workers, batch-size, determinism)."""
     is_kaggle = bool(env.get("is_kaggle"))
@@ -186,21 +205,44 @@ def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
     # Conservative workers on non-interactive envs
     if "num_workers" not in cfg.predict:
         cfg.predict.num_workers = 2 if (is_kaggle or is_ci) else 4
+    else:
+        if is_kaggle or is_ci:
+            cfg.predict.num_workers = min(int(cfg.predict.num_workers), 2)
 
     # Soften batch-size in low-mem environments
     if is_kaggle or is_ci:
         bs = int(cfg.predict.get("batch_size", 64))
         cfg.predict.batch_size = min(bs, 32)
 
-    cfg.runtime.setdefault("deterministic", bool(is_ci))
+    # Determinism by default for CI; low mem hint on Kaggle
+    if is_ci:
+        cfg.runtime.deterministic = True
     if is_kaggle:
-        cfg.runtime.setdefault("low_mem_mode", True)
+        cfg.runtime.low_mem_mode = True
+
+
+# ======================================================================================
+# Path resolution / Snapshots / Manifests
+# ======================================================================================
+
+
+def _resolve_checkpoint(repo_root: Path, cfg: DictConfig, *, strict: bool) -> Path:
+    raw = str(cfg.predict.checkpoint or "")
+    if not raw:
+        raise KeyError("[predict] checkpoint path is empty")
+    ckpt = (_as_path(raw) if os.path.isabs(raw) else repo_root / raw).resolve()
+    if not ckpt.exists():
+        msg = f"[predict] checkpoint not found: {ckpt}"
+        if strict:
+            raise FileNotFoundError(msg)
+        sys.stderr.write(msg + " (continuing — orchestrator may handle)\n")
+    return ckpt
 
 
 def _prepare_output_path(repo_root: Path, cfg: DictConfig) -> Path:
     """
     Ensure parent dirs exist for output file under repo root (DVC-friendly).
-    Returns absolute path to target file.
+    Returns absolute path to target file and normalizes extension (.csv/.parquet).
     """
     raw = str(cfg.predict.out_path)
     out_file = (_as_path(raw) if os.path.isabs(raw) else repo_root / raw).resolve()
@@ -212,7 +254,6 @@ def _prepare_output_path(repo_root: Path, cfg: DictConfig) -> Path:
 
     # normalize extension defaults (.csv or .parquet)
     if out_file.suffix.lower() not in {".csv", ".parquet", ".pq"}:
-        # default to CSV if not explicitly set
         out_file = out_file.with_suffix(".csv")
         cfg.predict.out_path = str(out_file)
     return out_file
@@ -240,10 +281,37 @@ def _emit_config_snapshot(out_file: Path, cfg: DictConfig) -> None:
             "batch_size": int(cfg.predict.get("batch_size", 64)),
             "num_workers": int(cfg.predict.get("num_workers", 4)),
         }
-        meta_json = snap_dir / "config_snapshot.json"
-        meta_json.write_text(json.dumps(meta, indent=2))
+        (snap_dir / "config_snapshot.json").write_text(json.dumps(meta, indent=2))
     except Exception as e:  # pragma: no cover
         sys.stderr.write(f"[predict] warning: failed to write config snapshot: {e}\n")
+
+
+def _write_inference_manifest(out_file: Path, cfg: DictConfig) -> None:
+    """Write a small manifest alongside predictions describing the artifact and inputs."""
+    try:
+        sha256 = _sha256_of_file(out_file)
+    except Exception:
+        sha256 = ""
+    manifest = {
+        "schema": "spectramind/predict_manifest@v1",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "predictions_path": str(out_file),
+        "predictions_sha256": sha256,
+        "checkpoint": str(cfg.predict.get("checkpoint") or ""),
+        "hydra_overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
+    }
+    (out_file.parent / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+
+def _sha256_of_file(path: Path, chunk: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            data = f.read(chunk)
+            if not data:
+                break
+            h.update(data)
+    return h.hexdigest()
 
 
 def _nearest_git_root(path: Path) -> Path | None:
@@ -269,7 +337,7 @@ def _find_repo_root() -> Path:
             if p.name == "src":
                 return p.parent
             return p
-    # Fallback: best-effort three levels up (keeps Kaggle/colab from exploding)
+    # Fallback: best-effort three levels up (keeps notebooks happy)
     return here.parents[3]
 
 
