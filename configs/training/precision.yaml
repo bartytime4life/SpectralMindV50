@@ -1,10 +1,44 @@
-amp: true
-precision: bf16-mixed
-grad_clip_norm: 1.0
-accumulate_grad_batches: 1
-checkpoint:
-  resume_if_exists: true
-  dir: ${run.workdir}/checkpoints
-  save_top_k: 3
-  monitor: val/loss
-  mode: min
+# configs/training/precision.yaml
+# ======================================================================
+# SpectraMind V50 — Precision / Numerical Config
+# ======================================================================
+# Controls mixed precision, gradient scaling, deterministic flags, and
+# numerical safety for training. Designed to balance speed vs. stability
+# under Kaggle GPU limits.
+# ======================================================================
+
+precision:
+  # Trainer precision mode:
+  # - 32 → full float32 (safe, slow)
+  # - 16-mixed → autocast fp16 w/ grad scaling (fast, default on GPUs)
+  # - bf16-mixed → autocast bfloat16 (if hardware supports)
+  # - 64 → float64 (rarely needed; debugging only)
+  mode: ${oc.env:SM_PRECISION, "16-mixed"}
+
+  # Automatic gradient scaling (apex/native AMP style)
+  grad_scaler:
+    enabled: true
+    init_scale: 2**16
+    growth_interval: 2000
+    backoff_factor: 0.5
+
+  # Determinism toggles
+  deterministic:
+    cudnn: false        # set true for bitwise reproducibility (slower)
+    torch: true         # seed ops for reproducibility
+
+  # Stability guardrails
+  clip_grad_norm: 5.0   # max L2 norm for gradients (None to disable)
+  nan_guard: true       # halt on NaN/Inf during training
+
+  # Optional AMP settings
+  amp_backend: "native" # native|apex
+  amp_level: "O1"       # if apex is used
+
+# Hydra runtime (no logs spammed)
+hydra:
+  job_logging:
+    root:
+      level: WARN
+  run:
+    dir: outputs/training/precision/${now:%Y-%m-%d_%H-%M-%S}
