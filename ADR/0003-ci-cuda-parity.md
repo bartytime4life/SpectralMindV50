@@ -71,9 +71,9 @@ Additionally, we **standardize determinism knobs** across environments (see §7)
 
 ```mermaid
 flowchart TD
-  A[GitHub Actions GPU Runner] --> B[Docker build & run (nvidia/cuda:12.1 + cuDNN8)]
+  A[GitHub Actions GPU Runner] --> B[Docker build & run\n(nvidia/cuda:12.1 + cuDNN8)]
   B --> C[spectramind doctor --cuda]
-  D[Kaggle Runtime Spec (pinned versions)] --> C
+  D[Kaggle Runtime Spec\n(pinned versions)] --> C
   C -->|identical| E{Gate pass}
   C -->|mismatch| F{Gate fail}
   E --> G[Merge allowed]
