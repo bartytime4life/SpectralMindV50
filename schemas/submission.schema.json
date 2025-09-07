@@ -1,25 +1,68 @@
-	
-$schema	"https://json-schema.org/draft/2020-12/schema"
-title	"Ariel Submission"
-type	"object"
-properties	
-id	
-type	"string"
-mu	
-type	"array"
-items	
-type	"number"
-minItems	283
-maxItems	283
-sigma	
-type	"array"
-items	
-type	"number"
-minimum	0
-minItems	283
-maxItems	283
-required	
-0	"id"
-1	"mu"
-2	"sigma"
-additionalProperties	false
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spectramind-v50.org/schema/ariel/submission.schema.json",
+  "title": "Ariel Submission (SpectraMind V50)",
+  "description": "Single-record JSON representation of a Kaggle submission row for the Ariel Data Challenge. Exactly one of `sample_id` (preferred) or legacy `id` must be present.",
+  "type": "object",
+
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "description": "Preferred ID field for a sample/row. Use alphanumerics, underscore or hyphen.",
+      "pattern": "^[A-Za-z0-9_\\-]+$",
+      "examples": ["00012345", "row_000001", "planet-42"]
+    },
+    "id": {
+      "type": "string",
+      "description": "Legacy ID field for backward compatibility. Prefer `sample_id`.",
+      "pattern": "^[A-Za-z0-9_\\-]+$",
+      "examples": ["00012345", "row_000001", "planet-42"]
+    },
+
+    "mu": {
+      "type": "array",
+      "description": "Mean transmission spectrum across 283 wavelength bins (mu_000 .. mu_282).",
+      "items": {
+        "type": "number",
+        "description": "Mean transit depth for a single wavelength bin."
+      },
+      "minItems": 283,
+      "maxItems": 283,
+      "examples": [
+        [0.0012, 0.0013, 0.0011]
+      ]
+    },
+
+    "sigma": {
+      "type": "array",
+      "description": "Uncertainty (std dev) per wavelength bin (sigma_000 .. sigma_282). Must be non-negative.",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Non-negative standard deviation for a single wavelength bin."
+      },
+      "minItems": 283,
+      "maxItems": 283,
+      "examples": [
+        [0.0001, 0.0001, 0.0002]
+      ]
+    }
+  },
+
+  "required": ["mu", "sigma"],
+
+  "oneOf": [
+    { "required": ["sample_id"] },
+    { "required": ["id"] }
+  ],
+
+  "additionalProperties": false,
+
+  "examples": [
+    {
+      "sample_id": "row_000001",
+      "mu": [0.0012, 0.0013, 0.0011, 0.0010, 0.0012, 0.0013, 0.0011, 0.0012, 0.0012, 0.0013],
+      "sigma": [0.0001, 0.0001, 0.0002, 0.0002, 0.0001, 0.0001, 0.0002, 0.0002, 0.0001, 0.0001]
+    }
+  ]
+}
