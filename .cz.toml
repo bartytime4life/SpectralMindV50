@@ -1,0 +1,48 @@
+# ==============================================================================
+# .cz.toml — Commitizen configuration for SpectraMind V50
+# ------------------------------------------------------------------------------
+# Enforces Conventional Commits across the repo
+# ==============================================================================
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+tag_format = "v$version"
+version_files = [
+    "VERSION",
+    "pyproject.toml:version",
+    "src/spectramind/__init__.py:__version__",
+]
+update_changelog_on_bump = true
+changelog_file = "CHANGELOG.md"
+
+[tool.commitizen.customize]
+message_template = "{{type}}({{scope}}): {{message}}"
+
+# Conventional commit types
+types = [
+  { type = "feat",    description = "A new feature" },
+  { type = "fix",     description = "A bug fix" },
+  { type = "docs",    description = "Documentation changes" },
+  { type = "style",   description = "Code style/formatting (no logic change)" },
+  { type = "refactor",description = "Refactoring without behavior change" },
+  { type = "perf",    description = "Performance improvements" },
+  { type = "test",    description = "Adding/updating tests" },
+  { type = "build",   description = "Build system or external deps" },
+  { type = "ci",      description = "CI/CD changes" },
+  { type = "chore",   description = "Maintenance tasks" },
+  { type = "revert",  description = "Revert a previous commit" }
+]
+
+# Scopes (customize to repo modules)
+scopes = [
+  "cli",
+  "pipeline",
+  "data",
+  "models",
+  "calib",
+  "inference",
+  "diagnostics",
+  "docs",
+  "tests",
+  "infra",
+]
