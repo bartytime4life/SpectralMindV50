@@ -1,77 +1,90 @@
 flowchart LR
-  %% -----------------------------
+  %% =============================
   %% RAW INPUTS
-  %% -----------------------------
+  %% =============================
   subgraph Raw["Raw Inputs"]
     A[FGS1 Time-Series]:::raw
     B[AIRS Spectra]:::raw
   end
 
-  %% -----------------------------
+  %% =============================
   %% CALIBRATION CHAIN (branched)
-  %% -----------------------------
-  subgraph Calib["Calibration Chain"]
+  %% =============================
+  subgraph Calib["Calibration Chain · spectramind calibrate"]
     direction LR
 
-    %% Common early steps (readout/ADC -> CDS)
     C_ADC[ADC (bias/gain convert)] --> C_CDS[CDS (readout differencing)]
 
-    %% Branch: FGS1-specific
+    %% FGS1 branch
     C_CDS --> C_DARK_F[Dark (FGS1)]
     C_DARK_F --> C_PHOT[Photometry / Detrend]
     C_PHOT --> C_PHASE_F[Phase / Align (FGS1)]
 
-    %% Branch: AIRS-specific
+    %% AIRS branch
     C_CDS --> C_DARK_A[Dark (AIRS)]
     C_DARK_A --> C_FLAT[Flat-Field (AIRS)]
     C_FLAT --> C_TRACE[Trace / Wavelength Solution]
     C_TRACE --> C_PHASE_A[Phase / Align (AIRS)]
   end
 
-  %% -----------------------------
+  %% =============================
   %% MODEL-READY TENSORS
-  %% -----------------------------
+  %% =============================
   subgraph Tensors["Model-Ready Tensors (DVC-tracked)"]
     T1[(FGS1 tensors)]
     T2[(AIRS tensors)]
   end
 
-  %% -----------------------------
+  %% =============================
   %% ENCODERS
-  %% -----------------------------
+  %% =============================
   subgraph Encoders["Dual Encoders"]
     E1[FGS1 Encoder<br/>(SSM/Mamba, transit-aware)]:::enc
     E2[AIRS Encoder<br/>(CNN/GNN, spectral)]:::enc
   end
 
-  %% -----------------------------
+  %% =============================
   %% FUSION + DECODER
-  %% -----------------------------
-  subgraph Fusion["Fusion + Decoder"]
+  %% =============================
+  subgraph Fusion["Fusion + Decoder · spectramind train/predict"]
     F1[Cross-modal Fusion]:::fusion
     D1[Heteroscedastic Decoder<br/>per-bin μ, σ (283)]:::dec
   end
 
-  %% -----------------------------
+  %% =============================
   %% OUTPUTS
-  %% -----------------------------
+  %% =============================
   subgraph Outputs["Outputs"]
     O1[(μ_0..μ_282)]
     O2[(σ_0..σ_282)]
   end
 
-  %% -----------------------------
-  %% CONSTRAINTS
-  %% -----------------------------
-  subgraph Constraints["Symbolic / Physics Constraints"]
-   S1[Non-negativity]
-   S2[Smoothness]
-   S3[Band Coherence]
+  %% =============================
+  %% CONSTRAINTS / LOSSES
+  %% =============================
+  subgraph Constraints["Symbolic / Physics Priors & Losses"]
+    direction TB
+    S1[Non-negativity]
+    S2[Smoothness]
+    S3[Band Coherence]
+    S4[Instrument/Pipeline priors]
+    Lmain[Supervised Loss (e.g., NLL)]:::loss
   end
 
-  %% -----------------------------
+  %% =============================
+  %% REPRO & TELEMETRY
+  %% =============================
+  subgraph Repro["Reproducibility & Telemetry"]
+    direction TB
+    H1[Hydra Config Snapshot<br/>/configs → .hydra/]:::meta
+    DVC[DVC Lineage<br/>stages: raw→calib→tensors→models]:::meta
+    LOG[Event Log (JSONL)<br/>metrics, hashes, timings]:::meta
+    ART[Artifacts Registry<br/>plots/, submissions/, sboms/]:::meta
+  end
+
+  %% =============================
   %% WIRES
-  %% -----------------------------
+  %% =============================
   %% Raw → Calibration (common ADC/CDS)
   A --> C_ADC
   B --> C_ADC
@@ -91,15 +104,29 @@ flowchart LR
   D1 --> O1
   D1 --> O2
 
-  %% Constraints → Decoder (dashed, labeled)
-  S1 -. penalize .-> D1
-  S2 -. penalize .-> D1
-  S3 -. penalize .-> D1
+  %% Loss wiring (training only)
+  D1 -. feeds .-> Lmain
+  S1 -. regularize .-> Lmain
+  S2 -. regularize .-> Lmain
+  S3 -. regularize .-> Lmain
+  S4 -. regularize .-> Lmain
 
-  %% -----------------------------
+  %% Repro wiring
+  Calib -. snapshot .-> H1
+  Encoders -. snapshot .-> H1
+  Fusion -. snapshot .-> H1
+  Raw -. tracked .-> DVC
+  Tensors -. tracked .-> DVC
+  D1 -. tracked .-> DVC
+  Lmain -. metrics .-> LOG
+  D1 -. artifacts .-> ART
+
+  %% =============================
   %% STYLES
-  %% -----------------------------
+  %% =============================
   classDef raw fill:#0b3d91,stroke:#0b3d91,color:#fff;
   classDef enc fill:#0a6,stroke:#0a6,color:#fff;
   classDef fusion fill:#a60,stroke:#a60,color:#fff;
   classDef dec fill:#444,stroke:#444,color:#fff;
+  classDef meta fill:#555,stroke:#555,color:#fff;
+  classDef loss fill:#7b1fa2,stroke:#7b1fa2,color:#fff;
