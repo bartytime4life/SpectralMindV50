@@ -1,4 +1,54 @@
-num_workers: 8
-persistent_workers: true
-pin_memory: true
-prefetch_factor: 4
+# configs/training/dataloader.yaml
+# ======================================================================
+# SpectraMind V50 — DataLoader Config
+# ======================================================================
+# Defines batch size, worker threads, prefetching, pinning, and collate
+# strategies for training/eval dataloaders. Designed to handle long
+# exoplanet transit sequences (FGS1) and spectral cubes (AIRS).
+# ======================================================================
+
+dataloader:
+  # ------------------------------------------------------------------
+  # General loader params
+  # ------------------------------------------------------------------
+  batch_size: ${oc.env:SM_BATCH_SIZE, 32}   # default; tune per GPU
+  shuffle: true                             # shuffle training set
+  drop_last: true                           # drop incomplete last batch
+
+  # ------------------------------------------------------------------
+  # Workers / performance
+  # ------------------------------------------------------------------
+  num_workers: ${oc.env:SM_WORKERS, 4}      # Kaggle safe (≤ CPU cores)
+  prefetch_factor: 2                        # per-worker prefetch
+  persistent_workers: true                  # reuse workers across epochs
+  pin_memory: true                          # pin host memory for CUDA transfer
+
+  # ------------------------------------------------------------------
+  # Collation / custom batching
+  # ------------------------------------------------------------------
+  collate_fn: "spectramind.data.collate.dual_channel_collate"
+  # This collate aligns:
+  #   - FGS1 long time-series (possibly binned:contentReference[oaicite:3]{index=3})
+  #   - AIRS spectral cubes (283 bins:contentReference[oaicite:4]{index=4})
+  # and ensures consistent shapes + masks across a batch.
+
+  # ------------------------------------------------------------------
+  # Validation / test loader overrides
+  # ------------------------------------------------------------------
+  val:
+    batch_size: 64
+    shuffle: false
+    drop_last: false
+
+  test:
+    batch_size: 64
+    shuffle: false
+    drop_last: false
+
+# Hydra output isolation
+hydra:
+  job_logging:
+    root:
+      level: WARN
+  run:
+    dir: outputs/training/dataloader/${now:%Y-%m-%d_%H-%M-%S}
