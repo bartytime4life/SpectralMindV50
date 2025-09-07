@@ -1,0 +1,9 @@
+name: v50
+fgs1_encoder: ${model.fgs1_encoder}
+airs_encoder: ${model.airs_encoder}
+fusion: ${model.fusion}
+decoder: ${model.decoder}
+constraints:
+  nonneg: true
+  smoothness_weight: 0.1
+  band_coherence_weight: 0.05
