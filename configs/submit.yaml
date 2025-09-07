@@ -1,2 +1,56 @@
+# configs/submit.yaml
+# ======================================================================
+# SpectraMind V50 — Submission Packaging Config
+# ======================================================================
+# This Hydra config defines parameters for the final submission stage.
+# It controls how predictions are validated, zipped, and prepared for
+# Kaggle upload. Safe for local, CI, and Kaggle runtime environments.
+# ======================================================================
+
 defaults:
-  - env: local
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+# ----------------------------------------------------------------------
+# Input / Output
+# ----------------------------------------------------------------------
+predictions: ${oc.env:SM_PREDICTIONS, artifacts/predictions.csv}   # CSV of model predictions
+out_zip:    ${oc.env:SM_SUBMISSION_ZIP, artifacts/submission.zip} # final Kaggle bundle
+manifest:   ${oc.env:SM_MANIFEST, artifacts/manifest.json}        # provenance manifest
+
+# ----------------------------------------------------------------------
+# Kaggle parameters
+# ----------------------------------------------------------------------
+kaggle:
+  competition: ${oc.env:KAGGLE_COMP, neurips-2025-ariel-data-challenge}
+  title: ${oc.env:KAGGLE_TITLE, "SpectraMind V50 submission"}
+  message: ${oc.env:KAGGLE_MSG, "Automated submission from SpectraMind V50 pipeline"}
+  dry_run: false        # set true to skip actual upload
+  no_upload: false      # set true to only build ZIP but not push to Kaggle
+
+# ----------------------------------------------------------------------
+# Validation
+# ----------------------------------------------------------------------
+validate:
+  schema: schemas/submission.schema.json   # enforce 283-bin μ/σ spec
+  strict: true                             # hard fail on schema errors
+  quiet: false                             # suppress warnings if true
+
+# ----------------------------------------------------------------------
+# Provenance metadata (auto-filled at runtime)
+# ----------------------------------------------------------------------
+meta:
+  git_hash: null          # filled by submit.py
+  run_id: null            # UUID
+  created_at: null        # timestamp
+  env: ${oc.env:SM_ENV, "local"}  # execution environment (local|ci|kaggle)
+
+# ----------------------------------------------------------------------
+# Hydra runtime
+# ----------------------------------------------------------------------
+hydra:
+  run:
+    dir: outputs/submit/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/submit/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
