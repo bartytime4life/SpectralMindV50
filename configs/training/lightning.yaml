@@ -1,2 +1,98 @@
-max_epochs: 3
-grad_clip: 1.0
+# configs/training/lightning.yaml
+# ======================================================================
+# SpectraMind V50 — PyTorch Lightning Trainer Config
+# ======================================================================
+# Orchestrates the Trainer/runtime knobs: accelerator, devices, strategy,
+# logging cadence, validation cadence, checkpointing, early stopping, and
+# dataloader perf flags. Designed for Kaggle/CI (offline & deterministic).
+# Compose this alongside configs/training/precision.yaml so that
+# `${precision.*}` indirections resolve properly.
+# ======================================================================
+
+trainer:
+  # Hardware & precision
+  accelerator: ${oc.env:SM_ACCELERATOR, "auto"}   # "gpu"|"cpu"|"auto"
+  devices: ${oc.env:SM_DEVICES, 1}                # 1 by default on Kaggle
+  strategy: ${oc.env:SM_STRATEGY, "auto"}         # "auto"|"ddp"|"ddp_find_unused_parameters_false"|...
+  precision: ${precision.mode}                    # from configs/training/precision.yaml
+
+  # Run length & scheduling
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 50}
+  max_steps: ${oc.env:SM_MAX_STEPS, null}         # set to int to cap steps regardless of epochs
+  accumulate_grad_batches: ${oc.env:SM_ACCUM, 1}
+
+  # Numerical safety
+  gradient_clip_val: ${precision.clip_grad_norm}
+  deterministic: ${precision.deterministic.torch} # reproducible kernels (slower if True)
+  benchmark: false                                # avoid nondeterministic cudnn autotune in CI/Kaggle
+
+  # Logging & validation cadence
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 50}
+  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}  # fraction of epoch or integer steps
+  check_val_every_n_epoch: ${oc.env:SM_VAL_EVERY_EPOCH, null}
+
+  # Checkpointing / callbacks are declared below but enabled here
+  enable_checkpointing: true
+  default_root_dir: ${paths.logs_dir}
+
+# ----------------------------------------------------------------------
+# Callbacks
+# ----------------------------------------------------------------------
+callbacks:
+  model_checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: ${paths.ckpt_dir}
+    filename: "epoch{epoch:03d}-step{step}-valloss{val/loss:.5f}"
+    monitor: ${oc.env:SM_MONITOR, "val/loss"}  # or "val/gll" if you log the comp metric
+    mode: ${oc.env:SM_MONITOR_MODE, "min"}     # "min" for loss/GLL; "max" for score
+    save_top_k: ${oc.env:SM_SAVE_TOP_K, 3}
+    save_last: true
+    auto_insert_metric_name: false
+  early_stopping:
+    _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: ${callbacks.model_checkpoint.monitor}
+    mode: ${callbacks.model_checkpoint.mode}
+    patience: ${oc.env:SM_ES_PATIENCE, 8}
+    min_delta: ${oc.env:SM_ES_MIN_DELTA, 0.0}
+  lr_monitor:
+    _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: "epoch"
+  rich_progress:
+    _target_: pytorch_lightning.callbacks.RichProgressBar
+    refresh_rate: ${oc.env:SM_PROGRESS_REFRESH, 1}
+
+# ----------------------------------------------------------------------
+# Dataloader performance (safe defaults for Kaggle/CI)
+# ----------------------------------------------------------------------
+data_loader:
+  num_workers: ${oc.env:SM_NUM_WORKERS, 2}
+  pin_memory: true
+  persistent_workers: false       # keep false on Kaggle to avoid worker leaks
+  prefetch_factor: ${oc.env:SM_PREFETCH, 2}
+
+# ----------------------------------------------------------------------
+# Paths & run identity
+# ----------------------------------------------------------------------
+paths:
+  ckpt_dir: ${oc.env:SM_CKPT_DIR, artifacts/models}
+  logs_dir: ${oc.env:SM_LOGS_DIR, artifacts/logs}
+  run_name: ${oc.env:SM_RUN_NAME, ${now:%Y%m%d-%H%M%S}}
+
+# ----------------------------------------------------------------------
+# Reproducibility seed (Lightning will seed PyTorch/NumPy/PL)
+# ----------------------------------------------------------------------
+seed: ${oc.env:SM_SEED, 1337}
+
+# ----------------------------------------------------------------------
+# Hydra runtime (quiet logs, timestamped outputs)
+# ----------------------------------------------------------------------
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+hydra:
+  run:
+    dir: outputs/train/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/train/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
