@@ -1,3 +1,11 @@
+# =====================================================================
+# pyproject.toml — SpectraMind V50
+# ---------------------------------------------------------------------
+# • Reproducible pins (Kaggle/CI safe)
+# • Torch stack lives in extras (installed via bin/kaggle-boot.sh on Kaggle)
+# • CLI exposed as `spectramind` (mirrors `python -m spectramind`)
+# =====================================================================
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -9,9 +17,7 @@ description = "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [
-  { name = "SpectraMind V50 Team" }
-]
+authors = [{ name = "SpectraMind V50 Team" }]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -25,50 +31,73 @@ classifiers = [
 
 # ---- Runtime dependencies (Kaggle-safe; Torch stack moved to extras) ----
 dependencies = [
-  "typer[all]>=0.12",
-  "hydra-core>=1.3",
-  "omegaconf>=2.3",
-  "pydantic>=2.7",
-  "numpy>=1.26",
-  "scipy>=1.11",
-  "pandas>=2.2",
-  "polars>=1.4",
-  "pyyaml>=6.0",
-  "tqdm>=4.66",
-  "rich>=13.7",
-  "matplotlib>=3.8",
-  "umap-learn>=0.5",
-  "networkx>=3.2",
-  "jsonschema>=4.22"
+  "typer[all]==0.12.3",
+  "hydra-core==1.3.2",
+  "omegaconf==2.3.0",
+  "pydantic==2.7.4",
+  "numpy==1.26.4",
+  "scipy==1.11.4",
+  "pandas==2.2.2",
+  "polars==0.20.31",
+  "pyyaml==6.0.1",
+  "tqdm==4.66.4",
+  "rich==13.7.1",
+  "matplotlib==3.8.4",
+  "umap-learn==0.5.6",
+  "networkx==3.2.1",
+  "jsonschema==4.23.0",
 ]
 
 [project.optional-dependencies]
-# Optional extras for local GPU hosts / non-Kaggle runners.
+# Optional extras for local GPU/non-Kaggle hosts. On Kaggle, use bin/kaggle-boot.sh.
 gpu = [
-  "torch>=2.2",
-  "torchvision>=0.17",
-  "lightning>=2.3",
-  "torch-geometric>=2.5",
+  "torch==2.2.2",
+  "torchvision==0.17.2",
+  "lightning==2.3.3",
+  "torch-geometric==2.5.3",
 ]
+# Analysis/physics helpers kept out of core runtime to stay slim.
+analysis = [
+  "scikit-learn==1.5.1",
+  "joblib==1.4.2",
+  "statsmodels==0.14.2",
+  "sympy==1.13.1",
+  "numba==0.60.0",
+]
+# Dev/test/type-checking/linting (matches requirements-dev.txt)
 dev = [
-  "pytest>=8.1",
-  "pytest-cov>=5.0",
-  "ruff>=0.6.8",
-  "mypy>=1.11",
-  "toml-sort>=0.23",
-  "check-jsonschema>=0.28",
-  "types-PyYAML",
-  "types-requests",
-  "pre-commit>=3.7",
-  "mkdocs>=1.6",
-  "mkdocs-material>=9.5",
+  "pytest==8.3.3",
+  "pytest-cov==5.0.0",
+  "pytest-xdist==3.6.1",
+  "pytest-timeout==2.3.1",
+  "hypothesis==6.112.0",
+  "ruff==0.6.9",
+  "mypy==1.11.2",
+  "toml-sort==0.23.1",
+  "check-jsonschema==0.28.9",
+  "types-PyYAML==6.0.12.20240808",
+  "types-requests==2.32.0.20240907",
+  "pre-commit==3.7.1",
+]
+docs = [
+  "mkdocs==1.6.0",
+  "mkdocs-material==9.5.39",
+  "pymdown-extensions==10.8.1",
+  # "mkdocs-mermaid2-plugin==1.1.1",    # enable if you render Mermaid in docs
+  # "mkdocs-gen-files==0.5.0",
+  # "mkdocs-literate-nav==0.6.1",
+]
+security = [
+  "pip-audit==2.7.3",
+  "cyclonedx-bom==4.3.12",
+  # "bandit==1.7.9",                     # optional static code security checks
 ]
 
 [project.urls]
 Homepage = "https://github.com/your-org/spectramind-v50"
 Repository = "https://github.com/your-org/spectramind-v50"
 
-# Expose a robust console script. We delegate to __main__.py:main so both
+# Expose a robust console script. Delegates to __main__.py:main so both
 # `spectramind` and `python -m spectramind` behave identically.
 [project.scripts]
 spectramind = "spectramind.__main__:main"
@@ -83,8 +112,8 @@ where = ["src"]
 include = ["spectramind*"]
 exclude = ["tests*", "examples*", "docs*"]
 
-# NOTE: These paths are relative to the *package* location. Ensure you place
-# configs/schemas under `src/spectramind/` (e.g., `src/spectramind/configs/...`).
+# NOTE: These paths are relative to the *package* location.
+# Ensure configs/schemas live under `src/spectramind/` (e.g. `src/spectramind/configs/...`).
 [tool.setuptools.package-data]
 spectramind = [
   "schemas/*.json",
@@ -98,18 +127,22 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-# base: pycodestyle/pyflakes + upgrades + bugbear + mccabe
+# base: pycodestyle/pyflakes + upgrades + bugbear + mccabe + import sort
 select = ["E", "F", "I", "UP", "B", "C90"]
-# Black-compatible & common reductions of noise
-ignore = ["E203", "W503"]
+ignore = ["E203", "W503"]  # black/PEP 8 compatible
 
 [tool.ruff.lint.isort]
 known-first-party = ["spectramind"]
 force-sort-within-sections = true
 
+# (Optional) Use Ruff as formatter too:
+# [tool.ruff.format]
+# docstring-code-format = true
+
 # --------------------------------- mypy -----------------------------------
 [tool.mypy]
 python_version = "3.10"
+mypy_path = ["src"]
 ignore_missing_imports = true
 strict = true
 warn_unused_ignores = true
@@ -128,6 +161,8 @@ warn_untyped_fields = true
 minversion = "8.1"
 addopts = "-q --disable-warnings"
 testpaths = ["tests", "src/spectramind"]
+timeout = 180
+xfail_strict = true
 
 # ------------------------------ TOML Sort ----------------------------------
 [tool.tomlsort]
@@ -136,4 +171,3 @@ check = true
 sort_inline_tables = true
 trailing_comma_inline_array = true
 spaces_indent_inline_array = 0
-```
