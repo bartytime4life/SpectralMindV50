@@ -1,6 +1,25 @@
 # src/spectramind/pipeline/train.py
 from __future__ import annotations
 
+"""
+SpectraMind V50 — Training Runner (Hydra + PyTorch Lightning)
+==============================================================
+
+Key capabilities
+----------------
+• Hydra config composition with strict-but-helpful defaults
+• Kaggle/CI guardrails (workers, AMP, progress bars)
+• Deterministic seeds; reproducible Trainer wiring
+• CSV + (optional) DVCLive + (optional) W&B (offline by default)
+• JSONL event logging + run manifest persistence
+• Best-checkpoint discovery and metrics export to artifacts/
+
+Notes
+-----
+• CLI must remain thin; this module contains the orchestration/business logic.
+• Use config files as the source of truth; CLI overrides must map into `cfg`.
+"""
+
 import json
 import os
 import subprocess
@@ -13,23 +32,30 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
-from hydra import compose, initialize
+from hydra import compose, initialize_config_dir  # more robust with absolute dirs
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, RichModelSummary
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.loggers.logger import Logger as PLLogger
 
-# Optional loggers/callbacks (lazy)
-try:
+# Optional loggers/callbacks (lazy imports)
+try:  # pragma: no cover
     from pytorch_lightning.loggers import WandbLogger  # type: ignore
 except Exception:  # pragma: no cover
     WandbLogger = None  # type: ignore
 
-# Optional dvclive (not required)
 try:  # pragma: no cover
     from dvclive.lightning import DVCLiveLogger  # type: ignore
 except Exception:  # pragma: no cover
     DVCLiveLogger = None  # type: ignore
+
+# SpectraMind logging utilities (manifest + JSONL events)
+try:
+    from spectramind.logging.manifest import generate_manifest, save_manifest  # type: ignore
+    from spectramind.logging.event_logger import EventLogger  # type: ignore
+    _HAS_SM_LOGGING = True
+except Exception:  # pragma: no cover
+    _HAS_SM_LOGGING = False
 
 __all__ = ["run"]
 
@@ -81,12 +107,7 @@ def run(
     • Set seeds & deterministic behavior when requested
     • Instantiate DataModule, LightningModule, loggers, callbacks
     • Enforce Kaggle/CI guardrails (no internet, fewer workers, stable precision)
-    • Launch Trainer.fit() and persist artifacts/metrics/config
-
-    Notes
-    -----
-    • Business logic lives here; CLI remains thin and import-cheap.
-    • Config/schema should remain the single source of truth.
+    • Launch Trainer.fit() and persist artifacts/metrics/config + run manifest
     """
     payload = TrainPayload(
         config_name=config_name,
@@ -156,18 +177,54 @@ def run(
     # Loggers
     loggers = _build_loggers(cfg, repo_root, payload.quiet)
 
+    # JSONL Event logger (optional but preferred)
+    evt_logger: Optional[EventLogger] = None
+    if _HAS_SM_LOGGING:
+        evt_logger = EventLogger.for_run(stage="train", run_id=_resolve_csv_version_id(loggers))
+        evt_logger.info("train/start", data={"config_name": payload.config_name, "overrides": payload.overrides})
+
     # Callbacks
     callbacks, ckpt_dir = _build_callbacks(cfg, repo_root)
+    # Add a lightweight callback to forward end-of-epoch metrics into JSONL
+    if evt_logger is not None:
+        callbacks.append(_JSONLEpochLogger(evt_logger))
 
     # Trainer
     trainer = _build_trainer(cfg, loggers, callbacks, payload.dry_run)
 
-    # Fit
+    # Banner
     _print_banner(cfg, payload, repo_root, payload.quiet)
+
+    # Fit
     trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.training.resume_from or None)
 
     # Persist config snapshot & run manifest (best ckpt + metrics)
-    _persist_config_snapshot(cfg, repo_root, loggers, trainer, ckpt_dir)
+    run_dir = _persist_config_snapshot(cfg, repo_root, loggers, trainer, ckpt_dir)
+
+    # Emit manifest via spectramind.logging.manifest if available
+    if _HAS_SM_LOGGING and run_dir is not None:
+        manifest = generate_manifest(
+            stage="train",
+            config_snapshot=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
+            extra={
+                "run_dir": str(run_dir),
+                "best_ckpt": _find_best_ckpt(trainer),
+                "metrics": _extract_metrics(trainer),
+                "env": payload.env,
+            },
+        )
+        save_manifest(manifest, Path(run_dir) / "run_manifest.json")
+
+    # Final JSONL event
+    if evt_logger is not None:
+        evt_logger.info(
+            "train/end",
+            data={
+                "best_ckpt": _find_best_ckpt(trainer),
+                "metrics": _extract_metrics(trainer),
+            },
+        )
+        evt_logger.close()
 
 
 # ==================================================================================================
@@ -183,7 +240,8 @@ def _compose_hydra_config(repo_root: Path, payload: TrainPayload) -> DictConfig:
     if not config_dir.exists():  # pragma: no cover
         raise FileNotFoundError(f"Missing Hydra config directory: {config_dir}")
 
-    with initialize(config_path=str(config_dir), version_base=None):
+    # Use initialize_config_dir for absolute dirs (safer across CWDs)
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         try:
             cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
         except Exception:
@@ -312,9 +370,12 @@ def _build_loggers(cfg: DictConfig, repo_root: Path, quiet: bool) -> List[PLLogg
             if not quiet:
                 sys.stderr.write(f"[logger] DVCLive unavailable: {e}\n")
 
-    # WandB (optional)
+    # WandB (optional, default to OFFLINE unless user opts in)
     if bool(cfg.logger.wandb.enabled) and WandbLogger is not None:
         try:
+            # Default WANDB_MODE to offline in Kaggle/CI unless explicitly set
+            if "WANDB_MODE" not in os.environ:
+                os.environ["WANDB_MODE"] = "offline"
             wandb_logger = WandbLogger(
                 project=cfg.logger.wandb.project,
                 entity=cfg.logger.wandb.entity,
@@ -322,7 +383,6 @@ def _build_loggers(cfg: DictConfig, repo_root: Path, quiet: bool) -> List[PLLogg
                 save_dir=str(out_dir),
                 name=cfg.logger.name or f"run-{int(time.time())}",
                 log_model=False,
-                mode="offline" if os.environ.get("WANDB_MODE") == "offline" else "online",
             )
             loggers.append(wandb_logger)
         except Exception as e:  # pragma: no cover
@@ -368,6 +428,19 @@ def _build_callbacks(cfg: DictConfig, repo_root: Path) -> Tuple[List[pl.Callback
     return callbacks, ckpt_dir
 
 
+class _JSONLEpochLogger(pl.Callback):
+    """Lightweight callback that forwards end-of-epoch metrics to JSONL."""
+
+    def __init__(self, logger: EventLogger) -> None:
+        super().__init__()
+        self._logger = logger
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:  # noqa: D401
+        metrics = _extract_metrics(trainer)
+        if metrics:
+            self._logger.metric("train/epoch_end", step=float(trainer.current_epoch), metrics=metrics)
+
+
 # ==================================================================================================
 # Guardrails, Seeding, Utils
 # ==================================================================================================
@@ -396,6 +469,10 @@ def _apply_env_guardrails(cfg: DictConfig, env: Dict[str, Any], quiet: bool, dry
     # Precision defaults on Kaggle CPU/T4 → avoid accidental AMP
     if is_kaggle and str(cfg.training.precision).lower() in {"16", "16-mixed", "fp16"}:
         cfg.training.precision = "32"
+
+    # WandB guard: prefer offline mode in CI/Kaggle
+    if (is_kaggle or is_ci) and "WANDB_MODE" not in os.environ:
+        os.environ["WANDB_MODE"] = "offline"
 
     # Extra conservative for dry runs
     if dry_run:
@@ -477,11 +554,11 @@ def _find_repo_root() -> Path:
     for p in [here, *here.parents]:
         if (p / "pyproject.toml").exists() or (p / "setup.cfg").exists() or (p / ".git").exists():
             # If we're sitting inside src/, return the project root above it.
-            if (p / "src").exists() and p.name == "src":
+            if p.name == "src" and p.parent.exists():
                 return p.parent
             return p
-    # Fallback: three levels up from this file (keeps notebooks from exploding)
-    return here.parents[3]
+    # Fallback: two levels up from this file
+    return here.parents[2]
 
 
 def _print_banner(cfg: DictConfig, payload: TrainPayload, repo_root: Path, quiet: bool) -> None:
@@ -504,22 +581,54 @@ def _print_banner(cfg: DictConfig, payload: TrainPayload, repo_root: Path, quiet
     )
 
 
+def _resolve_csv_version_id(loggers: List[PLLogger]) -> str:
+    """Return a run identifier derived from CSVLogger version if possible."""
+    for lg in loggers:
+        if isinstance(lg, CSVLogger):
+            return f"{lg.name}-v{lg.version}"
+    return f"run-{int(time.time())}"
+
+
+def _extract_metrics(trainer: pl.Trainer) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    try:
+        for k, v in trainer.callback_metrics.items():
+            if hasattr(v, "item"):
+                v = float(v.item())
+            elif isinstance(v, (int, float)):
+                v = float(v)
+            else:
+                continue
+            metrics[str(k)] = v
+    except Exception:
+        pass
+    return metrics
+
+
+def _find_best_ckpt(trainer: pl.Trainer) -> Optional[str]:
+    best_ckpt = None
+    for cb in trainer.callbacks:
+        if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
+            best_ckpt = cb.best_model_path
+            break
+    return best_ckpt
+
+
 def _persist_config_snapshot(
     cfg: DictConfig,
     repo_root: Path,
     loggers: List[PLLogger],
     trainer: pl.Trainer,
     ckpt_dir: Path,
-) -> None:
-    """Write the resolved Hydra config and a run manifest to the primary CSVLogger version dir."""
-    # Determine run directory from first CSV logger
+) -> Optional[Path]:
+    """Write the resolved Hydra config and minimal run manifest to the primary CSVLogger version dir."""
     run_dir: Optional[Path] = None
     for lg in loggers:
         if isinstance(lg, CSVLogger):
             run_dir = Path(lg.log_dir) / lg.name / f"version_{lg.version}"
             break
     if run_dir is None:
-        return
+        return None
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -527,53 +636,40 @@ def _persist_config_snapshot(
     (run_dir / "config_resolved.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Extract metrics (best/last if available)
-    metrics: Dict[str, float] = {}
-    try:
-        for k, v in trainer.callback_metrics.items():
-            # Tensor → float
-            if hasattr(v, "item"):
-                v = float(v.item())
-            elif isinstance(v, (int, float)):
-                v = float(v)
-            else:  # skip non-numerics
-                continue
-            metrics[str(k)] = v
-    except Exception:
-        pass
+    metrics = _extract_metrics(trainer)
 
     # Determine best checkpoint path if checkpoint callback exists
-    best_ckpt = None
-    for cb in trainer.callbacks:
-        if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
-            best_ckpt = cb.best_model_path
-            break
+    best_ckpt = _find_best_ckpt(trainer)
 
-    # Minimal manifest (JSON) with git SHA + timestamp
-    manifest = {
-        "schema": "spectramind/train_manifest@v1",
-        "run_dir": str(run_dir),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "git_sha": _git_sha(repo_root),
-        "overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
-        "training": {
-            "epochs": int(cfg.training.get("epochs", 0)),
-            "devices": str(cfg.training.get("devices", "auto")),
-            "precision": str(cfg.training.get("precision", "32")),
-            "num_workers": int(cfg.training.get("num_workers", 0)),
-            "accumulate_grad_batches": int(cfg.training.get("accumulate_grad_batches", 1)),
-        },
-        "checkpoint": {
-            "best_path": best_ckpt or "",
-            "dir": str(ckpt_dir),
-        },
-        "metrics": metrics,
-    }
-    (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+    # Minimal manifest (JSON) if spectramind.logging.manifest is not available
+    if not _HAS_SM_LOGGING:
+        manifest = {
+            "schema": "spectramind/train_manifest@v1",
+            "run_dir": str(run_dir),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "git_sha": _git_sha(repo_root),
+            "overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
+            "training": {
+                "epochs": int(cfg.training.get("epochs", 0)),
+                "devices": str(cfg.training.get("devices", "auto")),
+                "precision": str(cfg.training.get("precision", "32")),
+                "num_workers": int(cfg.training.get("num_workers", 0)),
+                "accumulate_grad_batches": int(cfg.training.get("accumulate_grad_batches", 1)),
+            },
+            "checkpoint": {
+                "best_path": best_ckpt or "",
+                "dir": str(ckpt_dir),
+            },
+            "metrics": metrics,
+        }
+        (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
     # Also persist a CI/DVC-friendly metrics.json at artifacts root
     artifacts_metrics = repo_root / "artifacts" / "metrics.json"
     artifacts_metrics.parent.mkdir(parents=True, exist_ok=True)
     artifacts_metrics.write_text(json.dumps({"metrics": metrics, "best_ckpt": best_ckpt or ""}, indent=2))
+
+    return run_dir
 
 
 def _git_sha(repo_root: Path) -> str:
