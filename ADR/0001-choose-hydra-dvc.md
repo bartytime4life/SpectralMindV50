@@ -1,6 +1,3 @@
-Here’s the regenerated **ADR 0001** file, clean and consistent, ready to drop into your repo as `adr/0001-hydra-dvc.md`:
-
-````markdown
 # ADR 0001 — Choose Hydra + DVC for Configuration & Data/Experiment Lineage
 
 * **Status:** ✅ Accepted  
@@ -85,7 +82,6 @@ CLI (`spectramind calibrate/train/predict/submit`) binds them.
 
 ## 6. Architecture Overview
 
-```mermaid
 flowchart LR
   A["Hydra Configs\n(env, data, calib, model, train, loss, logger)"]
     -->|OmegaConf snapshot| B["Run Manifest"]
