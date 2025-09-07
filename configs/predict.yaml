@@ -1,0 +1,3 @@
+defaults:
+  - env: local
+  - model: v50
