@@ -1,0 +1,25 @@
+	
+$schema	"https://json-schema.org/draft/2020-12/schema"
+title	"Ariel Submission"
+type	"object"
+properties	
+id	
+type	"string"
+mu	
+type	"array"
+items	
+type	"number"
+minItems	283
+maxItems	283
+sigma	
+type	"array"
+items	
+type	"number"
+minimum	0
+minItems	283
+maxItems	283
+required	
+0	"id"
+1	"mu"
+2	"sigma"
+additionalProperties	false
