@@ -1,5 +1,36 @@
-weights:
-  recon: 1.0
-  smoothness: 0.1
-  nonneg: 0.2
-  band_coherence: 0.05
+# configs/loss/composite.yaml
+# SpectraMind V50 — Composite Loss Configuration
+# ------------------------------------------------
+# Combines probabilistic (Gaussian log-likelihood) objective with
+# physics-informed symbolic regularizers. All weights are tunable.
+
+_target_: spectramind.losses.composite.CompositeLoss
+
+components:
+  # Primary likelihood (Kaggle metric: Gaussian log-likelihood)
+  gll:
+    _target_: spectramind.losses.gaussian_loglikelihood.GaussianLogLikelihood
+    weight: 1.0
+
+  # Smoothness prior: penalize large curvature in adjacent bins
+  smoothness:
+    _target_: spectramind.losses.smoothness.SmoothnessLoss
+    weight: 0.05
+
+  # Non-negativity: soft barrier on μ and σ < 0
+  nonneg:
+    _target_: spectramind.losses.nonneg.NonNegLoss
+    weight: 0.02
+
+  # Calibration: penalize miscalibration between predicted σ and empirical error
+  calibration:
+    _target_: spectramind.losses.calibration.CalibrationLoss
+    weight: 0.05
+
+  # Band coherence: enforce consistency across correlated wavelength bands
+  band_coherence:
+    _target_: spectramind.losses.band_coherence.BandCoherenceLoss
+    weight: 0.05
+
+# Global reduction across components
+reduction: mean   # options: mean | sum | none
