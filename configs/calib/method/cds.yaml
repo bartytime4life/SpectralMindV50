@@ -1,2 +1,59 @@
-# cds parameters
-enabled: true
+# configs/calib/method/cds.yaml
+# ----------------------------------------------------------------------
+# Correlated Double Sampling (CDS) — readout differencing
+# ----------------------------------------------------------------------
+# Removes frame-to-frame DC offsets / kTC / reset noise by differencing
+# successive reads or paired readout levels. Apply early in the chain,
+# after ADC conversion and before DARK/FLAT.
+# ----------------------------------------------------------------------
+
+_target_: spectramind.calib.method.cds.CDS
+enable: true
+apply_to: ["fgs1", "airs"]
+
+# --- Input / keys ---
+image_key: null                 # if set, overrides per-sensor default (e.g. "fgs1_frame"/"airs_frame")
+time_key: "time"                # optional timestamp for ordering
+read_level_key: null            # optional key if two read levels are provided per frame (e.g., ["reset","signal"])
+
+# --- Differencing mode ---
+mode: "successive"              # ["successive", "pairwise", "rolling"]
+# successive : x[t] = raw[t] - raw[t-1]
+# pairwise   : x = signal - reset( same frame ), requires read_level_key
+# rolling    : x[t] = raw[t] - mean(raw[t-k:t-1])
+
+# --- Windowing / filtering ---
+window:
+  size: 2                       # for successive: minimal 2; for rolling: k >= 2
+  center: false                 # rolling window is left-aligned (causal)
+  robust: false                 # use robust mean for rolling mode
+
+# --- Bounds & clipping to reduce amplification of glitches ---
+clip:
+  enable: true
+  sigma: 8.0                    # clip extreme differenced values
+  iters: 1
+  replace: "interp"             # ["interp", "nan", "median"]
+
+# --- Ordering & frame drops ---
+ordering:
+  sort_by_time: true            # sort frames by time_key if not guaranteed increasing
+  drop_first: true              # drop first frame (no predecessor in successive mode)
+  drop_masked: true             # drop frames marked invalid by upstream mask
+
+# --- Numerical stability & dtype handling ---
+numeric:
+  preserve_dtype: false         # return float32 even if input was int
+  eps: 1.0e-9
+
+# --- Output keys ---
+outputs:
+  corrected_key: "cds_frame"    # per-sensor pipeline may override (e.g., "fgs1_frame_cds", "airs_frame_cds")
+  meta_prefix: "cds"
+
+# --- Diagnostics (optional) ---
+diagnostics:
+  enable: false
+  histogram_before_after: false
+  save_example_pairs: 0         # number of (prev, curr, diff) triplets to store (0 disables)
+  out_dir: "./outputs/calib_diagnostics/cds"
