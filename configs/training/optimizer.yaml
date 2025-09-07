@@ -1,3 +1,61 @@
-name: adamw
-lr: 3e-4
+# configs/training/optimizer.yaml
+# SpectraMind V50 — Training Optimizer Configuration
+# --------------------------------------------------
+# Defines optimizer type and hyperparameters.
+# Can be overridden via CLI:
+#   spectramind train +training/optimizer=adamw
+# Safe for Hydra/DVC/Kaggle usage.
+
+_target_: torch.optim.AdamW   # default optimizer
+
+# Base learning rate (before scheduler scaling)
+lr: 3.0e-4
+
+# Weight decay for regularization
 weight_decay: 0.01
+
+# Beta coefficients for Adam family optimizers
+betas:
+  - 0.9
+  - 0.999
+
+# Epsilon term for numerical stability
+eps: 1.0e-8
+
+# AMSGrad variant toggle
+amsgrad: false
+
+# Gradient clipping (applied in Lightning callbacks)
+grad_clip_norm: 1.0
+
+# Optional overrides for alternate optimizers
+variants:
+
+  adam:
+    _target_: torch.optim.Adam
+    lr: 1.0e-3
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.0
+    amsgrad: false
+
+  sgd:
+    _target_: torch.optim.SGD
+    lr: 1.0e-2
+    momentum: 0.9
+    nesterov: true
+    weight_decay: 1.0e-4
+
+  rmsprop:
+    _target_: torch.optim.RMSprop
+    lr: 1.0e-3
+    alpha: 0.99
+    eps: 1.0e-8
+    momentum: 0.9
+    centered: false
+    weight_decay: 0.0
+
+# Notes:
+# - Default is AdamW (best for transformers/SSMs).
+# - Use +training/optimizer=sgd for large-batch baselines.
+# - All hyperparams are explicit for reproducibility.
