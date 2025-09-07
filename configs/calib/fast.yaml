@@ -1,1 +1,31 @@
-stages: [adc, cds, photometry, phase]
+# configs/calib/fast.yaml
+# ======================================================================
+# Fast Calibration Profile — SpectraMind V50
+# ======================================================================
+# Lightweight calibration pipeline for rapid experimentation,
+# debugging, or CI smoke tests. Skips heavy steps (e.g. flat-field,
+# wavelength trace) while retaining essential corrections to keep
+# model inputs sane.
+#
+# Usage:
+#   python -m spectramind.calibrate +calib=fast
+#
+# Keys:
+#   steps   : ordered list of calibration methods to apply
+#   strict  : whether to hard-fail on missing calibration data
+#   validate: enable basic sanity checks (optional)
+# ======================================================================
+
+_target_: spectramind.pipeline.calibrate.CalibrationPipeline
+
+steps:
+  - adc         # bias/gain conversion
+  - cds         # correlated double sampling
+  - dark        # dark subtraction
+  - photometry  # photometric detrending (FGS1)
+  - phase       # fast alignment (approximate)
+
+strict: false      # be forgiving (skip gracefully if data missing)
+validate: false    # disable heavy consistency checks for speed
+log_level: WARNING # quieter logs, highlight only potential issues
+save_intermediates: false
