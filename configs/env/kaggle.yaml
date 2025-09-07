@@ -1,2 +1,32 @@
-device: gpu
-log_dir: /kaggle/working/logs
+# configs/env/kaggle.yaml
+# ======================================================================
+# Kaggle Environment Config — SpectraMind V50
+# ======================================================================
+# Defines runtime settings for execution inside Kaggle notebooks/kernels.
+# This config enforces Kaggle’s constraints:
+#   - No internet access
+#   - Pre-mounted competition data under /kaggle/input/
+#   - Writable scratch space under /kaggle/working/
+#
+# Usage:
+#   python -m spectramind.train +env=kaggle
+#
+# Keys:
+#   name        : environment label
+#   device      : default compute device ("cuda" if GPU enabled)
+#   num_workers : DataLoader worker threads (safe default = 2 on Kaggle)
+#   seed        : default random seed
+#   paths       : canonical directories for data, logs, artifacts
+# ======================================================================
+
+name: kaggle
+
+device: "cuda"          # Kaggle GPU → "cuda"; force "cpu" if no GPU quota
+num_workers: 2          # conservative worker count for Kaggle 2-core CPUs
+seed: 42                # reproducibility across runs
+
+paths:
+  root: /kaggle/working/spectramind-v50
+  logs: ${paths.root}/logs           # training + diagnostics logs
+  artifacts: ${paths.root}/artifacts # checkpoints + submission bundles
+  data: /kaggle/input/ariel-data-challenge-2025
