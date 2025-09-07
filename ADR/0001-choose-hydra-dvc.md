@@ -82,6 +82,8 @@ CLI (`spectramind calibrate/train/predict/submit`) binds them.
 
 ## 6. Architecture Overview
 
+````
+
 flowchart LR
   A[Hydra Configs<br/>(env, data, calib, model, train, loss, logger)]
     -->|OmegaConf snapshot| B[Run Manifest]
