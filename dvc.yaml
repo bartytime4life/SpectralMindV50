@@ -5,15 +5,16 @@
 #   calibrate → train → predict → (diagnose) → (submit)
 #
 # Tips
-# - Use params.yaml to expose Hydra selectors (env/data/calib/model/training/loss/logger)
-#   so `dvc exp show`/`dvc exp diff` can track config changes cleanly.
-# - Processed data is 'persist' so downstream stages can reuse it across runs.
-# - Training stage is dvclive-ready (uncomment if you log with dvclive).
-# - Torch stack is handled outside DVC (e.g., bin/kaggle-boot.sh).
+# - Put Hydra selectors in params.yaml (env/data/calib/model/training/loss/logger)
+#   so `dvc exp show` / `dvc exp diff` track config changes cleanly.
+# - `data/processed` is `persist: true` so downstream stages reuse it across runs.
+# - Uncomment dvclive in `train` if you want live learning curves in CI.
+# - Torch stack/bootstrap stays outside DVC (e.g., bin/kaggle-boot.sh).
 # ==============================================================================
 
 stages:
   calibrate:
+    desc: "Raw → calibrated tensors (FGS1 + AIRS) with physics-informed preprocessing"
     wdir: .
     cmd: >
       spectramind calibrate
@@ -22,9 +23,9 @@ stages:
       data=${params.hydra.data}
       calib=${params.hydra.calib}
     deps:
-      - configs/              # hydra configs (data/calib/env/...)
+      - configs/              # hydra configs (data/calib/env/…)
       - src/                  # calibration code
-      - data/raw              # raw telescope inputs (DVC tracked)
+      - data/raw              # raw telescope inputs (DVC-tracked)
     params:
       - hydra.config_name_calibrate
       - hydra.env
@@ -35,6 +36,7 @@ stages:
         persist: true
 
   train:
+    desc: "Train dual-channel encoders + heteroscedastic decoder (μ, σ)"
     wdir: .
     cmd: >
       spectramind train
@@ -62,20 +64,21 @@ stages:
         cache: true
       - path: artifacts/metrics.json
         cache: true
-      - path: logs/train/        # optional structured logs
-        cache: false
+    outs_no_cache:
+      - logs/train/           # structured run logs / JSONL events (no cache)
     metrics:
       - artifacts/metrics.json:
           cache: false
           type: json
           xpath: .
-    # Uncomment if you use dvclive (recommended for live learning curves)
+    # If you log with dvclive, enable this block:
     # live:
     #   path: dvclive
     #   summary: true
     #   html: true
 
   predict:
+    desc: "Run inference on processed data → predictions CSV"
     wdir: .
     cmd: >
       spectramind predict
@@ -96,6 +99,7 @@ stages:
         cache: true
 
   diagnose:
+    desc: "Post-hoc diagnostics: GLL, FFT/UMAP, sanity checks, HTML report"
     wdir: .
     cmd: >
       spectramind diagnose
@@ -117,7 +121,8 @@ stages:
       - path: artifacts/diagnostics/plots/
         cache: true
     plots:
-      - artifacts/diagnostics/plots/    # png/svg/json — quick visual checks
+      # dvc plots show artifacts/diagnostics/plots/ --open
+      - artifacts/diagnostics/plots/
     metrics:
       - artifacts/diagnostics/summary.json:
           cache: false
@@ -125,6 +130,7 @@ stages:
           xpath: .
 
   submit:
+    desc: "Package submission artifacts"
     wdir: .
     cmd: >
       spectramind submit
@@ -138,3 +144,6 @@ stages:
     outs:
       - path: outputs/submission.csv
         cache: true
+      # If you also zip for Kaggle/CI, add:
+      # - path: outputs/submission.zip
+      #   cache: true
