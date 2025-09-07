@@ -1,0 +1,5 @@
+weights:
+  recon: 1.0
+  smoothness: 0.1
+  nonneg: 0.2
+  band_coherence: 0.05
