@@ -1,1 +1,14 @@
-0.1.0
+.PHONY: version
+version:
+	@echo "Setting version to $$(cat VERSION)"
+	@python - <<'PY'
+import re, sys, pathlib
+ver = pathlib.Path("VERSION").read_text().strip()
+p = pathlib.Path("pyproject.toml")
+s = p.read_text()
+s = re.sub(r'(?m)^(version\s*=\s*")[^"]+(")', rf'\1{ver}\2', s)
+p.write_text(s)
+print(f"pyproject.toml version -> {ver}")
+PY
+	@git add VERSION pyproject.toml
+	@git commit -m "chore: set version $$(cat VERSION)" || true
