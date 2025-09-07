@@ -1,9 +1,83 @@
-name: v50
-fgs1_encoder: ${model.fgs1_encoder}
-airs_encoder: ${model.airs_encoder}
-fusion: ${model.fusion}
-decoder: ${model.decoder}
-constraints:
-  nonneg: true
-  smoothness_weight: 0.1
-  band_coherence_weight: 0.05
+# configs/model/v50.yaml
+# SpectraMind V50 — Dual-Channel Fusion Model
+# ---------------------------------------------------------
+# Defines the baseline model architecture:
+#   - FGS1 encoder (time-series, Mamba SSM)
+#   - AIRS encoder (spectral, GNN/CNN hybrid)
+#   - Fusion via cross-attention
+#   - Heteroscedastic decoder (μ, σ for 283 bins)
+
+_target_: spectramind.models.v50.V50Model
+
+# ------------------------------
+# General
+# ------------------------------
+name: "spectramind_v50"
+num_bins: 283
+dropout: 0.1
+hidden_dim: 512
+latent_dim: 256
+activation: gelu
+
+# ------------------------------
+# FGS1 Encoder (time-series)
+# ------------------------------
+fgs1_encoder:
+  _target_: spectramind.models.fgs1_mamba.FGS1Mamba
+  input_dim: 1                # single-channel photometry
+  hidden_dim: 128
+  depth: 6
+  state_dim: 64
+  dropout: ${..dropout}
+
+# ------------------------------
+# AIRS Encoder (spectral)
+# ------------------------------
+airs_encoder:
+  _target_: spectramind.models.airs_gnn.AIRSGNN
+  input_dim: 283              # spectral bins
+  hidden_dim: 128
+  layers: 4
+  dropout: ${..dropout}
+  gnn_type: graphsage         # options: gcn | gat | graphsage
+
+# ------------------------------
+# Fusion (cross-attention)
+# ------------------------------
+fusion:
+  _target_: spectramind.models.fusion_xattn.FusionXAttn
+  hidden_dim: ${..hidden_dim}
+  num_heads: 8
+  depth: 2
+  dropout: ${..dropout}
+
+# ------------------------------
+# Decoder Head (heteroscedastic)
+# ------------------------------
+decoder:
+  _target_: spectramind.models.decoder_head.DecoderHead
+  input_dim: ${..latent_dim}
+  hidden_dim: ${..hidden_dim}
+  num_bins: ${..num_bins}
+  dropout: ${..dropout}
+  activation: ${..activation}
+  output:
+    mu: true
+    sigma: true
+
+# ------------------------------
+# Initialization / Regularization
+# ------------------------------
+init:
+  type: xavier_uniform
+  gain: 1.0
+weight_norm: true
+spectral_norm: false
+
+# ------------------------------
+# Notes
+# ------------------------------
+# - Designed for Kaggle-safe training (fits 16 GB GPU with batch_size=16).
+# - Decoder outputs [mu, sigma] with σ clamped ≥ epsilon.
+# - FGS1 time-series features carry high weight; AIRS encodes spectral context.
+# - Fusion block allows cross-channel attention for robustness.
