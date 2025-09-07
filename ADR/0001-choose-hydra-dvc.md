@@ -81,15 +81,39 @@ CLI (`spectramind calibrate/train/predict/submit`) binds them.
 ---
 
 ## 6. Architecture Overview
-
-%%{init: {'flowchart': {'htmlLabels': false}} }%%
 flowchart LR
-  A["Hydra Configs\nenv data calib model train loss logger"] -->|OmegaConf snapshot| B["Run Manifest"]
-  A --> C["CLI Typer\nspectramind"]
-  C --> D["DVC Pipeline\n dvc.yaml stages"]
-  D --> E["Artifacts\n raw calib tensors ckpts preds"]
-  E --> F["Submission\n 283-bin mu sigma"]
-  D --> G["Remote Cache\n S3 SSH Local"]
+  subgraph A["Hydra Configs"]
+    direction TB
+    a1["env data calib model train loss logger"]
+  end
+
+  subgraph B["Run Manifest"]:::node
+  end
+
+  subgraph C["CLI Typer"]:::node
+  end
+
+  subgraph D["DVC Pipeline"]:::node
+  end
+
+  subgraph E["Artifacts"]:::node
+  end
+
+  subgraph F["Submission"]:::node
+  end
+
+  subgraph G["Remote Cache"]:::node
+  end
+
+  A -->|OmegaConf snapshot| B
+  A --> C
+  C --> D
+  D --> E
+  E --> F
+  D --> G
+
+classDef node fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#111;
+
 
 ````
 
