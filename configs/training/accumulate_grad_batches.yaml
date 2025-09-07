@@ -1,5 +1,25 @@
-train: 1
-val: 1
-test: 1
-notes: |
-  • Validation/Test ignore accumulation; retained for Hydra group consistency.
+# configs/training/accumulate_grad_batches.yaml
+# SpectraMind V50 — Gradient Accumulation Configuration
+# ------------------------------------------------------
+# Controls how many mini-batches are accumulated before
+# one optimizer step. Useful for effective larger batch
+# sizes on GPU-limited environments (e.g. Kaggle).
+#
+# Usage (Hydra override):
+#   spectramind train +training/accumulate_grad_batches=4
+#
+# Notes:
+# - Value = 1 → no accumulation (default).
+# - Effective batch size = dataloader.batch_size * accumulate_grad_batches.
+# - Make sure to adjust learning rate if scaling up a lot.
+
+accumulate_grad_batches: 2   # default value
+
+# Optional profiles for common environments
+profiles:
+  kaggle:
+    accumulate_grad_batches: 2   # safe for 16 GB GPUs
+  local:
+    accumulate_grad_batches: 1   # no accumulation on workstation
+  large_gpu:
+    accumulate_grad_batches: 4   # for A100/RTX 6000
