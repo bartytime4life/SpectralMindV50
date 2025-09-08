@@ -29,16 +29,20 @@ def _has_torch() -> bool:
         return False
 
 
+def _manual_gaussian_nll(y, mu, sigma):
+    var = sigma ** 2
+    return 0.5 * (np.log(2.0 * math.pi * var) + (y - mu) ** 2 / var)
+
+
 # ----------------------------------------------------------------------------- #
-# gaussian_nll
+# gaussian_nll — core correctness & reductions
 # ----------------------------------------------------------------------------- #
 def test_gaussian_nll_scalar_numpy():
     y = np.array([1.0])
     mu = np.array([1.5])
     sigma = np.array([0.5])
-    # manual NLL: 0.5 * [ ln(2πσ²) + (y-μ)^2/σ² ]
-    var = sigma ** 2
-    manual = 0.5 * (np.log(2.0 * math.pi * var) + (y - mu) ** 2 / var)
+
+    manual = _manual_gaussian_nll(y, mu, sigma)
     got = gaussian_nll(y, mu, sigma, reduction="mean")
     assert np.isclose(got, manual, rtol=1e-7, atol=0.0)
 
@@ -67,20 +71,61 @@ def test_gaussian_nll_broadcasting_numpy():
     y = np.array([[0.0, 1.0, 2.0]])
     mu = np.array([[0.5, 1.5, 1.0]])
     sigma = np.array(0.2)  # scalar broadcast
-    # Should run and return appropriate shape with reduction="none"
     out = gaussian_nll(y, mu, sigma, reduction="none")
     assert out.shape == y.shape
-    # other reductions should be scalar
     assert np.isscalar(gaussian_nll(y, mu, sigma, reduction="mean"))
     assert np.isscalar(gaussian_nll(y, mu, sigma, reduction="sum"))
 
 
+@pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
+def test_gaussian_nll_1d_2d_interop(reduction: str):
+    # 1-D vectors should work and be consistent with 2-D (N=1) use
+    y1 = np.array([0.0, 1.0, 2.0])
+    mu1 = np.array([0.1, 1.1, 2.1])
+    sigma1 = np.array([0.2, 0.2, 0.2])
+
+    y2 = y1[None, :]
+    mu2 = mu1[None, :]
+    sigma2 = sigma1[None, :]
+
+    g1 = gaussian_nll(y1, mu1, sigma1, reduction=reduction)
+    g2 = gaussian_nll(y2, mu2, sigma2, reduction=reduction)
+    if reduction == "none":
+        assert g1.shape == (3,)
+        assert g2.shape == (1, 3)
+        np.testing.assert_allclose(g1, g2[0], rtol=1e-7)
+    else:
+        assert np.isscalar(g1)
+        assert np.isscalar(g2)
+        assert np.isclose(float(g1), float(g2), rtol=1e-7)
+
+
+def test_gaussian_nll_invalid_reduction_raises():
+    y = np.array([0.0])
+    mu = np.array([0.0])
+    sigma = np.array([0.1])
+    with pytest.raises((ValueError, AssertionError, KeyError, TypeError)):
+        _ = gaussian_nll(y, mu, sigma, reduction="avg")  # not supported
+
+
+def test_gaussian_nll_zero_or_negative_sigma_handling():
+    y = np.array([0.0, 1.0])
+    mu = np.array([0.0, 1.0])
+    # sigma includes a zero and a negative to test guarding
+    sigma = np.array([0.0, -0.1])
+    # Accept either a clear exception or finite guarded result (eps-clamping)
+    try:
+        out = gaussian_nll(y, mu, sigma, reduction="none")
+        assert np.all(np.isfinite(out)), "Expected finite results if eps-clamped"
+    except Exception as e:  # noqa: BLE001
+        assert isinstance(e, (ValueError, AssertionError, FloatingPointError, ZeroDivisionError))
+
+
 # ----------------------------------------------------------------------------- #
-# challenge_gll
+# challenge_gll — weighting behavior and reductions
 # ----------------------------------------------------------------------------- #
-def test_challenge_gll_fgs1_weighting_effect():
-    # Two-bin spectrum: bin0 is FGS1
-    # Make an error only in bin0 so weighting dominates
+def test_challenge_gll_fgs1_weighting_effect_two_bin():
+    # Two-bin spectrum: bin0 is FGS1; make error only in bin0 so weighting dominates
     y = np.array([[0.0, 0.0]])
     mu = np.array([[1.0, 0.0]])  # error only at bin 0
     sigma = np.array([[1.0, 1.0]])
@@ -89,19 +134,51 @@ def test_challenge_gll_fgs1_weighting_effect():
     w58 = challenge_gll(y, mu, sigma, fgs1_weight=58.0, reduction="mean")
     w10 = challenge_gll(y, mu, sigma, fgs1_weight=10.0, reduction="mean")
 
-    # Increasing FGS1 weight should increase weighted mean (since only bin0 has loss)
     assert w58 > w10 > base
 
-    # With two bins, weighted mean = (w*nll0 + 1*nll1)/(w+1) = (w*nll0)/(w+1)
-    # nll1=0 here; compare to exact formula using nll0 extracted from 'none'
     nll_elem = gaussian_nll(y, mu, sigma, reduction="none")
     nll0 = float(nll_elem[0, 0])
     expected = (58.0 * nll0) / (58.0 + 1.0)
     assert np.isclose(w58, expected, rtol=1e-6)
 
 
+def test_challenge_gll_multi_bin_exact_formula():
+    """
+    Validate exact formula on a 1xK example where only specific bins have error.
+    Weighting should be equivalent to replacing the first-bin weight.
+    """
+    K = 5
+    y = np.zeros((1, K))
+    mu = np.zeros((1, K))
+    sigma = np.ones((1, K))
+    # Introduce error at bins 0 (FGS1) and 3
+    mu[0, 0] = 1.0
+    mu[0, 3] = 2.0
+    nll = gaussian_nll(y, mu, sigma, reduction="none")[0]
+    # Weighted mean = (w*nll0 + sum(nll1..))/(w + (K-1))
+    for w in (1.0, 10.0, 58.0, 100.0):
+        got = challenge_gll(y, mu, sigma, fgs1_weight=w, reduction="mean")
+        expected = (w * nll[0] + np.sum(nll[1:])) / (w + (K - 1))
+        assert np.isclose(got, expected, rtol=1e-8)
+
+
+def test_challenge_gll_reductions_shapes_and_types():
+    rng = _rng(41)
+    B, K = 3, 7
+    y = rng.normal(size=(B, K))
+    mu = rng.normal(size=(B, K))
+    sigma = np.full((B, K), 0.5)
+
+    none = challenge_gll(y, mu, sigma, reduction="none", fgs1_weight=58.0)
+    mean = challenge_gll(y, mu, sigma, reduction="mean", fgs1_weight=58.0)
+    sm = challenge_gll(y, mu, sigma, reduction="sum", fgs1_weight=58.0)
+    assert none.shape == (B, K)
+    assert np.isscalar(mean)
+    assert np.isscalar(sm)
+
+
 # ----------------------------------------------------------------------------- #
-# point metrics
+# point metrics — mae/rmse and masks
 # ----------------------------------------------------------------------------- #
 def test_mae_rmse_basic_and_masks():
     y = np.array([[0.0, 2.0, 4.0]])
@@ -113,8 +190,18 @@ def test_mae_rmse_basic_and_masks():
     assert np.isclose(rmse(y, mu, mask=mask), math.sqrt(9.0 / 2.0))
 
 
+def test_mae_rmse_broadcast_and_1d():
+    y = np.array([0.0, 1.0, 2.0])
+    mu = np.array([[0.0, 2.0, 1.0]])  # will broadcast across batch if supported
+    m = mae(y, mu)
+    r = rmse(y, mu)
+    assert np.isscalar(m)
+    assert np.isscalar(r)
+    assert m >= 0 and r >= 0
+
+
 # ----------------------------------------------------------------------------- #
-# uncertainty diagnostics
+# uncertainty diagnostics — coverage & sharpness
 # ----------------------------------------------------------------------------- #
 def test_uncertainty_diagnostics_deterministic_inside_interval():
     # Make y guaranteed to be inside the 95% interval to avoid stochastic flakiness.
@@ -129,8 +216,43 @@ def test_uncertainty_diagnostics_deterministic_inside_interval():
     assert np.isclose(shp, 0.1)  # mean sigma
 
 
+def test_coverage_exact_fraction_constructed():
+    """
+    Build a toy array where exactly half of the elements are inside the interval and
+    half are outside (deterministically), then assert coverage=0.5.
+    """
+    alpha = 0.90  # z ≈ 1.64485
+    z = 1.6448536269514722
+    # y: two bins, inside/outside toggled
+    N, D = 10, 2
+    mu = np.zeros((N, D))
+    sigma = np.ones((N, D)) * 0.2
+    y = np.zeros((N, D))
+    # half inside: +0.5σ; half outside: +2.5σ (beyond z=1.64)
+    y[: N // 2] = mu[: N // 2] + 0.5 * sigma[: N // 2]
+    y[N // 2 :] = mu[N // 2 :] + 2.5 * sigma[N // 2 :]
+    cov = coverage(y, mu, sigma, alpha=alpha)
+    assert np.isclose(cov, 0.5, atol=1e-12)
+
+
+def test_sharpness_reductions_and_shapes():
+    # Depending on implementation, sharpness may support reduction; if not, basic mean.
+    sigma = np.array([[0.1, 0.2, 0.3], [0.2, 0.2, 0.2]])
+    try:
+        s_none = sharpness(sigma, reduction="none")  # type: ignore[call-arg]
+        assert s_none.shape == sigma.shape
+        s_mean = sharpness(sigma, reduction="mean")  # type: ignore[call-arg]
+        assert np.isclose(float(s_mean), float(np.mean(sigma)))
+        s_sum = sharpness(sigma, reduction="sum")  # type: ignore[call-arg]
+        assert np.isclose(float(s_sum), float(np.sum(sigma)))
+    except TypeError:
+        # If reduction not supported, default should equal mean
+        s = sharpness(sigma)
+        assert np.isclose(float(s), float(np.mean(sigma)))
+
+
 # ----------------------------------------------------------------------------- #
-# torch parity
+# torch parity (optional)
 # ----------------------------------------------------------------------------- #
 @pytest.mark.skipif(not _has_torch(), reason="Torch not installed")
 def test_torch_equivalence_to_numpy():
@@ -142,29 +264,30 @@ def test_torch_equivalence_to_numpy():
     mu_np = y_np + rng.normal(scale=0.1, size=(N, D))
     sigma_np = np.full((N, D), 0.2)
 
-    y_t = torch.tensor(y_np, dtype=torch.float64)
-    mu_t = torch.tensor(mu_np, dtype=torch.float64)
-    sigma_t = torch.tensor(sigma_np, dtype=torch.float64)
+    for dtype in (torch.float32, torch.float64):
+        y_t = torch.tensor(y_np, dtype=dtype)
+        mu_t = torch.tensor(mu_np, dtype=dtype)
+        sigma_t = torch.tensor(sigma_np, dtype=dtype)
 
-    # gaussian_nll
-    g_np = gaussian_nll(y_np, mu_np, sigma_np, reduction="mean")
-    g_t = gaussian_nll(y_t, mu_t, sigma_t, reduction="mean")
-    assert np.isclose(float(g_t), float(g_np), rtol=1e-6)
+        # gaussian_nll
+        g_np = gaussian_nll(y_np, mu_np, sigma_np, reduction="mean")
+        g_t = gaussian_nll(y_t, mu_t, sigma_t, reduction="mean")
+        assert np.isclose(float(g_t), float(g_np), rtol=1e-6)
 
-    # challenge_gll
-    cg_np = challenge_gll(y_np, mu_np, sigma_np, reduction="mean", fgs1_weight=58.0)
-    cg_t = challenge_gll(y_t, mu_t, sigma_t, reduction="mean", fgs1_weight=58.0)
-    assert np.isclose(float(cg_t), float(cg_np), rtol=1e-6)
+        # challenge_gll
+        cg_np = challenge_gll(y_np, mu_np, sigma_np, reduction="mean", fgs1_weight=58.0)
+        cg_t = challenge_gll(y_t, mu_t, sigma_t, reduction="mean", fgs1_weight=58.0)
+        assert np.isclose(float(cg_t), float(cg_np), rtol=1e-6)
 
-    # mae/rmse
-    assert np.isclose(float(mae(y_t, mu_t)), float(mae(y_np, mu_np)), rtol=1e-6)
-    assert np.isclose(float(rmse(y_t, mu_t)), float(rmse(y_np, mu_np)), rtol=1e-6)
+        # mae/rmse
+        assert np.isclose(float(mae(y_t, mu_t)), float(mae(y_np, mu_np)), rtol=1e-6)
+        assert np.isclose(float(rmse(y_t, mu_t)), float(rmse(y_np, mu_np)), rtol=1e-6)
 
-    # coverage/sharpness
-    cov_np = coverage(y_np, mu_np, sigma_np, alpha=0.95)
-    cov_t = coverage(y_t, mu_t, sigma_t, alpha=0.95)
-    assert np.isclose(float(cov_t), float(cov_np), rtol=1e-6)
+        # coverage/sharpness
+        cov_np = coverage(y_np, mu_np, sigma_np, alpha=0.95)
+        cov_t = coverage(y_t, mu_t, sigma_t, alpha=0.95)
+        assert np.isclose(float(cov_t), float(cov_np), rtol=1e-6)
 
-    shp_np = sharpness(sigma_np)
-    shp_t = sharpness(sigma_t)
-    assert np.isclose(float(shp_t), float(shp_np), rtol=1e-6)
+        shp_np = sharpness(sigma_np)
+        shp_t = sharpness(sigma_t)
+        assert np.isclose(float(shp_t), float(shp_np), rtol=1e-6)
