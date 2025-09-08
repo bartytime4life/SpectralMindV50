@@ -1,0 +1,60 @@
+# configs/training/fast_ci.yaml
+# SpectraMind V50 — Fast profile for CI/Kaggle smoke tests
+
+# Compose this on top of train.yaml:
+#   python -m spectramind train +defaults='[/training/fast_ci]'
+# or     hydra.run.dir + trainer overrides, etc.
+
+defaults:
+  - override /training/callbacks@training.callbacks: callbacks
+
+# Trainer overrides (PL 2.x)
+trainer:
+  max_epochs: 2
+  precision: "32-true"              # avoid AMP flakiness in CI
+  devices: 1
+  val_check_interval: 1.0           # validate once per epoch
+  log_every_n_steps: 10
+  accumulate_grad_batches: 1
+  gradient_clip_val: 0.5
+  limit_train_batches: 0.1           # 10% of train
+  limit_val_batches: 0.1             # 10% of val
+  enable_model_summary: false
+  detect_anomaly: false
+  benchmark: false
+  callbacks: ${training.callbacks.callbacks}
+
+# Make early stop trigger quickly in smoke runs
+training:
+  callbacks:
+    callbacks:
+      - _target_: pytorch_lightning.callbacks.EarlyStopping
+        monitor: "val/loss"
+        mode: "min"
+        patience: 2
+        min_delta: 0.0
+        strict: true
+        verbose: true
+      - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+        monitor: "val/loss"
+        mode: "min"
+        save_top_k: 1
+        save_last: false
+        dirpath: "${paths.checkpoints}"
+        filename: "ci-{epoch:02d}-{val/loss:.4f}"
+        auto_insert_metric_name: false
+      - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+        logging_interval: "epoch"
+        log_momentum: false
+
+# Smaller, deterministic learning
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 5e-4
+  weight_decay: 0.0
+
+# Short cosine
+scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: ${trainer.max_epochs}
+  eta_min: 1e-5
