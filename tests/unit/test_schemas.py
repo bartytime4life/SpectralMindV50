@@ -59,37 +59,59 @@ def _flatten_keys(obj) -> Set[str]:
 
 def _collect_properties_bags(d: Dict) -> Iterable[Dict[str, Dict]]:
     """
-    Yield all 'properties' bags (dicts) reachable anywhere in the schema.
+    Yield all 'properties' bags (dicts) reachable anywhere in the schema,
+    including under items (arrays) and inside combinators (allOf/anyOf/oneOf).
     """
     if not isinstance(d, dict):
         return
     stack = [d]
     while stack:
         cur = stack.pop()
+        if not isinstance(cur, (dict, list)):
+            continue
         if isinstance(cur, dict):
             if "properties" in cur and isinstance(cur["properties"], dict):
                 yield cur["properties"]
-            for v in cur.values():
-                if isinstance(v, (dict, list)):
+            # Recurse into common structural keywords
+            for key, v in cur.items():
+                if key in ("items", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "definitions"):
                     stack.append(v)
-        elif isinstance(cur, list):
+                elif isinstance(v, (dict, list)):
+                    stack.append(v)
+        else:  # list
             stack.extend(cur)
 
 
-def _discover_bins_from_properties(prop_keys: Iterable[str]) -> Optional[int]:
+def _discover_bins_from_props(props: Iterable[str]) -> Optional[int]:
     """
-    Try to infer the spectral bin count by scanning mu_### keys.
+    Try to infer the spectral bin count by scanning contiguous mu_### keys.
     Returns None if not discoverable.
     """
-    max_idx = -1
+    mu_idxs: Set[int] = set()
     pat = re.compile(r"^mu_(\d{3})$")
-    for k in prop_keys:
+    for k in props:
         m = pat.match(k)
         if m:
-            idx = int(m.group(1))
-            if idx > max_idx:
-                max_idx = idx
-    return (max_idx + 1) if max_idx >= 0 else None
+            mu_idxs.add(int(m.group(1)))
+    if not mu_idxs:
+        return None
+    # Require contiguity if possible
+    max_idx = max(mu_idxs)
+    expected = set(range(max_idx + 1))
+    if mu_idxs >= expected:  # allow supersets (e.g., sigma keys mixed in the same bag)
+        return max_idx + 1
+    # Non-contiguous: still return a safe guess; subsequent tests will report gap details.
+    return max_idx + 1
+
+
+def _find_all_numbered(prefix: str, props: Iterable[str]) -> Set[int]:
+    out: Set[int] = set()
+    pat = re.compile(rf"^{re.escape(prefix)}_(\d{{3}})$")
+    for k in props:
+        m = pat.match(k)
+        if m:
+            out.add(int(m.group(1)))
+    return out
 
 
 def _expected_submission_columns(n_bins: int) -> Iterable[str]:
@@ -170,7 +192,7 @@ def test_schemas_are_utf8_json(schemas_path: Path) -> None:
 )
 def test_each_schema_is_valid_jsonschema(request, fixture_name: str) -> None:
     schema = request.getfixturevalue(fixture_name)
-    # Draft-07 is a safe lower bound; newer drafts declare their own meta, which jsonschema respects.
+    # jsonschema will use the declared $schema if present; Draft-07 check is a safe lower bound.
     jsonschema.Draft7Validator.check_schema(schema)
 
 
@@ -184,34 +206,52 @@ def test_submission_schema_has_meta_fields(submission_schema: Dict) -> None:
 
 
 # ----------------------------------------------------------------------------- #
-# Tests: submission schema has expected fields
+# Tests: submission schema column logic (contiguity, symmetry)
 # ----------------------------------------------------------------------------- #
-def test_submission_schema_includes_expected_fields(submission_schema: Dict) -> None:
+def test_submission_schema_includes_expected_fields_and_contiguity(submission_schema: Dict) -> None:
     """
     We don't assume a specific schema shape; we just ensure keys for sample_id and
     mu_### / sigma_### appear somewhere (often under properties).
-    If a properties bag is found, we infer bin count from it and require all columns.
-    Otherwise we only enforce presence of sentinel keys.
+    If a properties bag is found, enforce contiguity/symmetry of mu/sigma indices.
     """
     keys = _flatten_keys(submission_schema)
 
-    # Cheap sentinels
+    # Cheap sentinels must exist somewhere in the schema
     sentinels = {"sample_id", "mu_000", "sigma_000"}
     missing_sentinels = sentinels - keys
     assert not missing_sentinels, f"Missing sentinel fields in schema keys: {missing_sentinels}"
 
-    # If the schema exposes any properties dict, be strict with full column set.
+    # Collect all property names from any nested 'properties' bag
     all_props: Set[str] = set()
     for bag in _collect_properties_bags(submission_schema):
         all_props |= set(bag.keys())
 
-    if all_props:
-        # Try to infer bins from the mu_### range; fallback to default if not discoverable.
-        inferred = _discover_bins_from_properties(all_props)
-        n_bins = inferred if inferred is not None else _safe_bins_default()
-        expected = set(_expected_submission_columns(n_bins))
-        missing = expected - all_props
-        assert not missing, f"Expected columns not exposed as properties: {sorted(list(missing))[:10]}..."
+    if not all_props:
+        # If schema does not expose a direct properties bag (e.g., array-of-objects wrapper),
+        # we can still consider sentinel presence sufficient.
+        return
+
+    # Infer bins from mu_* keys if possible
+    inferred = _discover_bins_from_props(all_props)
+    n_bins = inferred if inferred is not None else _safe_bins_default()
+
+    mu_idxs = _find_all_numbered("mu", all_props)
+    sigma_idxs = _find_all_numbered("sigma", all_props)
+
+    # Require contiguity (0..n-1) and symmetry between mu and sigma sets
+    expected = set(range(n_bins))
+    missing_mu = expected - mu_idxs
+    missing_sigma = expected - sigma_idxs
+    extra_mu = mu_idxs - expected
+    extra_sigma = sigma_idxs - expected
+
+    assert not missing_mu, f"Missing mu indices: {sorted(list(missing_mu))[:10]}..."
+    assert not missing_sigma, f"Missing sigma indices: {sorted(list(missing_sigma))[:10]}..."
+    assert not extra_mu, f"Unexpected mu indices beyond n_bins={n_bins}: {sorted(list(extra_mu))[:10]}..."
+    assert not extra_sigma, f"Unexpected sigma indices beyond n_bins={n_bins}: {sorted(list(extra_sigma))[:10]}..."
+
+    # sample_id must exist in the same property set or another bag; enforce global presence
+    assert "sample_id" in all_props or "sample_id" in keys, "'sample_id' property not found"
 
 
 # ----------------------------------------------------------------------------- #
@@ -231,25 +271,24 @@ def test_submission_schema_accepts_plausible_instance(submission_schema: Dict) -
     all_props: Set[str] = set()
     for bag in _collect_properties_bags(submission_schema):
         all_props |= set(bag.keys())
-    inferred = _discover_bins_from_properties(all_props)
+    inferred = _discover_bins_from_props(all_props)
     n_bins = inferred if inferred is not None else _safe_bins_default()
 
     # Build a single-row instance shape commonly used in JSON-record submissions.
     instance = {k: 0.0 for k in _expected_submission_columns(n_bins)}
     instance["sample_id"] = "row_0"
 
-    validator = jsonschema.Draft7Validator(submission_schema)
-
-    # Try validating as an object; if schema is array-based, validate [instance].
-    errors = sorted(validator.iter_errors(instance), key=lambda e: e.path)
-    if errors:
-        errors2 = sorted(validator.iter_errors([instance]), key=lambda e: e.path)
-        if errors2:
-            details = "\n".join(f"- {e.message}" for e in errors2[:8])
+    # Validate as an object or, if schema is array-based, as [instance]
+    try:
+        jsonschema.validate(instance=instance, schema=submission_schema)
+    except jsonschema.ValidationError:
+        try:
+            jsonschema.validate(instance=[instance], schema=submission_schema)
+        except jsonschema.ValidationError as e:
             pytest.xfail(
                 "Submission instance did not validate. "
                 "Adjust schema or enable an alternate wrapper in this test.\n"
-                f"{details}"
+                f"- {e.message}"
             )
 
 
@@ -261,7 +300,6 @@ def test_events_schema_has_reasonable_top_keys(events_schema: Dict) -> None:
     Don't assert structure; just require plausible logging-related keys somewhere.
     """
     keys = _flatten_keys(events_schema)
-    # Common logging-ish keys we expect to exist somewhere in an events schema.
     expected_any = {"timestamp", "level", "message"}
     assert keys & expected_any, f"None of {expected_any} found among schema keys"
 
