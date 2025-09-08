@@ -1,56 +1,74 @@
 # configs/training/scheduler.yaml
+# ======================================================================
 # SpectraMind V50 — Learning-Rate Scheduler (Hydra sub-config)
-# Select a scheduler via `name`, and tweak its block below.
-# The trainer/optimizer sections in higher-level configs can reference these values.
+# ======================================================================
+# Select a scheduler via `name` and tune its section below. This file is
+# read by the training stage to build the torch/PL scheduler and (optionally)
+# a warmup schedule that precedes it.
+# ======================================================================
 
 # -------------------------
-# Which scheduler to use
+# Selection
 # -------------------------
-name: cosine_annealing         # one of: cosine_annealing | one_cycle | reduce_on_plateau | constant
+# one of: cosine_annealing | cosine_warm_restarts | one_cycle
+#         | reduce_on_plateau | step | exponential | polynomial | constant
+name: cosine_annealing
 
 # -------------------------
-# Global PL integration knobs
+# PyTorch Lightning integration
 # -------------------------
 pl:
-  interval: epoch              # "step" or "epoch" — PL scheduler stepping granularity
+  interval: epoch              # "step" | "epoch"
   frequency: 1                 # apply every N intervals
-  monitor: val/loss            # metric to watch (used by reduce_on_plateau)
-  strict: true                 # PL: raise if monitor is missing when required
+  monitor: val/loss            # metric to watch (for plateau/one_cycle with monitors)
+  strict: true                 # raise if monitor is missing when required
 
 # -------------------------
-# Optional warmup (applied before the main scheduler)
+# Warmup (executed BEFORE the main scheduler)
 # -------------------------
 warmup:
   enabled: true
   strategy: linear             # "linear" | "cosine"
-  steps: 500                   # number of warmup steps (preferred on Kaggle to stabilize mixed precision)
-  min_lr: 1.0e-7               # start LR
-  max_lr: ${optimizer.lr}      # target LR at end of warmup
+  steps: 500                   # prefer steps on Kaggle; stable with AMP
+  min_lr: 1.0e-7               # starting LR
+  max_lr: ${optimizer.lr}      # LR at end of warmup
+  # If you prefer epoch-based warmups, set steps: null and use:
+  epochs: null                 # e.g., 3
 
 # -------------------------
-# Cosine Annealing (default)
+# Cosine Annealing (no restarts)
 # -------------------------
 cosine_annealing:
-  T_max: ${trainer.max_epochs} # period in epochs; if using pl.interval=step, provide total update steps instead
+  # If pl.interval == "epoch", T_max = ${trainer.max_epochs}
+  # If pl.interval == "step", set T_max = total_update_steps (trainer-estimated)
+  T_max: ${trainer.max_epochs}
   eta_min: 1.0e-6
   last_epoch: -1
 
 # -------------------------
-# One-Cycle policy (good for faster convergence)
+# Cosine Annealing with Warm Restarts
+# -------------------------
+cosine_warm_restarts:
+  T_0: 10                      # first cycle length (epochs or steps)
+  T_mult: 2                    # cycle length multiplier
+  eta_min: 1.0e-6
+
+# -------------------------
+# One-Cycle policy (fast convergence)
 # -------------------------
 one_cycle:
-  max_lr: ${optimizer.lr}      # peak LR
-  pct_start: 0.3               # fraction of cycle spent increasing LR
+  max_lr: ${optimizer.lr}      # peak LR (can be list for param groups)
+  pct_start: 0.3               # warmup fraction of cycle
   div_factor: 25.0             # initial_lr = max_lr / div_factor
   final_div_factor: 10000.0    # min_lr = initial_lr / final_div_factor
-  total_steps: null            # set if known; else PL will infer from epochs * steps_per_epoch
+  total_steps: null            # set if known; else PL infers from epochs * steps_per_epoch
   epochs: ${trainer.max_epochs}
   steps_per_epoch: null
   three_phase: false
-  anneal_strategy: cos         # "cos" or "linear"
+  anneal_strategy: cos         # "cos" | "linear"
 
 # -------------------------
-# Reduce-on-Plateau (robust when validation is noisy)
+# Reduce-on-Plateau (robust on noisy validation)
 # -------------------------
 reduce_on_plateau:
   mode: min
@@ -61,10 +79,61 @@ reduce_on_plateau:
   cooldown: 0
   min_lr: 1.0e-6
   eps: 1.0e-8
-  monitor: ${pl.monitor}       # keep in sync with pl.monitor
+  monitor: ${pl.monitor}       # keep in sync
 
 # -------------------------
-# Constant LR (for ablations / debugging)
+# Step Decay
+# -------------------------
+step:
+  step_size: 10                # epochs/steps between decays
+  gamma: 0.5                   # LR *= gamma
+
+# -------------------------
+# Exponential Decay
+# -------------------------
+exponential:
+  gamma: 0.98                  # applied per interval
+
+# -------------------------
+# Polynomial Decay (poly schedule)
+# -------------------------
+polynomial:
+  total_iters: ${trainer.max_epochs}   # or total update steps if step-based
+  power: 1.0                           # 1.0 = linear decay
+  end_lr: 1.0e-6                       # final LR at the end
+  cycle: false
+
+# -------------------------
+# Constant LR (ablations/debug)
 # -------------------------
 constant:
   lr: ${optimizer.lr}
+
+# -------------------------
+# Safety / floor
+# -------------------------
+limits:
+  lr_min: 1.0e-7               # clamp floor for any schedule (numeric safety)
+  lr_max: ${optimizer.lr}      # clamp ceiling to avoid overshoot with warmup
+
+# -------------------------
+# Fine-tune helpers (optional staged decay)
+# -------------------------
+stages:
+  enabled: false
+  # Example: after N epochs, switch scheduler or tighten LR
+  plan:
+    - at_epoch: 0
+      override:
+        name: cosine_annealing
+        cosine_annealing:
+          T_max: ${trainer.max_epochs}
+          eta_min: 1.0e-6
+    - at_epoch: 20
+      override:
+        name: reduce_on_plateau
+        reduce_on_plateau:
+          factor: 0.5
+          patience: 2
+          min_lr: 1.0e-6
+          monitor: ${pl.monitor}
