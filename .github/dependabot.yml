@@ -1,1 +1,60 @@
+# .github/dependabot.yml
+# SpectraMind V50 — Dependabot configuration
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # ────────────────────────────────
+  # Python (pip/Poetry/requirements)
+  # ────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/"                     # root (pyproject.toml, setup.cfg, requirements-*.txt)
+    schedule:
+      interval: "weekly"               # check once a week
+      day: "sunday"
+      time: "03:00"
+    commit-message:
+      prefix: "deps(python)"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - python
+    groups:
+      dev-deps:
+        patterns:
+          - "pytest*"
+          - "mypy*"
+          - "flake8*"
+          - "ruff*"
+
+  # ────────────────────────────────
+  # GitHub Actions
+  # ────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+    commit-message:
+      prefix: "deps(actions)"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+
+  # ────────────────────────────────
+  # Dockerfile base images
+  # ────────────────────────────────
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "04:00"
+    commit-message:
+      prefix: "deps(docker)"
+    labels:
+      - dependencies
+      - docker
 
