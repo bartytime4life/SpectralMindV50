@@ -1,0 +1,39 @@
+{
+  "$id": "https://spectramind-v50.org/schemas/metrics.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Experiment Metrics Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "stage", "metrics", "timings"],
+  "properties": {
+    "run_id": { "type": "string" },
+    "stage": {
+      "type": "string",
+      "enum": ["train", "predict", "diagnose", "submit"]
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Key numeric metrics; include GLL if available.",
+      "additionalProperties": { "type": "number" },
+      "properties": {
+        "gll": { "type": "number" },
+        "loss": { "type": "number" },
+        "val_loss": { "type": "number" }
+      }
+    },
+    "timings": {
+      "type": "object",
+      "required": ["wall_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "wall_ms": { "type": "integer", "minimum": 0 },
+        "cpu_ms": { "type": "integer", "minimum": 0 },
+        "gpu_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
