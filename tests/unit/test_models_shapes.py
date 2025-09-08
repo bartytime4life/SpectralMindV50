@@ -18,7 +18,8 @@ except Exception:  # pragma: no cover
 # ----------------------------------------------------------------------------- #
 # Constants
 # ----------------------------------------------------------------------------- #
-N_BINS = 283  # Ariel challenge canonical spectral bin count
+# Fallback spectral bin count for Ariel challenge if the model doesn't expose `n_bins`
+FALLBACK_N_BINS = 283
 
 
 # ----------------------------------------------------------------------------- #
@@ -77,7 +78,8 @@ def _synthetic_inputs(
         device = torch.device("cpu")
     T = 32  # keep short to run fast
     H = W = 16
-    C_spectral = N_BINS
+    # NOTE: we pick C_spectral large enough, but the model should reshape internally to its own n_bins
+    C_spectral = max(FALLBACK_N_BINS, 64)
 
     # 1) Minimalistic time-series + per-timestep spectrum
     f1 = torch.randn(batch, T, device=device)
@@ -168,7 +170,9 @@ def _squeeze_temporal(mu: Tensor, sigma: Optional[Tensor]) -> Tuple[Tensor, Opti
     This keeps shape checks tolerant to models that emit per-timestep spectra.
     """
     def _reduce(x: Tensor) -> Tensor:
-        if x.dim() >= 3 and x.size(-1) == N_BINS:
+        if x is None:
+            return x
+        if x.dim() >= 3 and x.size(-1) >= 1:
             # If (B, T, C): mean over T; if (B, 1, C): squeeze
             if x.size(-2) == 1:
                 return x.squeeze(-2)
@@ -183,6 +187,18 @@ def _squeeze_temporal(mu: Tensor, sigma: Optional[Tensor]) -> Tuple[Tensor, Opti
 # ----------------------------------------------------------------------------- #
 # Test helpers
 # ----------------------------------------------------------------------------- #
+def _discover_bins(model: nn.Module) -> int:
+    """
+    Determine the expected spectral bin count.
+    Prefer model.n_bins if present; else fallback constant.
+    """
+    try:
+        n_bins = int(getattr(model, "n_bins", FALLBACK_N_BINS))
+    except Exception:
+        n_bins = FALLBACK_N_BINS
+    return n_bins
+
+
 def _instantiate_model(ctor: Any) -> nn.Module:
     """
     Instantiate given a function or class.
@@ -193,7 +209,7 @@ def _instantiate_model(ctor: Any) -> nn.Module:
         obj = ctor()
     except TypeError:
         try:
-            obj = ctor(n_bins=N_BINS)
+            obj = ctor(n_bins=FALLBACK_N_BINS)
         except Exception as e:
             pytest.skip(f"Could not instantiate model with no args or n_bins: {e!r}")
     if not isinstance(obj, nn.Module):
@@ -235,7 +251,9 @@ def _forward_any(model: nn.Module, batch: Dict[str, Tensor]) -> Tuple[Tensor, Op
     raise AssertionError("Model forward failed with all tested signatures and key aliases")
 
 
-def _assert_mu_sigma_shapes(mu: Tensor, sigma: Optional[Tensor], B: int) -> Tuple[Tensor, Optional[Tensor]]:
+def _assert_mu_sigma_shapes(
+    mu: Tensor, sigma: Optional[Tensor], expected_bins: int, B: int
+) -> Tuple[Tensor, Optional[Tensor]]:
     assert isinstance(mu, torch.Tensor), "mu must be a Tensor"
 
     # Allow either (B, C) or (B, T, C) — reduce temporal to (B, C) for shape checks.
@@ -243,17 +261,18 @@ def _assert_mu_sigma_shapes(mu: Tensor, sigma: Optional[Tensor], B: int) -> Tupl
 
     assert mu.dim() >= 2, f"mu must include batch and bins dims; got shape={tuple(mu.shape)}"
     assert mu.size(0) == B, f"mu batch size mismatch: expected {B}, got {mu.size(0)}"
-    assert mu.size(-1) == N_BINS, f"mu last dim must be {N_BINS}, got {mu.size(-1)}"
+    assert mu.size(-1) == expected_bins, f"mu last dim must be {expected_bins}, got {mu.size(-1)}"
     assert torch.isfinite(mu).all(), "mu must be finite"
 
     if sigma is not None:
         assert isinstance(sigma, torch.Tensor), "sigma must be a Tensor"
         sigma = _squeeze_temporal(sigma, None)[0]
         assert sigma.size(0) == B, f"sigma batch size mismatch: expected {B}, got {sigma.size(0)}"
-        assert sigma.size(-1) == N_BINS, f"sigma last dim must be {N_BINS}, got {sigma.size(-1)}"
+        assert sigma.size(-1) == expected_bins, f"sigma last dim must be {expected_bins}, got {sigma.size(-1)}"
         assert torch.isfinite(sigma).all(), "sigma must be finite"
-        # Soft guard: allow non-positive values (log-σ may be elsewhere),
-        # but fail if wildly non-finite — already checked above.
+        # If both present, check device/dtype consistency with mu:
+        assert sigma.device == mu.device, "mu/sigma must be on the same device"
+        assert sigma.dtype == mu.dtype, "mu/sigma must share dtype"
 
     return mu, sigma
 
@@ -262,10 +281,6 @@ def _device_candidates() -> Iterable[torch.device]:
     yield torch.device("cpu")
     if torch.cuda.is_available():
         yield torch.device("cuda:0")
-
-
-def _amp_enabled(device: torch.device) -> bool:
-    return device.type == "cuda" and torch.cuda.is_available()
 
 
 # ----------------------------------------------------------------------------- #
@@ -285,12 +300,16 @@ def test_model_shapes_for_various_inputs_cpu_and_optional_cuda() -> None:
         model = model.to(device).eval()
         worked = False
         chosen_batch: Optional[Dict[str, Tensor]] = None
+        expected_bins = _discover_bins(model)
 
         # Try a few plausible input layouts; pass as soon as one works per device
         for batch, _desc in _synthetic_inputs(batch=2, device=device):
             try:
                 mu, sigma = _forward_any(model, batch)
-                mu, sigma = _assert_mu_sigma_shapes(mu, sigma, B=2)
+                mu, sigma = _assert_mu_sigma_shapes(mu, sigma, expected_bins, B=2)
+                # consistency: dtype/device same across outputs if both exist
+                if sigma is not None:
+                    assert mu.device == sigma.device and mu.dtype == sigma.dtype
                 worked = True
                 chosen_batch = batch
                 break
@@ -307,7 +326,7 @@ def test_model_shapes_for_various_inputs_cpu_and_optional_cuda() -> None:
                 for k, v in chosen_batch.items()
             }
             mu_b, sigma_b = _forward_any(model, one_batch)
-            _assert_mu_sigma_shapes(mu_b, sigma_b, B=B)
+            _assert_mu_sigma_shapes(mu_b, sigma_b, expected_bins, B=B)
 
 
 def test_model_accepts_dict_or_kwargs_and_key_aliases() -> None:
@@ -319,6 +338,7 @@ def test_model_accepts_dict_or_kwargs_and_key_aliases() -> None:
     if ctor is None:
         pytest.skip("No model constructor found")
     model = _instantiate_model(ctor).to("cpu")
+    expected_bins = _discover_bins(model)
 
     for batch, _ in _synthetic_inputs(batch=2, device=torch.device("cpu")):
         ok = False
@@ -326,13 +346,17 @@ def test_model_accepts_dict_or_kwargs_and_key_aliases() -> None:
             # kwargs and dict positional across alias expansions
             for candidate in _expand_key_aliases(batch):
                 try:
-                    _ = model(**candidate)
+                    out = model(**candidate)
+                    mu, sigma = _unpack_outputs(out)
+                    _assert_mu_sigma_shapes(mu, sigma, expected_bins, B=2)
                     ok = True
                     break
                 except Exception:
                     pass
                 try:
-                    _ = model(candidate)
+                    out = model(candidate)
+                    mu, sigma = _unpack_outputs(out)
+                    _assert_mu_sigma_shapes(mu, sigma, expected_bins, B=2)
                     ok = True
                     break
                 except Exception:
@@ -351,11 +375,12 @@ def test_output_container_types_and_finiteness() -> None:
     if ctor is None:
         pytest.skip("No model constructor found")
     model = _instantiate_model(ctor).to("cpu")
+    expected_bins = _discover_bins(model)
 
     for batch, _ in _synthetic_inputs(batch=2, device=torch.device("cpu")):
         try:
             mu, sigma = _forward_any(model, batch)
-            _assert_mu_sigma_shapes(mu, sigma, B=2)
+            _assert_mu_sigma_shapes(mu, sigma, expected_bins, B=2)
             return
         except AssertionError:
             continue
@@ -371,6 +396,7 @@ def test_forward_no_grad_and_inference_mode_determinism() -> None:
     if ctor is None:
         pytest.skip("No model constructor found")
     model = _instantiate_model(ctor).to("cpu")
+    expected_bins = _discover_bins(model)
 
     batch, _ = next(iter(_synthetic_inputs(batch=2, device=torch.device("cpu"))))
 
@@ -387,7 +413,7 @@ def test_forward_no_grad_and_inference_mode_determinism() -> None:
     # inference_mode can be stricter than no_grad; ensure it still works
     with torch.inference_mode():
         mu3, sigma3 = _forward_any(model, batch)
-        _assert_mu_sigma_shapes(mu3, sigma3, B=2)
+        _assert_mu_sigma_shapes(mu3, sigma3, expected_bins, B=2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -401,9 +427,35 @@ def test_cuda_amp_quick_smoke() -> None:
         pytest.skip("No model constructor found")
     device = torch.device("cuda:0")
     model = _instantiate_model(ctor).to(device)
+    expected_bins = _discover_bins(model)
 
     batch, _ = next(iter(_synthetic_inputs(batch=2, device=device)))
     # autocast FP16
     with torch.cuda.amp.autocast():
         mu, sigma = _forward_any(model, batch)
-    _assert_mu_sigma_shapes(mu, sigma, B=2)
+    _assert_mu_sigma_shapes(mu, sigma, expected_bins, B=2)
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "autocast") or not hasattr(torch, "bfloat16"),
+    reason="CPU autocast/bfloat16 not available in this torch build",
+)
+def test_cpu_bfloat16_autocast_quick_smoke() -> None:
+    """
+    Optional quick bfloat16 autocast smoke test on CPU (if supported by PyTorch build).
+    """
+    ctor = _find_model_ctor()
+    if ctor is None:
+        pytest.skip("No model constructor found")
+    device = torch.device("cpu")
+    model = _instantiate_model(ctor).to(device)
+    expected_bins = _discover_bins(model)
+
+    batch, _ = next(iter(_synthetic_inputs(batch=2, device=device)))
+    try:
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            mu, sigma = _forward_any(model, batch)
+        _assert_mu_sigma_shapes(mu, sigma, expected_bins, B=2)
+    except (RuntimeError, TypeError):
+        # Some ops/kernels may not yet support bf16 autocast on CPU; skip gracefully
+        pytest.skip("CPU bf16 autocast not supported by kernels in this model.")
