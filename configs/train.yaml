@@ -1,21 +1,25 @@
 # configs/train.yaml
-# SpectraMind V50 — Training Config
-# Top-level composed Hydra configuration for model training
+# ──────────────────────────────────────────────────────────────────────────────
+# SpectraMind V50 — Training Config (Hydra 1.x / PL 2.x)
+# Top-level composed configuration for model training.
+#
+# Usage (examples):
+#   python -m spectramind train
+#   python -m spectramind train env=kaggle precision=bf16-mixed trainer.max_epochs=30
+#   python -m spectramind train loss=composite loss.composite.weights.nonneg=0.7
+#   python -m spectramind train training/callbacks@training.callbacks=callbacks_fast
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Composition: swap any group at CLI, e.g.
-#   python -m spectramind train env=kaggle data=kaggle loss=composite \
-#     training/callbacks@training.callbacks=callbacks
-# ──────────────────────────────────────────────────────────────────────────────
+# Composition: swap any group at CLI
 defaults:
-  - env: local              # or kaggle / debug
-  - data: nominal           # dataset profile (nominal/kaggle/splits)
-  - calib: nominal          # calibration pipeline settings
-  - model: v50              # model architecture (dual encoders + decoder)
-  - training: lightning     # base PL Trainer params
-  - training/callbacks@training.callbacks: callbacks  # <-- bundle of callbacks
-  - loss: composite         # physics-informed composite loss
-  - logger: jsonl           # logging backend (jsonl/csv/wandb)
+  - env: local                        # or: kaggle / debug
+  - data: nominal                     # dataset profile (nominal/kaggle/splits)
+  - calib: nominal                    # calibration pipeline settings
+  - model: v50                        # model architecture (dual encoders + decoder)
+  - training: lightning               # base PL Trainer params
+  - training/callbacks@training.callbacks: callbacks   # bundle of callbacks
+  - loss: composite                   # physics-informed composite loss
+  - logger: jsonl                     # logging backend (jsonl/csv/wandb)
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
 
@@ -23,70 +27,126 @@ defaults:
 experiment:
   name: "spectramind_v50_train"
   tags: ["v50", "train", "fgs1", "airs"]
+  notes: ""                           # free-form; can be overridden from CLI
 
-# Paths (all run-scoped under hydra.run.dir)
+# Canonical paths (all run-scoped under hydra.run.dir)
 paths:
   project_root: ${hydra:runtime.cwd}
   artifacts_root: ${paths.project_root}/artifacts
   runs: ${paths.artifacts_root}/runs
-  # hydra.run.dir expands below; all per-run outputs live there:
   logs: ${hydra:run.dir}/logs
   checkpoints: ${hydra:run.dir}/checkpoints
   reports: ${hydra:run.dir}/reports
+  # (Optional) cache, manifests, etc.
+  cache: ${paths.artifacts_root}/cache
+  manifests: ${paths.artifacts_root}/manifests
 
-# Reproducibility knobs
+# Reproducibility & backend knobs
 seed: 42
 reproducibility:
-  torch_deterministic_algorithms: true
-  cudnn_benchmark: false
-  allow_tf32: false   # set true if you validate numerical impact and want speed
+  torch_deterministic_algorithms: true   # torch.use_deterministic_algorithms
+  cudnn_benchmark: false                  # prefer determinism over throughput
+  cudnn_deterministic: true               # for older cudnn branches
+  allow_tf32: false                       # set true after validating numerics
+  numpy_print_threshold: 1000             # stable logs
+  python_hash_seed: ${seed}               # PYTHONHASHSEED alignment
 
-# Precision (override in env configs if needed, e.g. bf16 on A100)
-precision: "16-mixed"  # or "32-true" for CPU-only determinism
+# Precision (override in env configs if needed, e.g., bf16 on A100)
+precision: "16-mixed"   # options: "32-true" | "16-mixed" | "bf16-mixed"
 
-# PyTorch Lightning Trainer settings (PL 2.x+ API)
+# Optional PyTorch 2.x compiler (safe default: disabled)
+compile:
+  enabled: false
+  mode: "default"        # "default" | "reduce-overhead" | "max-autotune"
+  fullgraph: false
+  dynamic: false
+
+# Data pipeline (override in data group; these are cross-cutting defaults)
+data:
+  batch_size:
+    train: 64
+    val: 64
+    test: 64
+  num_workers: ${env.num_workers}         # from env group (e.g., Kaggle=2)
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: true
+  # Optional dataset-level switches exposed for quick sweeps
+  augment:
+    enabled: true
+    jitter: 0.01
+    dropout: 0.0
+  normalization:
+    enabled: true
+    method: "zscore"       # or "minmax", "none"
+
+# PyTorch Lightning Trainer (PL 2.x)
 trainer:
   max_epochs: 50
-  accelerator: auto         # auto: cpu/cuda/mps
-  devices: 1                # or "auto", or a list for multi-GPU
-  strategy: auto            # ddp/auto; override if multi-GPU
+  min_epochs: 1
+  accelerator: auto               # auto: cpu/cuda/mps
+  devices: 1                      # "auto" or list for multi-GPU
+  strategy: auto                  # "auto" | "ddp" | "ddp_find_unused_parameters_false" etc.
   precision: ${precision}
   accumulate_grad_batches: 2
   gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
   log_every_n_steps: 50
-  val_check_interval: 0.25  # validate 4× per epoch; keep <=1.0
+  val_check_interval: 0.25        # validate 4× per epoch; keep <= 1.0
+  check_val_every_n_epoch: null
   deterministic: true
   enable_checkpointing: true
   enable_model_summary: true
   detect_anomaly: false
   benchmark: false
-  callbacks: ${training.callbacks.callbacks}  # from callbacks bundle
+  inference_mode: true
+  # Profiler: "simple" | "advanced" | "pytorch" | "xla" | null
+  profiler: null
+  # Callbacks are supplied by the callbacks bundle below:
+  callbacks: ${training.callbacks.callbacks}
 
-# Optimizer / Scheduler
+# AMP / GradScaler controls (used by training loop if wired)
+amp:
+  enabled: true
+  # When precision is "*-mixed", PL handles GradScaler internally. Keep here if
+  # you also support a manual scaler in custom loops.
+  init_scale: 65536
+  growth_interval: 2000
+
+# Optimizer / Scheduler (instantiated in code; names kept for clarity & logging)
 optimizer:
+  name: "AdamW"
   _target_: torch.optim.AdamW
   lr: 3e-4
   weight_decay: 1e-2
   betas: [0.9, 0.999]
+  eps: 1e-8
 
 scheduler:
+  name: "CosineAnnealingLR"
   _target_: torch.optim.lr_scheduler.CosineAnnealingLR
   T_max: ${trainer.max_epochs}
   eta_min: 1e-6
 
-# Loggers — choose one via defaults (jsonl|csv|wandb)
+# Loggers (select via defaults: jsonl | csv | wandb)
 logger:
   jsonl:
     log_dir: ${paths.logs}/jsonl
     append: true
+    flush_every: 1
   csv:
     save_dir: ${paths.logs}/csv
+    filename: "metrics.csv"
   wandb:
     project: "spectramind-v50"
     entity: null
-    mode: disabled   # enable when WANDB_API_KEY is available
+    mode: disabled           # enable when WANDB_API_KEY is available
+    tags: ${experiment.tags}
+    notes: ${experiment.notes}
+    save_code: true
 
-# Composite loss weights (physics-informed)
+# Composite physics-informed loss (weights feed src/spectramind/losses/composite.py)
 loss:
   composite:
     weights:
@@ -95,11 +155,51 @@ loss:
       nonneg: 0.5
       band_coherence: 0.3
       calibration: 0.5
+    # Optional per-term hyperparams (kept flat for clarity; override as needed)
+    params:
+      smoothness:
+        order: 2
+        lambda_max: 0.2
+      nonneg:
+        margin: 0.0
+        penalty: "l2"        # or "hinge"
+      band_coherence:
+        window: 5
+        lambda_max: 0.3
+      calibration:
+        align_bins: true
+        lambda_max: 0.5
 
-# Hydra runtime options — each run gets its own timestamped directory
+# Checkpointing / Early Stopping are defined inside the callbacks bundle
+# (this keeps Trainer clean and lets you swap policies via defaults).
+training:
+  callbacks:
+    # the referenced group injects the concrete callbacks list here
+    callbacks: []
+
+# Evaluation / reporting passes (used by diagnostics & post-epoch hooks)
+evaluation:
+  enable_test_after_fit: true
+  save_report: true
+  report_dir: ${paths.reports}
+  figures:
+    histograms: true
+    scatter_mu_sigma: true
+    per_bin_stats: true
+
+# Runtime environment reflection (fed by env group; safely re-exposed here for code)
+env_reflection:
+  device: ${env.device}
+  num_workers: ${env.num_workers}
+  seed: ${seed}
+
+# Hydra runtime (each run gets its own timestamped directory)
 hydra:
   run:
     dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
     dir: ${paths.artifacts_root}/sweeps
     subdir: ${hydra.job.num}
+  # Pass some key fields to the job name for nicer run directories (optional)
+  job:
+    name: ${experiment.name}
