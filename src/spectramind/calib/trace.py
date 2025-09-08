@@ -2,27 +2,36 @@
 # =============================================================================
 # SpectraMind V50 — Spectral trace detection, modeling & optimal extraction
 # -----------------------------------------------------------------------------
-# Features:
-#  - Backend-agnostic (NumPy or Torch).
-#  - Detect spectral trace center vs dispersion (columns) per order.
-#  - Fit robust polynomial (center and width vs column).
-#  - Optional cosmic-ray rejection (MAD-based z-scores).
-#  - Background modeling (per-column median or polynomial across cross-dispersion).
-#  - Horne-style optimal extraction and simple box extraction.
-#  - Variance propagation and mask handling (saturated/hot/bad).
-#  - Multi-order support.
-#  - Flexible axes: [..., T, Y, X] with configurable time & dispersion axis.
+# Key upgrades (this revision)
+#   • Robust axis normalization to [..., T, Y, X] (works with any prefixes).
+#   • Multi-order models: center/width may be [X] or [O, X]; extraction returns
+#     [..., T, X] for single-order or [..., T, O, X] for multi-order.
+#   • Full NaN-safe math, including nansum helpers for Torch/NumPy.
+#   • Background models: per-column median or per-column row-polynomial (deg k).
+#   • Horne-style optimal extraction w/ variance propagation; stable denominators.
+#   • CPU fallback only when absolutely necessary (e.g., polyfit on Torch).
+#   • Self-tests kept light & CPU-safe; no I/O; Kaggle/CI friendly.
 # =============================================================================
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union, Literal, List
+from typing import Any, Dict, Optional, Tuple, Union, Literal
 
 BackendArray = Union["np.ndarray", "torch.Tensor"]  # noqa: F821
 
+__all__ = [
+    "TraceDetectParams",
+    "TraceExtractParams",
+    "TraceModel",
+    "TraceBuildResult",
+    "TraceExtractResult",
+    "build_trace_model",
+    "extract_trace",
+]
+
 # -----------------------------------------------------------------------------
-# Backend shims (consistent with other calib modules)
+# Backend shims (aligned with other calib modules)
 # -----------------------------------------------------------------------------
 
 def _is_torch(x: BackendArray) -> bool:
@@ -39,44 +48,66 @@ def _torch() -> Any:
 def _to_float(x: BackendArray, dtype: Optional[Union[str, Any]] = None) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        return x.to(getattr(torch, dtype or "float32"))
+        tdtype = getattr(torch, dtype) if isinstance(dtype, str) else (dtype or torch.float32)
+        return x.to(tdtype)
     else:
         np = _np()
-        return x.astype(getattr(np, dtype) if isinstance(dtype, str) else (dtype or np.float32), copy=False)
+        ndtype = getattr(np, dtype) if isinstance(dtype, str) else (dtype or np.float32)
+        return x.astype(ndtype, copy=False)
 
 def _zeros_like(x: BackendArray) -> BackendArray:
-    if _is_torch(x): return _torch().zeros_like(x)
-    return _np().zeros_like(x)
+    return _torch().zeros_like(x) if _is_torch(x) else _np().zeros_like(x)
 
 def _ones_like(x: BackendArray) -> BackendArray:
-    if _is_torch(x): return _torch().ones_like(x)
-    return _np().ones_like(x)
+    return _torch().ones_like(x) if _is_torch(x) else _np().ones_like(x)
 
 def _where(mask: BackendArray, a: BackendArray, b: BackendArray) -> BackendArray:
-    if _is_torch(mask): return _torch().where(mask, a, b)
-    return _np().where(mask, a, b)
+    return _torch().where(mask, a, b) if _is_torch(mask) else _np().where(mask, a, b)
 
 def _abs(x: BackendArray) -> BackendArray:
     return x.abs() if _is_torch(x) else _np().abs(x)
+
+def _nan_to_num(x: BackendArray, val=0.0) -> BackendArray:
+    if _is_torch(x):
+        torch = _torch()
+        # torch.nan_to_num exists on modern Torch
+        return torch.nan_to_num(x, nan=val) if hasattr(torch, "nan_to_num") else torch.where(torch.isnan(x), torch.tensor(val, dtype=x.dtype, device=x.device), x)
+    else:
+        return _np().nan_to_num(x, nan=val)
+
+def _nansum(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
+    if _is_torch(x):
+        torch = _torch()
+        if hasattr(torch, "nansum"):
+            return torch.nansum(x, dim=axis, keepdim=keepdims) if axis is not None else torch.nansum(x)
+        return _nan_to_num(x, 0.0).sum(dim=axis, keepdim=keepdims) if axis is not None else _nan_to_num(x, 0.0).sum()
+    else:
+        return _np().nansum(x, axis=axis, keepdims=keepdims)
 
 def _nanmean(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
         m = ~torch.isnan(x)
-        num = torch.where(m, x, torch.tensor(0., dtype=x.dtype, device=x.device)).sum(dim=axis, keepdim=keepdims)
-        den = m.sum(dim=axis, keepdim=keepdims).clamp_min(1)
+        num = torch.where(m, x, torch.tensor(0., dtype=x.dtype, device=x.device)).sum(dim=axis, keepdim=keepdims) if axis is not None else torch.where(m, x, torch.tensor(0., dtype=x.dtype, device=x.device)).sum()
+        den = m.sum(dim=axis, keepdim=keepdims) if axis is not None else m.sum()
+        den = den.clamp_min(1)
         out = num / den
-        all_nan = den == 0
-        return torch.where(all_nan, torch.tensor(float('nan'), dtype=x.dtype, device=x.device), out)
+        if axis is None:
+            return torch.where((m.sum() == 0), torch.tensor(float("nan"), dtype=x.dtype, device=x.device), out)
+        return out
     else:
         return _np().nanmean(x, axis=axis, keepdims=keepdims)
 
 def _nanmedian(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
     if _is_torch(x):
-        torch = _torch(); np = _np()
-        arr = x.detach().cpu().numpy()
-        med = np.nanmedian(arr, axis=axis, keepdims=keepdims)
-        return torch.from_numpy(med).to(device=x.device, dtype=x.dtype)
+        torch = _torch()
+        if hasattr(torch, "nanmedian"):
+            return torch.nanmedian(x, dim=axis, keepdim=keepdims).values if axis is not None else torch.nanmedian(x)
+        # CPU fallback
+        np = _np()
+        xn = x.detach().cpu().numpy()
+        out = np.nanmedian(xn, axis=axis, keepdims=keepdims)
+        return torch.from_numpy(out).to(device=x.device, dtype=x.dtype)
     else:
         return _np().nanmedian(x, axis=axis, keepdims=keepdims)
 
@@ -90,7 +121,8 @@ def _nanstd(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
         return _np().nanstd(x, axis=axis, keepdims=keepdims)
 
 def _clip(x: BackendArray, low: Optional[float], high: Optional[float]) -> BackendArray:
-    if low is None and high is None: return x
+    if low is None and high is None:
+        return x
     if _is_torch(x):
         torch = _torch()
         if low is not None: x = torch.clamp(x, min=float(low))
@@ -99,12 +131,13 @@ def _clip(x: BackendArray, low: Optional[float], high: Optional[float]) -> Backe
     else:
         return _np().clip(x, low, high)
 
-def _nan_to_num(x: BackendArray, val=0.0) -> BackendArray:
+def _nan_like(x: BackendArray) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        return torch.where(torch.isnan(x), torch.tensor(val, dtype=x.dtype, device=x.device), x)
+        return torch.full_like(x, float("nan"))
     else:
-        return _np().nan_to_num(x, nan=val)
+        import numpy as np
+        return np.full_like(x, np.nan)
 
 # -----------------------------------------------------------------------------
 # Configuration dataclasses
@@ -118,21 +151,6 @@ ExtractMethod = Literal["optimal", "box"]
 class TraceDetectParams:
     """
     Trace detection configuration (per order).
-
-    dispersion_axis   : index of dispersion axis (default -1 => [..., Y, X], X is dispersion)
-    smooth_cols       : window for column-wise smoothing of center detection (odd; 0=no smooth)
-    center_poly_deg   : degree of polynomial for center(yc) vs column (if fit_kind='poly')
-    width_poly_deg    : degree of polynomial for width(sig_y) vs column (if fit_kind='poly')
-    fit_kind          : 'poly' or 'median' (median smooth of raw centers/widths)
-    cr_reject         : enable MAD-z CR rejection on column profiles before centroiding
-    cr_zmax           : CR z-threshold
-    cr_iter           : number of robust iterations
-    y_search_half     : half-height of search window around initial median center (pixels)
-    initial_center    : optional fixed initial row center; if None, compute from stack median
-    mask_saturated    : mask array (True excludes)
-    mask_hot          : mask array (True excludes)
-    dtype             : float dtype
-    return_intermediate: stash debug info
     """
     dispersion_axis: int = -1
     smooth_cols: int = 5
@@ -152,17 +170,7 @@ class TraceDetectParams:
 @dataclass
 class TraceExtractParams:
     """
-    Extraction configuration (per order).
-
-    method            : 'optimal' or 'box'
-    ap_half           : half-height of box aperture (pixels) if method='box'
-    bkg_kind          : 'none' | 'column_median' | 'row_poly'
-    bkg_poly_deg      : degree for row_poly background vs row in each column
-    psf_sigma_y       : PSF sigma in cross-dispersion (pixels) if no variance/PSF template provided
-    var               : variance cube [..., T, Y, X], used for optimal extraction and error propagation
-    clip_out          : optional (low, high) clipping for extracted flux
-    dtype             : output float dtype
-    return_intermediate: stash debug info
+    Extraction configuration (per order or multi-order).
     """
     method: ExtractMethod = "optimal"
     ap_half: int = 4
@@ -177,11 +185,10 @@ class TraceExtractParams:
 @dataclass
 class TraceModel:
     """
-    Trace model per order:
-      - center(x): row center vs column [X]
-      - width(x):  sigma_y vs column [X]
-      - poly coeffs for center/width if fit_kind='poly'
-      - metadata
+    Trace model:
+      center: [X] or [O, X]      (row center vs column)
+      width : [X] or [O, X]      (sigma_y vs column)
+      *_poly: polynomial coeffs if fit_kind='poly' (descending degree)
     """
     center: BackendArray
     width: BackendArray
@@ -195,9 +202,9 @@ class TraceBuildResult:
 
 @dataclass
 class TraceExtractResult:
-    flux: BackendArray          # [..., T, X]
+    flux: BackendArray           # [..., T, X] or [..., T, O, X]
     flux_err: Optional[BackendArray]
-    bkg: Optional[BackendArray] # background per frame/column or scalar summary
+    bkg: Optional[BackendArray]  # [..., T, X] (column background) or None
     meta: Dict[str, Any] = field(default_factory=dict)
 
 # -----------------------------------------------------------------------------
@@ -206,38 +213,38 @@ class TraceExtractResult:
 
 def _normalize_axes(frames: BackendArray, time_axis: int, disp_axis: int) -> Tuple[BackendArray, int, int]:
     """
-    Reorder to canonical [..., T, Y, X] and return new axes indices (T:-3, Y:-2, X:-1).
+    Reorder to canonical [..., T, Y, X]; returns (x, T_index=-3, X_index=-1).
     """
     x = frames
     nd = x.ndim
-    # target positions:
     tgt_T, tgt_X = nd - 3, nd - 1
-    # resolve negative
+
     if time_axis < 0: time_axis = nd + time_axis
     if disp_axis < 0: disp_axis = nd + disp_axis
-    # find spatial other axis (Y)
-    all_axes = list(range(nd))
-    # move time to tgt_T
+
+    # Move time to tgt_T
     if time_axis != tgt_T:
         perm = list(range(nd))
         perm[tgt_T], perm[time_axis] = perm[time_axis], perm[tgt_T]
         x = x.permute(*perm) if _is_torch(x) else x.transpose(tgt_T, time_axis)
-        # update disp_axis if moved
-        if disp_axis == tgt_T: disp_axis = time_axis
-        elif disp_axis == time_axis: disp_axis = tgt_T
+        # adjust disp_axis if it moved
+        if disp_axis == tgt_T:
+            disp_axis = time_axis
+        elif disp_axis == time_axis:
+            disp_axis = tgt_T
         time_axis = tgt_T
-    # now time at tgt_T
-    # move dispersion to tgt_X
+
+    # Move dispersion to tgt_X
     if disp_axis != tgt_X:
         perm = list(range(nd))
         perm[tgt_X], perm[disp_axis] = perm[disp_axis], perm[tgt_X]
         x = x.permute(*perm) if _is_torch(x) else x.transpose(tgt_X, disp_axis)
         disp_axis = tgt_X
-    # done: [..., T, Y, X]
-    return x, time_axis, disp_axis
+
+    return x, -3, -1  # [..., T, Y, X]
 
 # -----------------------------------------------------------------------------
-# Core: column profile, centroid & width, robust fit
+# Detection primitives
 # -----------------------------------------------------------------------------
 
 def _sigma_clip_1d(y: BackendArray, lo: float, hi: float, iters: int) -> BackendArray:
@@ -250,28 +257,19 @@ def _sigma_clip_1d(y: BackendArray, lo: float, hi: float, iters: int) -> Backend
         out = _where((out < lo_thr) | (out > hi_thr), _nan_like(out), out)
     return out
 
-def _nan_like(x: BackendArray) -> BackendArray:
-    if _is_torch(x):
-        torch = _torch()
-        return torch.tensor(float('nan'), dtype=x.dtype, device=x.device).expand_as(x)
-    else:
-        np = _np()
-        return np.full_like(x, np.nan)
-
 def _column_stats_y(frame: BackendArray, cr_reject: bool, zmax: float, iters: int,
                     y_search_half: int, init_center: Optional[float]) -> Tuple[BackendArray, BackendArray]:
     """
-    For a single frame [Y,X], compute per-column centroid (row) and width (Gaussian sigma_y proxy).
-    Optionally restrict to a search window around init_center +- y_search_half.
+    Single 2D frame [Y, X] → per-column centroid (row) and width (sigma_y).
+    Restrict search window around init_center ± y_search_half if given.
     """
     torch_mode = _is_torch(frame)
     Y, X = frame.shape[-2], frame.shape[-1]
+
     if torch_mode:
         torch = _torch()
-        cols = torch.arange(X, dtype=frame.dtype, device=frame.device)
         rows = torch.arange(Y, dtype=frame.dtype, device=frame.device)
         yy = rows[:, None].expand(Y, X)
-        # restrict window
         if init_center is not None:
             y0 = max(0, int(init_center - y_search_half))
             y1 = min(Y, int(init_center + y_search_half) + 1)
@@ -282,17 +280,16 @@ def _column_stats_y(frame: BackendArray, cr_reject: bool, zmax: float, iters: in
             yyw = yy
         if cr_reject:
             img = _sigma_clip_1d(img, lo=zmax, hi=zmax, iters=iters)
-        # nan-safe sums
-        w = torch.where(torch.isnan(img), torch.tensor(0., dtype=img.dtype, device=img.device), img)
-        s0 = w.sum(dim=-2) + 1e-20               # [X]
-        s1 = (w * yyw).sum(dim=-2)               # [X]
-        mu = s1 / s0                              # [X]
+        w = _nan_to_num(img, 0.0)
+        s0 = w.sum(dim=-2) + 1e-20          # [X]
+        s1 = (w * yyw).sum(dim=-2)          # [X]
+        mu = s1 / s0
         var = (w * (yyw - mu[None, :]) ** 2).sum(dim=-2) / s0
-        sig = torch.sqrt(torch.clamp(var, min=1e-10))
+        sig = (var.clamp_min(1e-10)).sqrt()
         return mu, sig
     else:
-        import numpy as np
-        rows = np.arange(Y)
+        np = _np()
+        rows = np.arange(Y, dtype=frame.dtype)
         yy = np.tile(rows[:, None], (1, X))
         if init_center is not None:
             y0 = max(0, int(init_center - y_search_half))
@@ -305,49 +302,44 @@ def _column_stats_y(frame: BackendArray, cr_reject: bool, zmax: float, iters: in
         if cr_reject:
             img = _sigma_clip_1d(img, lo=zmax, hi=zmax, iters=iters)
         w = _nan_to_num(img, 0.0)
-        s0 = _np().sum(w, axis=0) + 1e-20
-        s1 = _np().sum(w * yyw, axis=0)
+        s0 = np.sum(w, axis=0) + 1e-20
+        s1 = np.sum(w * yyw, axis=0)
         mu = s1 / s0
-        var = _np().sum(w * (yyw - mu[None, :]) ** 2, axis=0) / s0
-        sig = _np().sqrt(_np().clip(var, 1e-10, None))
+        var = np.sum(w * (yyw - mu[None, :]) ** 2, axis=0) / s0
+        sig = np.sqrt(np.clip(var, 1e-10, None))
         return mu, sig
 
 def _polyfit_1d(x: BackendArray, y: BackendArray, deg: int) -> BackendArray:
-    """Return polynomial coefficients for y(x); Torch path uses numpy CPU fallback."""
+    """
+    Polynomial coefficients (descending degree). Torch → NumPy fallback for fit.
+    """
     if deg <= 0:
-        # constant best-fit
-        c = _nanmedian(y, axis=-1, keepdims=False)
-        if _is_torch(c):
-            return c[..., None]
-        else:
-            return c[..., None]
+        c = _nanmedian(y)
+        return c[..., None] if _is_torch(c) else c[..., None]
     if _is_torch(x) or _is_torch(y):
         np = _np(); torch = _torch()
         xv = x.detach().cpu().numpy() if _is_torch(x) else x
         yv = y.detach().cpu().numpy() if _is_torch(y) else y
-        # nan robust: fill with median
         yv_f = np.where(np.isnan(yv), np.nanmedian(yv), yv)
-        coef = np.polyfit(xv, yv_f, deg=deg)  # descending degree
-        return torch.from_numpy(coef).to(device=(y.device if _is_torch(y) else "cpu"), dtype=(y.dtype if _is_torch(y) else None))
+        coef = np.polyfit(xv, yv_f, deg=deg)
+        device = y.device if _is_torch(y) else (x.device if _is_torch(x) else "cpu")
+        dtype = y.dtype if _is_torch(y) else (x.dtype if _is_torch(x) else None)
+        return torch.from_numpy(coef).to(device=device, dtype=dtype)
     else:
         np = _np()
         y_f = np.where(np.isnan(y), np.nanmedian(y), y)
-        coef = np.polyfit(x, y_f, deg=deg)
-        return coef
+        return np.polyfit(x, y_f, deg=deg)
 
 def _polyval_1d(coef: BackendArray, x: BackendArray) -> BackendArray:
-    """Evaluate polynomial (descending degree)."""
     if _is_torch(coef) or _is_torch(x):
         torch = _torch()
-        c = coef
-        if not _is_torch(coef): c = torch.from_numpy(coef).to(device=x.device if _is_torch(x) else "cpu", dtype=x.dtype if _is_torch(x) else None)
+        c = coef if _is_torch(coef) else torch.from_numpy(coef).to(device=x.device if _is_torch(x) else "cpu", dtype=(x.dtype if _is_torch(x) else None))
         y = torch.zeros_like(x)
         for a in c:
             y = y * x + a
         return y
     else:
-        np = _np()
-        return np.polyval(coef, x)
+        return _np().polyval(coef, x)
 
 # -----------------------------------------------------------------------------
 # Build trace model
@@ -360,69 +352,67 @@ def build_trace_model(
     params: TraceDetectParams,
 ) -> TraceBuildResult:
     """
-    Detect and fit the spectral trace (center & width vs column) on a representative image.
-    Uses time-collapsed median (or first frame if T==1).
+    Detect and fit trace (center & width vs column) on a robust reference image.
+    Uses time-median if T>1 else the first frame.
     """
-    dtype = params.dtype
-    X = _to_float(frames, dtype=dtype)
-
-    # normalize axes to [..., T, Y, X]
-    X, t_axis, d_axis = _normalize_axes(X, time_axis, params.dispersion_axis)
+    X = _to_float(frames, dtype=params.dtype)
+    X, _, _ = _normalize_axes(X, time_axis, params.dispersion_axis)  # [..., T, Y, X]
     T = X.shape[-3]; Y = X.shape[-2]; W = X.shape[-1]
 
-    # apply masks
-    if params.mask_saturated is not None: X = _where(params.mask_saturated, _nan_like(X), X)
-    if params.mask_hot is not None: X = _where(params.mask_hot, _nan_like(X), X)
+    # Apply masks
+    if params.mask_saturated is not None:
+        X = _where(params.mask_saturated, _nan_like(X), X)
+    if params.mask_hot is not None:
+        X = _where(params.mask_hot, _nan_like(X), X)
 
-    # collapse over time to robust template
-    ref = X[..., 0, :, :] if T == 1 else _nanmedian(X, axis=-3, keepdims=False)  # [Y, X]
+    # Reference image
+    ref = X[..., 0, :, :] if T == 1 else _nanmedian(X, axis=-3)
 
-    # estimate initial center from global vertical median profile if not provided
+    # Initial center guess from vertical profile if not provided
     if params.initial_center is None:
-        # collapse across X to get row profile
         prof = _nanmedian(ref, axis=-1)  # [Y]
-        # centroid row index
         if _is_torch(prof):
             torch = _torch()
             rows = torch.arange(Y, device=ref.device, dtype=ref.dtype)
-            w = _nan_to_num(prof, 0.0)
-            c0 = float((w * rows).sum() / (w.sum() + 1e-20))
+            c0 = float((rows * _nan_to_num(prof, 0.0)).sum() / (_nan_to_num(prof, 0.0).sum() + 1e-20))
         else:
             np = _np()
-            rows = np.arange(Y)
+            rows = np.arange(Y, dtype=ref.dtype)
             w = _nan_to_num(prof, 0.0)
-            c0 = float((w * rows).sum() / (w.sum() + 1e-20))
+            c0 = float((rows * w).sum() / (w.sum() + 1e-20))
     else:
         c0 = float(params.initial_center)
 
-    # per-column centroid and width near c0
+    # Per-column centroid & width near c0
     mu, sig = _column_stats_y(ref, params.cr_reject, params.cr_zmax, params.cr_iter,
                               y_search_half=params.y_search_half, init_center=c0)
 
-    # smooth across columns
-    cols = _torch().arange(W, dtype=ref.dtype, device=ref.device) if _is_torch(ref) else _np().arange(W)
+    # Smooth/fitting across columns
+    if _is_torch(ref):
+        cols = _torch().arange(W, dtype=ref.dtype, device=ref.device)
+    else:
+        cols = _np().arange(W, dtype=ref.dtype)
+
     center_poly = width_poly = None
     if params.fit_kind == "poly":
         center_poly = _polyfit_1d(cols, mu, deg=params.center_poly_deg)
-        mu_fit = _polyval_1d(center_poly, cols)
-        width_poly = _polyfit_1d(cols, sig, deg=params.width_poly_deg)
+        width_poly  = _polyfit_1d(cols, sig, deg=params.width_poly_deg)
+        mu_fit  = _polyval_1d(center_poly, cols)
         sig_fit = _polyval_1d(width_poly, cols)
-    else:  # median smooth
-        if params.smooth_cols and params.smooth_cols > 1:
-            k = int(params.smooth_cols)
+    else:
+        # median/box smoothing in columns
+        k = int(params.smooth_cols or 0)
+        if k > 1:
             if _is_torch(mu):
-                torch = _torch(); np = _np()
-                muf = _nan_to_num(mu, 0.0).detach().cpu().numpy()
-                sigf = _nan_to_num(sig, 0.0).detach().cpu().numpy()
-                # moving average
+                import numpy as _npx
                 def _movavg(v, k):
                     pad = k // 2
-                    vp = np.pad(v, (pad, pad), mode="edge")
-                    c = np.ones(k, dtype=vp.dtype) / k
-                    return np.convolve(vp, c, mode="valid")
-                mu_fit_np = _movavg(muf, k); sig_fit_np = _movavg(sigf, k)
-                mu_fit = torch.from_numpy(mu_fit_np).to(device=ref.device, dtype=ref.dtype)
-                sig_fit = torch.from_numpy(sig_fit_np).to(device=ref.device, dtype=ref.dtype)
+                    vv = _nan_to_num(v, 0.0).detach().cpu().numpy()
+                    vp = _npx.pad(vv, (pad, pad), mode="edge")
+                    c = _npx.ones(k, dtype=vp.dtype) / k
+                    return _npx.convolve(vp, c, mode="valid")
+                mu_fit  = _torch().from_numpy(_movavg(mu, k)).to(device=ref.device, dtype=ref.dtype)
+                sig_fit = _torch().from_numpy(_movavg(sig, k)).to(device=ref.device, dtype=ref.dtype)
             else:
                 np = _np()
                 def _movavg(v, k):
@@ -430,7 +420,7 @@ def build_trace_model(
                     vp = np.pad(v, (pad, pad), mode="edge")
                     c = np.ones(k, dtype=vp.dtype) / k
                     return np.convolve(vp, c, mode="valid")
-                mu_fit = _movavg(mu, k)
+                mu_fit  = _movavg(mu, k)
                 sig_fit = _movavg(sig, k)
         else:
             mu_fit, sig_fit = mu, sig
@@ -438,9 +428,10 @@ def build_trace_model(
     meta: Dict[str, Any] = {}
     if params.return_intermediate:
         meta.update({
-            "Y": Y, "W": W, "T": T,
+            "T": T, "Y": Y, "W": W,
             "initial_center": c0,
-            "cr_reject": params.cr_reject, "cr_zmax": params.cr_zmax, "cr_iter": params.cr_iter
+            "cr_reject": params.cr_reject, "cr_zmax": params.cr_zmax, "cr_iter": params.cr_iter,
+            "fit_kind": params.fit_kind,
         })
 
     model = TraceModel(center=mu_fit, width=sig_fit, center_poly=center_poly, width_poly=width_poly, meta=meta)
@@ -451,38 +442,58 @@ def build_trace_model(
 # -----------------------------------------------------------------------------
 
 def _background_column_median(frame: BackendArray) -> BackendArray:
-    """Background per column: median across rows (ignoring NaN)."""
-    return _nanmedian(frame, axis=-2, keepdims=False)  # [X]
+    """Per-column background: median across rows → [X]."""
+    return _nanmedian(frame, axis=-2)
 
 def _background_row_poly(frame: BackendArray, deg: int) -> BackendArray:
-    """Fit polynomial across rows for each column; return [Y,X] background."""
+    """
+    Per-column polynomial fit across rows; returns [Y, X] model.
+    Torch → NumPy fit fallback (keeps behavior deterministic).
+    """
     Y, X = frame.shape[-2], frame.shape[-1]
     torch_mode = _is_torch(frame)
     if torch_mode:
         torch = _torch(); np = _np()
         rows = np.arange(Y)
         out = np.empty((Y, X), dtype=np.float32)
-        f_np = frame.detach().cpu().numpy()
-        for x in range(X):
-            ycol = f_np[:, x]
-            ycol_f = np.where(np.isnan(ycol), np.nanmedian(ycol), ycol)
-            coef = np.polyfit(rows, ycol_f, deg=deg)
-            out[:, x] = np.polyval(coef, rows)
+        f = frame.detach().cpu().numpy()
+        for j in range(X):
+            col = f[:, j]
+            col_f = np.where(np.isnan(col), np.nanmedian(col), col)
+            coef = np.polyfit(rows, col_f, deg=deg)
+            out[:, j] = np.polyval(coef, rows)
         return torch.from_numpy(out).to(device=frame.device, dtype=frame.dtype)
     else:
         np = _np()
         rows = np.arange(Y)
         out = np.empty((Y, X), dtype=frame.dtype)
-        for x in range(X):
-            ycol = frame[:, x]
-            ycol_f = np.where(_np().isnan(ycol), _np().nanmedian(ycol), ycol)
-            coef = np.polyfit(rows, ycol_f, deg=deg)
-            out[:, x] = np.polyval(coef, rows)
+        for j in range(X):
+            col = frame[:, j]
+            col_f = np.where(np.isnan(col), np.nanmedian(col), col)
+            coef = np.polyfit(rows, col_f, deg=deg)
+            out[:, j] = np.polyval(coef, rows)
         return out
 
 # -----------------------------------------------------------------------------
 # Extraction
 # -----------------------------------------------------------------------------
+
+def _ensure_order_dims(center: BackendArray, width: BackendArray) -> Tuple[BackendArray, BackendArray, int]:
+    """
+    Normalize model arrays to shape [O, X] where O is number of orders.
+    If 1D [X], return O=1 with leading dim added.
+    """
+    if center.ndim == 1:
+        if _is_torch(center):
+            center = center[None, :]
+            width  = width[None, :]
+        else:
+            center = _np().expand_dims(center, 0)
+            width  = _np().expand_dims(width, 0)
+        O = 1
+    else:
+        O = center.shape[-2]
+    return center, width, O
 
 def extract_trace(
     frames: BackendArray,
@@ -493,133 +504,166 @@ def extract_trace(
     params: TraceExtractParams,
 ) -> TraceExtractResult:
     """
-    Extract 1D spectra over time using the provided trace model.
-
-    frames: [..., T, Y, X]
-    model: TraceModel from build_trace_model
-    params: TraceExtractParams
-
-    Returns
-    -------
-    TraceExtractResult with flux [.., T, X], flux_err, background product, and meta.
+    Extract 1D spectra over time using a trace model.
+    Returns:
+      flux: [..., T, X] for single-order or [..., T, O, X] for multi-order.
     """
-    dtype = params.dtype
-    F = _to_float(frames, dtype=dtype)
+    F = _to_float(frames, dtype=params.dtype)
     F, _, _ = _normalize_axes(F, time_axis, dispersion_axis)  # [..., T, Y, X]
     T = F.shape[-3]; Y = F.shape[-2]; X = F.shape[-1]
     torch_mode = _is_torch(F)
 
     var = params.var
     if var is not None:
-        var = _to_float(var, dtype=dtype)
-        var, _, _ = _normalize_axes(var, time_axis, dispersion_axis)
+        var = _to_float(var, dtype=params.dtype)
+        var, _, _ = _normalize_axes(var, time_axis, dispersion_axis)  # [..., T, Y, X]
 
-    # Prepare outputs
+    # Prepare background output (per column summary)
     if torch_mode:
         torch = _torch()
-        flux = torch.empty((*F.shape[:-3], T, X), dtype=F.dtype, device=F.device)
-        flux_err = torch.empty_like(flux) if var is not None else None
         bkg_out = torch.empty((*F.shape[:-3], T, X), dtype=F.dtype, device=F.device) if params.bkg_kind != "none" else None
     else:
         np = _np()
-        flux = np.empty((*F.shape[:-3], T, X), dtype=F.dtype)
-        flux_err = np.empty_like(flux) if var is not None else None
         bkg_out = np.empty((*F.shape[:-3], T, X), dtype=F.dtype) if params.bkg_kind != "none" else None
 
-    center = model.center  # [X]
-    sig_y = model.width    # [X]
-    # Build per-frame weights/extraction window per column
-    y_coords = (_torch().arange(Y, dtype=F.dtype, device=F.device) if torch_mode else _np().arange(Y, dtype=F.dtype))
+    # Normalize model to [O, X]
+    center, sig_y, O = _ensure_order_dims(model.center, model.width)
 
+    # y coordinates
+    y_coords = (_torch().arange(Y, dtype=F.dtype, device=F.device) if torch_mode
+                else _np().arange(Y, dtype=F.dtype))
+
+    # Allocate outputs
+    out_shape = (*F.shape[:-3], T, X) if O == 1 else (*F.shape[:-3], T, O, X)
+    if torch_mode:
+        flux = torch.empty(out_shape, dtype=F.dtype, device=F.device)
+        flux_err = torch.empty_like(flux) if var is not None else None
+    else:
+        np = _np()
+        flux = np.empty(out_shape, dtype=F.dtype)
+        flux_err = np.empty_like(flux) if var is not None else None
+
+    # Iterate time (typically small compared to calib cost)
     for t in range(T):
-        fr = F[..., t, :, :]  # [Y,X]
-        # Background
+        fr = F[..., t, :, :]  # [..., Y, X]
+
+        # Background modeling
         if params.bkg_kind == "none":
-            bkg = None
+            bkg_model = None
+            bkg_col = None
         elif params.bkg_kind == "column_median":
-            bkg_col = _background_column_median(fr)  # [X]
-            bkg = (bkg_col[None, :]).repeat(Y, 1) if torch_mode else _np().repeat(bkg_col[None, :], Y, axis=0)
+            bkg_col = _background_column_median(fr)  # [..., X]
+            bkg_model = (bkg_col[..., None, :]).repeat(Y, axis=-2) if not torch_mode else bkg_col[..., None, :].expand(*bkg_col.shape[:-1], Y, X)
         else:
-            bkg = _background_row_poly(fr, deg=params.bkg_poly_deg)
+            bkg_model = _background_row_poly(fr, deg=params.bkg_poly_deg)  # [..., Y, X]
+            bkg_col = _nanmedian(bkg_model, axis=-2)  # summary per column
 
         if bkg_out is not None:
+            bkg_out[..., t, :] = bkg_col if bkg_col is not None else (0.0 if not torch_mode else torch.zeros_like(fr[..., 0, :]))
+
+        fr_bkg = fr - bkg_model if bkg_model is not None else fr  # background-subtracted
+
+        # Handle single vs multi-order
+        for o in range(O):
+            yc = center[o]          # [X]
+            sy = sig_y[o]           # [X]
+            # guard sigma
             if torch_mode:
-                bkg_out[..., t, :] = _nanmedian(bkg, axis=-2) if bkg is not None else _zeros_like(fr[0, :])
+                sy = _where(sy <= 1e-4, _ones_like(sy) * 1.0, sy)
             else:
-                bkg_out[..., t, :] = _np().nanmedian(bkg, axis=-2) if bkg is not None else 0.0
+                sy = _where(sy <= 1e-4, _np().ones_like(sy) * 1.0, sy)
 
-        # Subtract background
-        fr_bkg = fr - bkg if bkg is not None else fr
-
-        if params.method == "box":
-            # Box aperture: sum within |y - center[x]| <= ap_half
-            if torch_mode:
-                torch = _torch()
-                yc = center[None, :]  # [1,X]
-                # distance grid
-                dy = (y_coords[:, None] - yc)  # [Y,X]
-                mbox = (dy.abs() <= float(params.ap_half)).to(dtype=fr.dtype)
-                spec = _nan_to_num(fr_bkg * mbox, 0.0).sum(dim=-2)  # [X]
-                flux[..., t, :] = spec
-                if flux_err is not None:
-                    v = var[..., t, :, :] if var is not None else None
-                    veff = _nan_to_num((v * mbox), 0.0).sum(dim=-2) if v is not None else _zeros_like(spec)
-                    flux_err[..., t, :] = torch.sqrt(torch.clamp(veff, min=0.0))
-            else:
-                np = _np()
-                yc = center[None, :]
-                dy = (y_coords[:, None] - yc)
-                mbox = (np.abs(dy) <= float(params.ap_half)).astype(fr.dtype)
-                spec = _nan_to_num(fr_bkg * mbox, 0.0).sum(axis=-2)
-                flux[..., t, :] = spec
-                if flux_err is not None:
-                    v = var[..., t, :, :] if var is not None else None
-                    veff = _nan_to_num((v * mbox), 0.0).sum(axis=-2) if v is not None else _zeros_like(spec)
-                    flux_err[..., t, :] = _np().sqrt(_np().clip(veff, 0.0, None))
-
-        else:
-            # Optimal extraction (Horne 1986): weights ~ P / V
-            # Build per-column Gaussian PSF if VAR available; else use sigma_y and flux moment scale.
-            if torch_mode:
-                torch = _torch()
-                yc = center[None, :]  # [1,X]
-                sy = _where(sig_y <= 1e-4, _ones_like(sig_y) * 1.0, sig_y)[None, :]
-                # PSF
-                P = torch.exp(-0.5 * ((y_coords[:, None] - yc) ** 2) / (sy ** 2))  # [Y,X]
-                # normalize column-wise
-                P = P / _where(P.sum(dim=-2, keepdim=True) <= 1e-20, torch.tensor(1e-20, dtype=P.dtype, device=P.device), P.sum(dim=-2, keepdim=True))
-                if var is not None:
-                    V = var[..., t, :, :]
-                    W = P / _where(V <= 1e-20, torch.tensor(1e-20, dtype=V.dtype, device=V.device), V)
+            if params.method == "box":
+                # |y - yc[x]| <= ap_half
+                if torch_mode:
+                    torch = _torch()
+                    dy = y_coords[:, None] - yc[None, :]                 # [Y, X]
+                    mbox = (dy.abs() <= float(params.ap_half)).to(dtype=fr_bkg.dtype)
+                    spec = _nansum(fr_bkg * mbox, axis=-2)               # [..., X]
+                    if O == 1:
+                        flux[..., t, :] = spec
+                    else:
+                        flux[..., t, o, :] = spec
+                    if flux_err is not None and var is not None:
+                        V = var[..., t, :, :]
+                        veff = _nansum(_nan_to_num(V * mbox, 0.0), axis=-2)
+                        err = (veff.clamp_min(0.0)).sqrt()
+                        if O == 1:
+                            flux_err[..., t, :] = err
+                        else:
+                            flux_err[..., t, o, :] = err
                 else:
-                    W = P
-                num = _nan_to_num(W * fr_bkg, 0.0).sum(dim=-2)         # [X]
-                den = _nan_to_num(W * P, 0.0).sum(dim=-2)               # [X]
-                spec = num / _where(den <= 1e-20, torch.tensor(1e-20, dtype=den.dtype, device=den.device), den)
-                flux[..., t, :] = spec
-                if flux_err is not None:
-                    denom = (P * P) / _where(var[..., t, :, :] <= 1e-20, torch.tensor(1e-20, dtype=P.dtype, device=P.device), var[..., t, :, :])
-                    deff = _nan_to_num(denom, 0.0).sum(dim=-2)
-                    flux_err[..., t, :] = (1.0 / _where(deff <= 1e-20, torch.tensor(1e-20, dtype=deff.dtype, device=deff.device), deff)) ** 0.5
-            else:
-                np = _np()
-                yc = center[None, :]
-                sy = _where(sig_y <= 1e-4, _np().ones_like(sig_y) * 1.0, sig_y)[None, :]
-                P = _np().exp(-0.5 * ((y_coords[:, None] - yc) ** 2) / (sy ** 2))
-                P = P / _where(P.sum(axis=-2, keepdims=True) <= 1e-20, _np().array(1e-20, dtype=P.dtype), P.sum(axis=-2, keepdims=True))
-                if var is not None:
-                    V = var[..., t, :, :]
-                    W = P / _where(V <= 1e-20, _np().array(1e-20, dtype=V.dtype), V)
-                else:
-                    W = P
-                spec = _nan_to_num((W * fr_bkg), 0.0).sum(axis=-2) / _where((_nan_to_num(W * P, 0.0).sum(axis=-2)) <= 1e-20,
-                                                                              _np().array(1e-20, dtype=F.dtype), (_nan_to_num(W * P, 0.0).sum(axis=-2)))
-                flux[..., t, :] = spec
-                if flux_err is not None:
-                    denom = (P * P) / _where(var[..., t, :, :] <= 1e-20, _np().array(1e-20, dtype=P.dtype), var[..., t, :, :])
-                    deff = _nan_to_num(denom, 0.0).sum(axis=-2)
-                    flux_err[..., t, :] = (1.0 / _where(deff <= 1e-20, _np().array(1e-20, dtype=deff.dtype), deff)) ** 0.5
+                    np = _np()
+                    dy = y_coords[:, None] - yc[None, :]
+                    mbox = (np.abs(dy) <= float(params.ap_half)).astype(fr_bkg.dtype)
+                    spec = _nansum(fr_bkg * mbox, axis=-2)
+                    if O == 1:
+                        flux[..., t, :] = spec
+                    else:
+                        flux[..., t, o, :] = spec
+                    if flux_err is not None and var is not None:
+                        V = var[..., t, :, :]
+                        veff = _nansum(_nan_to_num(V * mbox, 0.0), axis=-2)
+                        err = _np().sqrt(_np().clip(veff, 0.0, None))
+                        if O == 1:
+                            flux_err[..., t, :] = err
+                        else:
+                            flux_err[..., t, o, :] = err
 
+            else:
+                # Horne-style optimal extraction: weights ∝ P / V
+                if torch_mode:
+                    torch = _torch()
+                    P = torch.exp(-0.5 * ((y_coords[:, None] - yc[None, :]) ** 2) / (sy[None, :] ** 2))  # [Y, X]
+                    Psum = _nansum(P, axis=-2, keepdims=True)
+                    P = P / _where(Psum <= 1e-20, Psum + 1e-20, Psum)
+                    if var is not None:
+                        V = var[..., t, :, :]
+                        W = P / _where(V <= 1e-20, torch.tensor(1e-20, dtype=V.dtype, device=V.device), V)
+                    else:
+                        W = P
+                    num = _nansum(_nan_to_num(W * fr_bkg, 0.0), axis=-2)   # [..., X]
+                    den = _nansum(_nan_to_num(W * P, 0.0), axis=-2)
+                    spc = num / _where(den <= 1e-20, den + 1e-20, den)
+                    if O == 1:
+                        flux[..., t, :] = spc
+                    else:
+                        flux[..., t, o, :] = spc
+                    if flux_err is not None and var is not None:
+                        denom = (P * P) / _where(V <= 1e-20, torch.tensor(1e-20, dtype=V.dtype, device=V.device), V)
+                        deff = _nansum(_nan_to_num(denom, 0.0), axis=-2)
+                        err = (1.0 / _where(deff <= 1e-20, deff + 1e-20, deff)).sqrt()
+                        if O == 1:
+                            flux_err[..., t, :] = err
+                        else:
+                            flux_err[..., t, o, :] = err
+                else:
+                    np = _np()
+                    P = np.exp(-0.5 * ((y_coords[:, None] - yc[None, :]) ** 2) / (sy[None, :] ** 2))
+                    Psum = _nansum(P, axis=-2, keepdims=True)
+                    P = P / _where(Psum <= 1e-20, Psum + 1e-20, Psum)
+                    if var is not None:
+                        V = var[..., t, :, :]
+                        W = P / _where(V <= 1e-20, _np().array(1e-20, dtype=V.dtype), V)
+                    else:
+                        W = P
+                    num = _nansum(_nan_to_num(W * fr_bkg, 0.0), axis=-2)
+                    den = _nansum(_nan_to_num(W * P, 0.0), axis=-2)
+                    spc = num / _where(den <= 1e-20, den + 1e-20, den)
+                    if O == 1:
+                        flux[..., t, :] = spc
+                    else:
+                        flux[..., t, o, :] = spc
+                    if flux_err is not None and var is not None:
+                        denom = (P * P) / _where(V <= 1e-20, _np().array(1e-20, dtype=P.dtype), V)
+                        deff = _nansum(_nan_to_num(denom, 0.0), axis=-2)
+                        err = (1.0 / _where(deff <= 1e-20, deff + 1e-20, deff)) ** 0.5
+                        if O == 1:
+                            flux_err[..., t, :] = err
+                        else:
+                            flux_err[..., t, o, :] = err
+
+    # Post-clip outputs if requested
     if params.clip_out is not None:
         low, high = params.clip_out
         flux = _clip(flux, low, high)
@@ -630,6 +674,7 @@ def extract_trace(
     if params.return_intermediate:
         meta.update({
             "method": params.method,
+            "orders": O,
             "bkg_kind": params.bkg_kind,
             "psf_sigma_y": params.psf_sigma_y,
             "ap_half": params.ap_half,
@@ -646,21 +691,19 @@ def _make_tilted_stripe(T=3, Y=64, X=128, slope=0.1, center0=32.0, amp=4000.0, s
     yy, xx = np.mgrid[0:Y, 0:X]
     stack = []
     for _ in range(T):
-        center_x = center0 + slope * (xx - X/2.0)  # linear tilt
+        center_x = center0 + slope * (xx - X/2.0)
         stripe = amp * np.exp(-0.5 * ((yy - center_x)**2) / (sig**2))
         stack.append(stripe + np.random.normal(0, noise, size=(Y, X)))
     return np.stack(stack, axis=0).astype(np.float32)
 
 def _test_build_and_extract_box():
-    import numpy as np
+    import numpy as np, math
     T, Y, X = 5, 64, 128
     arr = _make_tilted_stripe(T=T, Y=Y, X=X, slope=0.08, center0=28.0, amp=3000.0, sig=2.0)
     detect = TraceDetectParams(dispersion_axis=-1, center_poly_deg=2, width_poly_deg=1, fit_kind="poly", return_intermediate=True)
     build = build_trace_model(arr, time_axis=-3, params=detect)
     ext_params = TraceExtractParams(method="box", ap_half=5, bkg_kind="column_median", return_intermediate=True)
     res = extract_trace(arr, model=build.model, time_axis=-3, dispersion_axis=-1, params=ext_params)
-    # crude sanity: typical flux should be positive and roughly near amplitude * sqrt(2*pi)*sigma for per-column integral
-    import math
     expected_peak = 3000.0 * math.sqrt(2.0 * math.pi) * 2.0
     med = float(np.nanmedian(res.flux))
     assert med > 0.4 * expected_peak, f"box extraction too low: med={med}, exp~{expected_peak}"
@@ -670,13 +713,11 @@ def _test_build_and_extract_optimal():
     import numpy as np
     T, Y, X = 4, 64, 96
     arr = _make_tilted_stripe(T=T, Y=Y, X=X, slope=-0.05, center0=34.0, amp=5000.0, sig=1.8, noise=1.2)
-    # variance (white noise)
     var = np.ones_like(arr) * (1.2**2)
     detect = TraceDetectParams(dispersion_axis=-1, fit_kind="poly", center_poly_deg=2, width_poly_deg=1, return_intermediate=True)
     build = build_trace_model(arr, time_axis=-3, params=detect)
     ext_params = TraceExtractParams(method="optimal", var=var, psf_sigma_y=1.8, bkg_kind="column_median", return_intermediate=True)
     res = extract_trace(arr, model=build.model, time_axis=-3, dispersion_axis=-1, params=ext_params)
-    # sanity: optimal flux should be close to amplitude * normalized PSF integral per column ~ amplitude
     med = float(np.nanmedian(res.flux))
     assert med > 1000.0, f"optimal extraction too low: {med}"
     return True
