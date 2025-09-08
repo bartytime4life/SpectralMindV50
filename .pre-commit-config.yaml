@@ -1,31 +1,47 @@
 # .pre-commit-config.yaml
+# ======================================================================
 # SpectraMind V50 — mission-grade pre-commit stack
 # - Fast: ruff + black + isort
 # - Safe: mypy + bandit + secrets scan
 # - Repro: DVC guard + large-file protections
 # - Docs: mdformat + spelling
-# - Notebooks: strip outputs to keep diffs/Kaggle-friendly
-# - JSON/YAML/TOML sanity checks
+# - Notebooks: strip outputs; optional nbqa lint/format
+# - JSON/YAML/TOML sanity + pretty JSON
 # - Optional: Conventional Commits (commit-msg)
+# ======================================================================
 
 ci:
   autofix_prs: true
   autoupdate_branch: true
-  # Pre-commit.ci will try to fix formatting issues automatically in PRs
 
 default_stages: [commit, push]
 default_language_version:
   python: python3.11
 
+# Global excludes (speed + avoid false positives)
+exclude: >
+  (?x)(
+    ^.*/\.venv/|
+    ^.*/\.mypy_cache/|
+    ^.*/\.ruff_cache/|
+    ^.*/\.pytest_cache/|
+    ^.*/build/|
+    ^.*/dist/|
+    ^.*/site/|
+    ^assets/|
+    ^docs/_build/|
+    \.svg$
+  )
+
 repos:
-  # ------------------------------
+  # --------------------------------------------------------------------
   # Core hygiene (generic)
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: check-added-large-files
-        args: [--maxkb=500]  # keep the repo lean; use DVC for data/artifacts
+        args: [--maxkb=500]  # keep repo lean; use DVC for artifacts
       - id: check-merge-conflict
       - id: end-of-file-fixer
       - id: trailing-whitespace
@@ -36,16 +52,21 @@ repos:
         args: [--allow-multiple-documents]
       - id: check-toml
       - id: detect-private-key
+      - id: pretty-format-json
+        name: pretty-format-json (2-space, sorted)
+        args: [--autofix, --indent, "2", --no-ensure-ascii, --top-keys, name,version]
+        files: ^(.*\.json|.*\.ipynb)$
+        exclude: ^(poetry\.lock|package-lock\.json)$
 
-  # ------------------------------
+  # --------------------------------------------------------------------
   # Python formatting & linting
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/psf/black
     rev: 24.8.0
     hooks:
       - id: black
         language_version: python3.11
-        files: ^(src/|tests/|scripts/|configs/|spectramind\.py)
+        files: ^(src/|tests/|scripts/|tools/|configs/|spectramind\.py)
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
@@ -53,38 +74,37 @@ repos:
       - id: isort
         language_version: python3.11
         args: [--profile=black, --filter-files]
-        files: ^(src/|tests/|scripts/|configs/|spectramind\.py)
+        files: ^(src/|tests/|scripts/|tools/|configs/|spectramind\.py)
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.3
     hooks:
       - id: ruff
-        # Fast flake8 replacement; see setup.cfg for config
+        # Fast flake8 replacement; see pyproject.toml/ruff.toml for config
         args: [--fix]
-        files: ^(src/|tests/|scripts/|configs/|spectramind\.py)
+        files: ^(src/|tests/|scripts/|tools/|configs/|spectramind\.py)
+      # Optional: ruff formatter (kept off by default—Black is canonical here)
+      # - id: ruff-format
 
-  # ------------------------------
+  # --------------------------------------------------------------------
   # Static typing (fast path)
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.2
     hooks:
       - id: mypy
         additional_dependencies:
-          # Stubs/typing that are commonly used in the repo
           - pandas-stubs
           - numpy
           - types-PyYAML
           - types-requests
           - types-setuptools
-        args:
-          # mypy config lives in setup.cfg
-          - --python-version=3.11
+        args: [--python-version=3.11]
         files: ^(src/|spectramind\.py)
 
-  # ------------------------------
+  # --------------------------------------------------------------------
   # Security
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.9
     hooks:
@@ -98,14 +118,14 @@ repos:
     hooks:
       - id: detect-secrets
         name: detect-secrets (baseline)
-        # Maintain .secrets.baseline in repo root. To (re)generate:
+        args: [--baseline, .secrets.baseline]
+        # To (re)generate:
         #   detect-secrets scan > .secrets.baseline
         #   pre-commit run detect-secrets --all-files
-        args: [--baseline, .secrets.baseline]
 
-  # ------------------------------
+  # --------------------------------------------------------------------
   # DVC: keep data/models out of Git by mistake
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/iterative/dvc
     rev: 3.55.2
     hooks:
@@ -114,9 +134,9 @@ repos:
         pass_filenames: false
         stages: [commit]
 
-  # ------------------------------
-  # Notebooks: strip outputs to keep diffs small & Kaggle-safe
-  # ------------------------------
+  # --------------------------------------------------------------------
+  # Notebooks
+  # --------------------------------------------------------------------
   - repo: https://github.com/kynan/nbstripout
     rev: 0.7.1
     hooks:
@@ -124,9 +144,21 @@ repos:
         files: \.ipynb$
         args: [--keep-count, --keep-output=false]
 
-  # ------------------------------
+  # Optional: run ruff/black on .ipynb via nbqa (disabled by default; enable later)
+  # - repo: https://github.com/nbQA-dev/nbQA
+  #   rev: 1.9.1
+  #   hooks:
+  #     - id: nbqa-ruff
+  #       additional_dependencies: ["ruff==0.6.3"]
+  #       args: [--fix]
+  #       files: \.ipynb$
+  #     - id: nbqa-black
+  #       additional_dependencies: ["black==24.8.0"]
+  #       files: \.ipynb$
+
+  # --------------------------------------------------------------------
   # Docs & text quality
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.17
     hooks:
@@ -144,12 +176,12 @@ repos:
     rev: v2.3.0
     hooks:
       - id: codespell
-        args: [--ignore-words-list=nd,fo,te,ans,ot]  # tune ignore list as needed
+        args: [--ignore-words-list=nd,fo,te,ans,ot]
         exclude: ^(poetry\.lock|.*\.lock|.*\.svg|assets/|docs/|.*\.ipynb)$
 
-  # ------------------------------
+  # --------------------------------------------------------------------
   # JSON Schema sanity (schemas/)
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 0.28.6
     hooks:
@@ -158,9 +190,17 @@ repos:
         args: [--check-metaschema]
         files: ^schemas/.*\.json$
 
-  # ------------------------------
+  # --------------------------------------------------------------------
+  # Pyproject validity (lightweight)
+  # --------------------------------------------------------------------
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.16
+    hooks:
+      - id: validate-pyproject
+
+  # --------------------------------------------------------------------
   # Conventional commits (optional but recommended)
-  # ------------------------------
+  # --------------------------------------------------------------------
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v3.27.0
     hooks:
