@@ -1,1 +1,43 @@
+# .github/auto_merge.yml
+# SpectraMind V50 — Auto-Merge Configuration
+# Controls when PRs can be automatically merged once conditions are satisfied.
 
+# ✅ Required branch protection
+# Make sure your default branch (e.g., main) has protections enabled:
+#   - Required status checks (CI, lint, tests, security scans)
+#   - Required approvals (e.g., 1 or 2 reviewers)
+#   - No bypass for admins (optional, recommended)
+
+# Auto-merge rules
+# These apply when all required checks + approvals have passed.
+
+automerge:
+  enabled: true
+
+  # Target branches eligible for auto-merge
+  branches:
+    - main
+    - develop
+
+  # Merge methods allowed: merge, squash, rebase
+  method: squash
+
+  # Labels that must be present before auto-merge
+  required_labels:
+    - automerge
+    - ci-passed
+
+  # Labels that block auto-merge if present
+  blocking_labels:
+    - do-not-merge
+    - needs-review
+    - wip
+
+  # Minimum number of approvals required (in addition to branch protection)
+  min_approvals: 1
+
+  # Optional: auto-delete source branch after merge
+  delete_branch: true
+
+  # Optional: notify in logs when auto-merge is attempted
+  verbose: true
