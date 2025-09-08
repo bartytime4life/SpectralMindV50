@@ -1,59 +1,145 @@
-# configs/calib/method/cds.yaml
-# ----------------------------------------------------------------------
-# Correlated Double Sampling (CDS) — readout differencing
-# ----------------------------------------------------------------------
+# ======================================================================
+# Correlated Double Sampling (CDS) — SpectraMind V50
+# ======================================================================
 # Removes frame-to-frame DC offsets / kTC / reset noise by differencing
-# successive reads or paired readout levels. Apply early in the chain,
-# after ADC conversion and before DARK/FLAT.
-# ----------------------------------------------------------------------
+# successive reads or paired readout levels. Apply after ADC, before
+# DARK/FLAT/TRACE/PHASE. Safe for CPU/GPU; chunked to avoid OOM.
+#
+# CLI:
+#   spectramind calibrate +calib.method=cds
+#
+# Math (per pixel):
+#   successive : y[t] = x[t] − x[t−1]
+#   pairwise   : y    = x_signal − x_reset  (needs read_level_key)
+#   rolling    : y[t] = x[t] − mean(x[t−k : t−1])
+#
+# File/key conventions:
+#   • image_key / per-sensor defaults (fgs1/airs) supported.
+#   • Optional mask keys; frames flagged invalid are dropped if enabled.
+# ======================================================================
 
+# ----------------------------------------------------------------------
+# Wiring
+# ----------------------------------------------------------------------
 _target_: spectramind.calib.method.cds.CDS
+_convert_: all
+
 enable: true
 apply_to: ["fgs1", "airs"]
 
-# --- Input / keys ---
-image_key: null                 # if set, overrides per-sensor default (e.g. "fgs1_frame"/"airs_frame")
-time_key: "time"                # optional timestamp for ordering
-read_level_key: null            # optional key if two read levels are provided per frame (e.g., ["reset","signal"])
+# ----------------------------------------------------------------------
+# Inputs / keys
+# ----------------------------------------------------------------------
+image_key: null                  # e.g., "fgs1_frame" / "airs_frame" (auto if null)
+time_key: "time"                 # timestamp key for ordering (ISO8601 or float sec)
+read_level_key: null             # e.g., ["reset","signal"] for pairwise mode
+mask_keys: []                    # e.g., ["fgs1_mask","airs_mask"] → 1=bad,0=good
 
-# --- Differencing mode ---
-mode: "successive"              # ["successive", "pairwise", "rolling"]
-# successive : x[t] = raw[t] - raw[t-1]
-# pairwise   : x = signal - reset( same frame ), requires read_level_key
-# rolling    : x[t] = raw[t] - mean(raw[t-k:t-1])
+# ----------------------------------------------------------------------
+# Differencing mode
+# ----------------------------------------------------------------------
+mode: successive                 # [successive | pairwise | rolling]
 
-# --- Windowing / filtering ---
-window:
-  size: 2                       # for successive: minimal 2; for rolling: k >= 2
-  center: false                 # rolling window is left-aligned (causal)
-  robust: false                 # use robust mean for rolling mode
+successive:
+  drop_first: true               # no predecessor → drop t=0
 
-# --- Bounds & clipping to reduce amplification of glitches ---
+pairwise:
+  require_both_levels: true      # enforce both reset & signal present per record
+  align_strategy: "by_index"     # [by_index | by_time] when streams are separate
+
+rolling:
+  size: 3                        # k ≥ 2
+  center: false                  # causal (left-aligned)
+  robust_mean: false             # median-of-means style (costly)
+
+# ----------------------------------------------------------------------
+# Ordering & gaps
+# ----------------------------------------------------------------------
+ordering:
+  sort_by_time: true             # ensure monotone time before differencing
+  allow_equal_timestamps: true   # treat equal times as same-bin; stable sort
+  max_gap_seconds: null          # if set, split segments when gap > value
+
+# ----------------------------------------------------------------------
+# Outliers / clipping (reduce glitch amplification)
+# ----------------------------------------------------------------------
 clip:
   enable: true
-  sigma: 8.0                    # clip extreme differenced values
+  method: "sigma"                # [sigma | hard | none]
+  sigma: 8.0                     # for method=sigma → winsorize/clip
   iters: 1
-  replace: "interp"             # ["interp", "nan", "median"]
+  replace: "interp"              # [interp | nan | median]
+  hard_bounds:                   # used when method=hard (flux units after ADC)
+    min: null
+    max: null
 
-# --- Ordering & frame drops ---
-ordering:
-  sort_by_time: true            # sort frames by time_key if not guaranteed increasing
-  drop_first: true              # drop first frame (no predecessor in successive mode)
-  drop_masked: true             # drop frames marked invalid by upstream mask
+# ----------------------------------------------------------------------
+# Masking & NaN policy
+# ----------------------------------------------------------------------
+masking:
+  drop_masked_frames: true       # drop frames with > thresh_bad fraction bad
+  thresh_bad: 0.20               # 20% bad pixels → drop frame
+  grow_radius: 0                 # dilate mask (pixels)
+  fill_mode: "none"              # [none | median3 | zero] for masked pixels pre-CDS
 
-# --- Numerical stability & dtype handling ---
+nan_policy: "raise"              # [raise | warn | coerce]
+coerce_value: 0.0                # used when nan_policy=coerce
+
+# ----------------------------------------------------------------------
+# Backend, dtype, and numerical safety
+# ----------------------------------------------------------------------
+backend: auto                    # [auto | numpy | torch]
+device: auto                     # [auto | cpu | cuda] (torch only)
+preserve_dtype: false            # return float32 even if input was int
+dtype_out: float32
 numeric:
-  preserve_dtype: false         # return float32 even if input was int
   eps: 1.0e-9
+  deterministic: true
+  num_threads: ${oc.env:SM_NUM_THREADS, 2}
 
-# --- Output keys ---
+# ----------------------------------------------------------------------
+# Chunking (OOM safety on Kaggle/CI)
+# ----------------------------------------------------------------------
+chunking:
+  enabled: true
+  frames_per_chunk: 64           # split T into blocks; null → auto
+  min_frames_per_chunk: 8
+
+# ----------------------------------------------------------------------
+# Validation gates (fail fast if pathological)
+# ----------------------------------------------------------------------
+validate: true
+validation:
+  finite_input: true
+  finite_output: true
+  # Max fraction of pixels allowed to be clipped/replaced per frame
+  max_clip_fraction: 0.01
+  # Enforce non-trivial signal (avoid all-zeros after differencing)
+  min_std_per_frame: 1.0e-8
+  # For rolling: require size≥2 and coverage≥(size-1)
+  require_sufficient_history: true
+
+# ----------------------------------------------------------------------
+# Outputs
+# ----------------------------------------------------------------------
 outputs:
-  corrected_key: "cds_frame"    # per-sensor pipeline may override (e.g., "fgs1_frame_cds", "airs_frame_cds")
-  meta_prefix: "cds"
+  corrected_key: "cds_frame"     # per-sensor pipeline may override
+  meta_prefix: "cds"             # metadata namespace
 
-# --- Diagnostics (optional) ---
+# ----------------------------------------------------------------------
+# Diagnostics
+# ----------------------------------------------------------------------
 diagnostics:
   enable: false
   histogram_before_after: false
-  save_example_pairs: 0         # number of (prev, curr, diff) triplets to store (0 disables)
-  out_dir: "./outputs/calib_diagnostics/cds"
+  save_example_pairs: 0          # number of (prev,curr,diff) triplets dump
+  trace_pixels: 16               # N random pixels to log (pre/post)
+  out_dir: ${paths.runtime}/reports/cds
+
+# ----------------------------------------------------------------------
+# Repro metadata (recorded to run logs)
+# ----------------------------------------------------------------------
+meta:
+  name: "CDS"
+  version: "v1"
+  checksum_inputs: false
