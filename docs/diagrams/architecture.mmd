@@ -1,138 +1,92 @@
-%% SpectraMind V50 — Architecture Overview (Mermaid)
-%% Works on GitHub + MkDocs mermaid plugin
+%%{init: {'theme': 'neutral', 'flowchart': {'curve': 'basis'}}}%%
+flowchart LR
 
-flowchart TD
-
-%% ─────────────────────────────────────────────────────────────
-%% L1: Orchestration & Config
-%% ─────────────────────────────────────────────────────────────
-A["User / CI<br/>(typer CLI: <code>spectramind</code>)"] -->|invokes| B["Hydra Compose<br/>(configs/*)"]
-B --> C["Run Context<br/>(seed, device, env)"]
-
-subgraph CFG["Hydra Config Tree"]
-direction LR
-  CFG1["env/ (local, kaggle, hpc, ci)"]
-  CFG2["data/ (nominal, kaggle, debug)"]
-  CFG3["calib/ (adc, dark, flat, cds, photometry, trace, phase)"]
-  CFG4["model/ (fgs1, airs, fusion, decoder)"]
-  CFG5["training/ (optim, sched, precision, early_stop)"]
-  CFG6["loss/ (smooth, nonneg, band, calibration)"]
-  CFG7["logger/ (jsonl, csv, wandb)"]
-end
-
-B -. defaults + overrides .-> CFG
-
-%% ─────────────────────────────────────────────────────────────
-%% L2: DVC Pipeline Stages
-%% ─────────────────────────────────────────────────────────────
-subgraph DVC["Reproducible Pipeline (DVC)"]
-direction TB
-  P1["calibrate<br/>ADC→dark→flat→CDS→photometry→trace→phase"]
-  P2["tensors<br/>(feature-ready, physics-aligned)"]
-  P3["train<br/>(dual-encoder + heteroscedastic decoder)"]
-  P4["predict<br/>(μ, σ per bin; 283 bins)"]
-  P5["diagnose<br/>(FFT, UMAP/t-SNE, SHAP, rules)"]
-  P6["submit<br/>(schema-checked CSV/ZIP + manifest)"]
-
-  P1 --> P2 --> P3 --> P4
-  P4 --> P5
-  P4 --> P6
-end
-
-C --> P1
-
-%% ─────────────────────────────────────────────────────────────
-%% L3: Model Blocks
-%% ─────────────────────────────────────────────────────────────
-subgraph M["Model Architecture"]
-direction LR
-
-  subgraph E1["FGS1 Encoder"]
+%% =========================
+%% LAYER 1 — REPOSITORY
+%% =========================
+subgraph REPO["🗂️ Repository Structure"]
   direction TB
-    E1a["Denoise / Bin / Downsample"]
-    E1b["Temporal Model (SSM/Mamba)"]
-  end
+  R1["src/"]:::repo
+  R2["configs/ (Hydra)"]:::repo
+  R3["schemas/ (JSON)"]:::repo
+  R4["data/ (DVC-tracked)"]:::repo
+  R5["dvc.yaml / dvc.lock"]:::repo
+  R6["scripts/ (CLI helpers)"]:::repo
+  R7[".github/workflows/ (CI)"]:::repo
+end
 
-  subgraph E2["AIRS Encoder"]
+%% =========================
+%% LAYER 2 — PIPELINE (DVC)
+%% =========================
+subgraph PIPE["🔁 DVC Pipeline Stages"]
+  direction LR
+  P0["calibrate"]:::stage
+  P1["preprocess"]:::stage
+  P2["train"]:::stage
+  P3["predict"]:::stage
+  P4["diagnose"]:::stage
+  P5["submit"]:::stage
+end
+
+%% =========================
+%% LAYER 3 — MODEL
+%% =========================
+subgraph MODEL["🧠 Model Architecture"]
   direction TB
-    E2a["Spectral CNN/GNN<br/>(wavelength-structured)"]
-  end
-
-  FUS["Fusion<br/>(concat / cross-attn)"]
-  DEC["Decoder<br/>(heteroscedastic head → μ, σ)"]
+  M0["FGS1 Encoder (Mamba SSM)"]:::model
+  M1["AIRS Encoder (CNN/GNN)"]:::model
+  M2["Fusion (concat / cross-attn)"]:::model
+  M3["Heteroscedastic Decoder → μ/σ (283)"]:::model
+  M0 --> M2
+  M1 --> M2
+  M2 --> M3
 end
 
-P2 --> E1
-P2 --> E2
-E1 --> FUS
-E2 --> FUS
-FUS --> DEC
-DEC --> P4
-
-%% ─────────────────────────────────────────────────────────────
-%% L4: Constraints & Calibration
-%% ─────────────────────────────────────────────────────────────
-subgraph PHY["Physics-Aware Constraints"]
-direction TB
-  L1c["Smoothness Prior"]
-  L2c["Non-negativity of μ"]
-  L3c["Band Coherence / Priors"]
-  L4c["σ Calibration (Temp Scaling)"]
+%% =========================
+%% LAYER 4 — ARTIFACTS
+%% =========================
+subgraph ART["📦 Data & Artifacts (DVC)"]
+  direction TB
+  A0["raw/ (FGS1, AIRS)"]:::data
+  A1["calibrated/ (cubes, lightcurves)"]:::data
+  A2["features/ (tensors)"]:::data
+  A3["checkpoints/ (model.pth)"]:::data
+  A4["predictions/ (μ, σ per bin)"]:::data
+  A5["submission.csv"]:::data
 end
 
-PHY -. loss terms / checks .- DEC
-PHY -. validation .- P5
+%% =========================
+%% WIRING — FLOW & CONTROL
+%% =========================
+%% Repo → Pipeline control
+R2 -->|Hydra configs| PIPE
+R5 -->|DVC stages + cache| PIPE
+R6 -->|spectramind CLI| PIPE
+R7 -->|CI runs pipeline| PIPE
 
-%% ─────────────────────────────────────────────────────────────
-%% L5: Artifacts, Lineage & CI
-%% ─────────────────────────────────────────────────────────────
-subgraph ART["Lineage & Artifacts"]
-direction TB
-  A1["artifacts/configs/run.yaml<br/>(Hydra snapshot)"]
-  A2["artifacts/checkpoints/model.ckpt"]
-  A3["artifacts/predictions/{mu.csv, sigma.csv}"]
-  A4["artifacts/reports/diagnostics_dashboard.html"]
-  A5["dist/submission.{csv,zip,json}<br/>(+ checksums manifest)"]
-  A6["logs/events.jsonl<br/>(structured run log)"]
-end
+%% Data lineage through pipeline
+A0 -->|input| P0 --> A1
+A1 -->|input| P1 --> A2
+A2 -->|input| P2 --> A3
+A3 -->|input| P3 --> A4
+A4 -->|input| P4
+A4 -->|input| P5 --> A5
 
-B --> A1
-P3 --> A2
-P4 --> A3
-P5 --> A4
-P6 --> A5
-C  --> A6
+%% Model dependencies
+R1 -->|src/spectramind/...| MODEL
+P2 -->|uses| MODEL
+P3 -->|uses| MODEL
 
-%% ─────────────────────────────────────────────────────────────
-%% L6: Guardrails & Platform
-%% ─────────────────────────────────────────────────────────────
-subgraph KG["Kaggle Constraints"]
-direction TB
-  KG1["No Internet"]
-  KG2["≤ 9h GPU / 30 GB RAM"]
-  KG3["Inputs via /kaggle/input/<br/>(ariel-data-challenge-2025)"]
-  KG4["requirements-kaggle.txt only"]
-end
+%% Pipeline ↔ Artifacts (explicit)
+P0 -. logs/events .-> R3
+P1 -. logs/events .-> R3
+P2 -. metrics/plots .-> R3
+P3 -. diagnostics .-> R3
+P4 -. reports .-> R3
+P5 -. schema-validate .-> R3
 
-subgraph CI["CI/CD & DVC"]
-direction TB
-  CI1["Lint/Type (pre-commit)"]
-  CI2["Determinism Checks"]
-  CI3["SBOM & Pinning"]
-  CI4["dvc repro / cache"]
-end
-
-A -. run on Kaggle .- KG
-DVC -. caching & hashes .- CI4
-CI1 --> A6
-CI2 --> A6
-CI3 --> A5
-
-%% Styling (safe for GitHub)
-classDef dim fill:#eef,stroke:#446,stroke-width:1px,color:#111;
-classDef hot fill:#ffe,stroke:#884,stroke-width:1px,color:#111;
-classDef red fill:#fee,stroke:#a66,stroke-width:1px,color:#111;
-
-class DVC,CFG,ART,CI,KG dim
-class PHY hot
-class P6,A5 red
+%% Styles
+classDef repo fill:#f3f7ff,stroke:#5b7bd5,stroke-width:1px,color:#0b2b6b;
+classDef stage fill:#f8fff3,stroke:#60a654,stroke-width:1px,color:#1e4418;
+classDef model fill:#fff8f3,stroke:#d07a35,stroke-width:1px,color:#5e2e06;
+classDef data fill:#f6f6f6,stroke:#666,stroke-width:1px,color:#111;
