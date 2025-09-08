@@ -1,0 +1,26 @@
+# ======================================================================
+# SpectraMind V50 — Ablate ONLY the calibration prior
+# Usage:
+#   python -m spectramind train +defaults='[/training/ablation_calibration]'
+# ======================================================================
+
+loss:
+  composite:
+    weights:
+      gll:          ${oc.env:SM_ABL_GLL, 1.0}
+      smoothness:   ${oc.env:SM_ABL_SMOOTH, null}
+      nonneg:       ${oc.env:SM_ABL_NONNEG, null}
+      band_coherence:${oc.env:SM_ABL_BAND, null}
+      calibration:  ${oc.env:SM_ABL_CALIB, 0.0}    # ablate target prior
+
+trainer:
+  max_epochs: ${oc.env:SM_ABL_EPOCHS, 25}
+  val_check_interval: ${oc.env:SM_ABL_VAL_INTERVAL, 0.5}
+  log_every_n_steps: ${oc.env:SM_ABL_LOG_EVERY, 20}
+
+hydra:
+  run:
+    dir: outputs/train-ablation/calibration/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/train-ablation/calibration/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
