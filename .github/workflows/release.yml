@@ -3,13 +3,13 @@ name: release
 on:
   push:
     tags:
-      - 'v*'                # e.g., v1.2.0 or v1.2.0-rc.1
+      - 'v*'                # e.g. v1.2.0, v1.2.0-rc.1
   workflow_dispatch:
 
 permissions:
   contents: write           # create releases, upload assets
   packages: write           # push GHCR image
-  id-token: write           # OIDC (provenance, keyless signing)
+  id-token: write           # OIDC for keyless signing/attestations
   actions: read
   pages: write
 
@@ -19,7 +19,7 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
-  PYTHON_VERSION: '3.10'
+  PYTHON_VERSION: '3.11'
   KAGGLE_BUNDLE: artifacts/submission.zip
   VERSION_FILE: VERSION
 
@@ -38,44 +38,32 @@ jobs:
 
       - name: Extract tag
         id: tag
-        run: |
-          TAG="${GITHUB_REF##*/}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Read VERSION
         id: version
         run: |
-          if [ ! -f "${VERSION_FILE}" ]; then
-            echo "::error::Missing ${VERSION_FILE} file."
-            exit 1
-          fi
+          test -f "${VERSION_FILE}" || { echo "::error::Missing ${VERSION_FILE}"; exit 1; }
           VER=$(tr -d ' \n' < "${VERSION_FILE}")
-          if [ -z "$VER" ]; then
-            echo "::error::VERSION file is empty."
-            exit 1
-          fi
+          test -n "$VER" || { echo "::error::VERSION is empty"; exit 1; }
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "VERSION file => ${VER}"
+          echo "VERSION => ${VER}"
 
       - name: Validate tag == v$(cat VERSION)
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           VER="${{ steps.version.outputs.version }}"
-          if [ "${TAG}" != "v${VER}" ]; then
-            echo "::error title=Tag/Version mismatch::Tag ${TAG} != v${VER} (from ${VERSION_FILE})"
-            exit 1
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error title=Tag/Version mismatch::Tag $TAG != v$VER"; exit 1;
           fi
-          echo "✅ Tag ${TAG} matches VERSION v${VER}"
+          echo "✅ Tag $TAG matches VERSION v$VER"
 
-      - name: Determine pre-release (semver with hyphen)
+      - name: Determine pre-release (hyphen means prerelease)
         id: prerelease
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]] && P=true || P=false
+          echo "prerelease=$P" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build & Package
@@ -83,6 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ver: ${{ steps.v.outputs.ver }}
+      image_ref: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v4
@@ -92,13 +81,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
 
       - name: Install build deps
         run: |
           python -m pip install --upgrade pip wheel
           pip install build twine
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt || true; fi
 
       - name: Build wheel + sdist
         run: |
@@ -108,40 +102,30 @@ jobs:
       - name: Generate SHA256SUMS for dist/*
         working-directory: dist
         run: |
-          shopt -s nullglob
           : > SHA256SUMS.txt
-          for f in *; do
-            sha256sum "$f" >> SHA256SUMS.txt
-          done
+          for f in *; do sha256sum "$f" >> SHA256SUMS.txt; done
           cat SHA256SUMS.txt
 
-      - name: Install cosign (for artifact signing)
+      - name: Install Cosign
         uses: sigstore/cosign-installer@v3.7.0
 
-      - name: Sigstore sign Python dist artifacts (keyless)
+      - name: Sign Python dist (keyless via OIDC)
         working-directory: dist
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
-          shopt -s nullglob
           for f in *; do
-            echo "Signing $f"
             cosign sign-blob --yes "$f" \
               --output-signature "$f.sig" \
               --output-certificate "$f.cert"
           done
-          ls -l
 
       - name: Make Kaggle submission bundle (if script exists)
         run: |
           if [ -x scripts/package_submission.sh ]; then
             mkdir -p artifacts
-            bash scripts/package_submission.sh || exit 1
-            if [ -f "${KAGGLE_BUNDLE}" ]; then
-              echo "Kaggle bundle created: ${KAGGLE_BUNDLE}"
-            else
-              echo "::warning title=Kaggle bundle missing::Expected ${KAGGLE_BUNDLE}"
-            fi
+            bash scripts/package_submission.sh
+            test -f "${KAGGLE_BUNDLE}" || echo "::warning::Kaggle bundle expected at ${KAGGLE_BUNDLE} not found"
           else
             echo "No scripts/package_submission.sh; skipping Kaggle bundle."
           fi
@@ -160,15 +144,6 @@ jobs:
         with:
           name: kaggle-submission
           path: ${{ env.KAGGLE_BUNDLE }}
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload CHANGELOG (if present)
-        uses: actions/upload-artifact@v4
-        with:
-          name: changelog
-          path: CHANGELOG.md
-          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload diagnostics & metrics (if present)
@@ -182,85 +157,104 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Log in to GHCR (Docker)
+      # ---------- Container build & push (GHCR) ----------
+      - name: Docker login (GHCR)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version
-        id: v
-        run: |
-          VER=$(tr -d ' \n' < "${VERSION_FILE}")
-          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.validate.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Set up Docker Buildx
+      - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & Push Docker image (with SBOM + provenance)
+      - name: Build & Push (with SBOM + provenance)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-            ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}
-          labels: |
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
-            org.opencontainers.image.version=${{ steps.v.outputs.ver }}
-            org.opencontainers.image.revision=${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           sbom: true
-          provenance: true
+          provenance: mode=max
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Install cosign (for OCI)
+      - name: Extract version
+        id: v
+        run: echo "ver=$(tr -d ' \n' < "${VERSION_FILE}")" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign (for OCI)
         uses: sigstore/cosign-installer@v3.7.0
 
-      - name: Cosign sign OCI images (keyless OIDC by default)
+      - name: Sign images (keyless by default)
         if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign sign --yes ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}
-          cosign sign --yes ${{ env.IMAGE_NAME }}:latest
+          cosign sign --yes "${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}"
+          cosign sign --yes "${{ env.IMAGE_NAME }}:latest"
 
-      - name: Cosign sign OCI images (key-based)
+      - name: Sign images (key-based)
         if: ${{ secrets.COSIGN_PRIVATE_KEY }}
         env:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
-          cosign sign --key cosign.key ${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}
-          cosign sign --key cosign.key ${{ env.IMAGE_NAME }}:latest
+          printf '%s' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}"
+          cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:latest"
+
+      - name: Attest build provenance (GitHub attestation)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.meta.outputs.digest }}
+          push-to-registry: true
 
   sbom:
-    name: Generate SBOMs (CycloneDX)
+    name: Generate SBOMs
     needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Repository SBOM (Anchore → CycloneDX JSON)
+      - name: Repo SBOM (CycloneDX JSON)
         uses: anchore/sbom-action@v0.16.0
         with:
           path: .
           output-file: sbom-repo.json
           format: cyclonedx-json
 
-      - name: Python deps SBOM (CycloneDX)
+      - name: Python deps SBOM
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: pip
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
       - run: |
           pip install cyclonedx-bom
           cyclonedx-bom -o sbom-python.json || true
-          ls -l sbom-*.json || true
+
+      - name: Image SBOM (Syft)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v1.16.0
+          syft "${{ env.IMAGE_NAME }}:${{ needs.build.outputs.ver }}" -o cyclonedx-json > sbom-image.json || true
 
       - name: Upload SBOMs
         uses: actions/upload-artifact@v4
@@ -269,7 +263,7 @@ jobs:
           path: |
             sbom-repo.json
             sbom-python.json
-          if-no-files-found: warn
+            sbom-image.json
           retention-days: 30
 
   release:
@@ -289,13 +283,11 @@ jobs:
         run: |
           mkdir -p assets
           shopt -s globstar nullglob
-          for f in release-assets/**/*; do
-            [ -f "$f" ] && cp -v "$f" assets/
-          done
+          for f in release-assets/**/*; do [ -f "$f" ] && cp -v "$f" assets/; done
           echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
           ls -l assets || true
 
-      - name: Create Release (auto release notes)
+      - name: Create Release (auto notes)
         id: gh_release
         uses: softprops/action-gh-release@v2
         with:
@@ -304,8 +296,7 @@ jobs:
           draft: false
           prerelease: ${{ needs.validate.outputs.prerelease }}
           generate_release_notes: true
-          files: |
-            assets/**
+          files: assets/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -324,23 +315,21 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: pip
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
 
       - name: Install mkdocs + plugins
         run: |
           pip install mkdocs mkdocs-material mkdocs-git-revision-date-localized-plugin || true
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt || true; fi
 
       - name: Build docs
-        working-directory: docs
         run: mkdocs build --strict
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: docs/site
+          publish_dir: site
           publish_branch: gh-pages
           keep_files: false
           commit_message: "docs: publish ${{ needs.validate.outputs.tag }}"
@@ -353,9 +342,7 @@ jobs:
     steps:
       - name: Download python dist
         uses: actions/download-artifact@v4
-        with:
-          name: python-dist
-          path: dist
+        with: { name: python-dist, path: dist }
 
       - name: Verify checksums
         working-directory: dist
@@ -377,9 +364,7 @@ jobs:
     steps:
       - name: Download python dist
         uses: actions/download-artifact@v4
-        with:
-          name: python-dist
-          path: dist
+        with: { name: python-dist, path: dist }
 
       - name: Verify checksums
         working-directory: dist
