@@ -1,15 +1,15 @@
 # ==============================================================================
-# dvc.yaml — SpectraMind V50
+# dvc.yaml — SpectraMind V50 (Reproducible Pipeline)
 # ------------------------------------------------------------------------------
-# Reproducible pipeline:
+# Stages:
 #   calibrate → train → predict → (diagnose) → (submit)
 #
-# Tips
-# - Put Hydra selectors in params.yaml (env/data/calib/model/training/loss/logger)
-#   so `dvc exp show` / `dvc exp diff` track config changes cleanly.
-# - `data/processed` is `persist: true` so downstream stages reuse it across runs.
-# - Uncomment dvclive in `train` if you want live learning curves in CI.
-# - Torch stack/bootstrap stays outside DVC (e.g., bin/kaggle-boot.sh).
+# Conventions
+# - All Hydra selectors live in params.yaml under `hydra.*`.
+# - Use `dvc exp run -S hydra.env=kaggle -S hydra.model=v50 ...` for quick forks.
+# - Calibrated tensors (`data/processed`) are `persist: true` to enable reuse.
+# - Metrics are lightweight JSON; heavy logs go to outs_no_cache.
+# - dvclive block is included (commented). Enable when you want live curves.
 # ==============================================================================
 
 stages:
@@ -22,16 +22,16 @@ stages:
       data=${params.hydra.data}
       calib=${params.hydra.calib}
     deps:
-      - configs/              # hydra configs (data/calib/env/…)
-      - src/                  # calibration code
-      - data/raw              # raw telescope inputs (DVC-tracked)
+      - configs/                # Hydra configs
+      - src/                    # calibration code
+      - data/raw                # raw telescope inputs (DVC-tracked)
     params:
       - hydra.config_name_calibrate
       - hydra.env
       - hydra.data
       - hydra.calib
     outs:
-      - path: data/processed  # calibrated + preprocessed tensors
+      - path: data/processed    # calibrated + preprocessed tensors
         persist: true
 
   train:
@@ -57,25 +57,23 @@ stages:
       - hydra.training
       - hydra.loss
       - hydra.logger
-    # Mark as checkpointed so `dvc exp run` can resume/branch mid-training.
     outs:
-      - path: artifacts/ckpt.pt
+      - path: artifacts/ckpt.pt         # checkpointed for `dvc exp run --rev` resumes
         checkpoint: true
-      - path: artifacts/metrics.json
+      - path: artifacts/metrics.json    # final metrics snapshot for dashboards
         cache: true
     outs_no_cache:
-      - logs/train/           # structured run logs / JSONL events (no cache)
+      - logs/train/                     # structured JSONL logs (not cached)
     metrics:
       - artifacts/metrics.json:
           cache: false
           type: json
           xpath: .
-    # If you log with dvclive, enable this block for live curves:
+    # Enable dvclive for live curves in CI (optional):
     # live:
     #   path: dvclive
     #   summary: true
     #   html: true
-    #   # DVC will auto-publish loss/metrics charts from dvclive/*.tsv
 
   predict:
     desc: "Run inference on processed data → predictions CSV"
@@ -119,8 +117,7 @@ stages:
       - path: artifacts/diagnostics/plots/
         cache: true
     plots:
-      # Visual assets (PNG/SVG/TSV) rendered by the diagnostics step
-      - artifacts/diagnostics/plots/
+      - artifacts/diagnostics/plots/     # images/tsv rendered by diagnostics
     metrics:
       - artifacts/diagnostics/summary.json:
           cache: false
@@ -128,7 +125,7 @@ stages:
           xpath: .
 
   submit:
-    desc: "Package submission artifacts"
+    desc: "Package submission artifacts (CSV and/or ZIP)"
     cmd: >
       spectramind submit
       --config-name ${params.hydra.config_name_submit}
@@ -141,6 +138,6 @@ stages:
     outs:
       - path: outputs/submission.csv
         cache: true
-      # If you also zip for Kaggle/CI, add:
+      # Optionally produce a zip alongside the CSV:
       # - path: outputs/submission.zip
       #   cache: true
