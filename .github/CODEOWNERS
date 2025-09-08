@@ -1,39 +1,26 @@
 # .github/CODEOWNERS
-# SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge
-# Defines default reviewers for paths. CODEOWNERS is enforced via branch protection.
+# Failsafe default: route everything to a valid user until teams are ready.
+# Replace @your-username with a real GitHub user who has write access.
 
-# Global default
-*            @spectramind/core
+*                                   @your-username
 
-# ───── Pipeline stages ────────────────────────────────
-src/spectramind/pipeline/    @spectramind/ml @spectramind/infra
-
-# ───── Models (FGS1, AIRS, Fusion, Decoder) ───────────
-src/spectramind/models/      @spectramind/ml
-
-# ───── Losses (smoothness, calibration, etc.) ─────────
-src/spectramind/losses/      @spectramind/ml
-
-# ───── Configurations (Hydra YAMLs) ───────────────────
-configs/                     @spectramind/ml @spectramind/dataops
-
-# ───── Data & Calibration ─────────────────────────────
-src/spectramind/data/        @spectramind/dataops
-configs/calib/               @spectramind/dataops
-
-# ───── CLI & Utilities ────────────────────────────────
-src/spectramind/cli.py       @spectramind/infra
-src/spectramind/utils/       @spectramind/infra
-
-# ───── CI/CD Workflows & Security ─────────────────────
-.github/workflows/           @spectramind/infra @spectramind/secops
-.github/dependabot.yml       @spectramind/secops
-.github/CODEOWNERS           @spectramind/secops
-
-# ───── Documentation & Diagrams ──────────────────────
-docs/                        @spectramind/docs
-assets/diagrams/             @spectramind/docs
-assets/logos/                @spectramind/docs
-
-# ───── Tests ─────────────────────────────────────────
-tests/                       @spectramind/ml @spectramind/infra
+# ─────────────────────────────────────────────────────────────────────────────
+# When you're ready to use teams, replace @your-username with org-scoped team
+# slugs like @your-org/ml-team (the *team slug*, as seen in the URL), and make
+# sure those teams have at least write access to this repo.
+#
+# Example structure (uncomment after your teams exist and have access):
+#
+# src/spectramind/pipeline/         @your-org/ml-team @your-org/infra-team
+# src/spectramind/models/           @your-org/ml-team
+# src/spectramind/losses/           @your-org/ml-team
+# configs/                          @your-org/ml-team @your-org/dataops-team
+# src/spectramind/data/             @your-org/dataops-team
+# configs/calib/                    @your-org/dataops-team
+# src/spectramind/cli.py            @your-org/infra-team
+# src/spectramind/utils/            @your-org/infra-team
+# .github/workflows/                @your-org/infra-team @your-org/secops-team
+# docs/                             @your-org/docs-team
+# assets/diagrams/                  @your-org/docs-team
+# tests/                            @your-org/ml-team @your-org/infra-team
+# ─────────────────────────────────────────────────────────────────────────────
