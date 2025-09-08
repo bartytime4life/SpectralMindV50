@@ -27,7 +27,7 @@ packaging==24.1
 numpy==1.26.4
 scipy==1.11.4
 pandas==2.2.2
-polars==0.20.31        # opt-in, pure-Rust wheels; fast tabular ops
+polars==1.33.0        # opt-in, pure-Rust wheels; fast tabular ops
 
 # --- Parquet / Arrow I/O ---
 pyarrow==16.1.0        # parquet/arrow; matches pandas engine expectations
