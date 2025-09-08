@@ -1,0 +1,13 @@
+# configs/training/logger.yaml
+# SpectraMind V50 — Logger selector (Hydra-friendly indirection)
+
+# Pick ONE in defaults when composing this file or override at CLI.
+# Example:
+#   defaults:
+#     - logger: jsonl
+
+defaults:
+  - /logger: jsonl
+
+# Optional shim if your training loop expects a concrete Lightning logger object.
+# If you use native file logging in callbacks, you can omit this entirely.
