@@ -1,20 +1,65 @@
-# scripts/make_tiny_fgs1.py
-"""
-Generate a tiny synthetic FGS1 time-series and save as .npy
-for use in tests/data/tiny/fgs1.npy.
-"""
+#!/usr/bin/env python3
+# =============================================================================
+# SpectraMind V50 — Tiny FGS1 Test Spectrum Generator
+# -----------------------------------------------------------------------------
+# Generates a deterministic synthetic FGS1 "white-light" transit depth for use
+# alongside the tiny AIRS test spectrum. FGS1 is the broadband photometric
+# channel (1 value) that carries ~58× metric weight in the Ariel Challenge.
+#
+# Characteristics:
+#   • Scalar value (stored as shape (1,))
+#   • Mean depth ≈ 0.01 (1% transit depth)
+#   • Small Gaussian noise for realism
+#   • Clipped to [0, 1] for physical plausibility
+#
+# Output:
+#   tests/data/tiny/fgs1.npy  (NumPy float32 array of shape (1,))
+#
+# Usage:
+#   python scripts/gen_tiny_fgs1.py
+# =============================================================================
 
+from __future__ import annotations
 import numpy as np
 from pathlib import Path
+import sys
 
-def tiny_fgs1(T: int = 64, seed: int = 0) -> np.ndarray:
-    """Synthetic FGS1: sinusoid + small Gaussian noise."""
-    rng = np.random.RandomState(seed)
-    return np.sin(np.linspace(0, 2*np.pi, T)) + 0.01 * rng.randn(T)
+# ----------------------------------------------------------------------------- #
+# Config
+# ----------------------------------------------------------------------------- #
+SEED = 42
+OUT_PATH = Path("tests/data/tiny/fgs1.npy")
+
+# ----------------------------------------------------------------------------- #
+# Main
+# ----------------------------------------------------------------------------- #
+def main() -> None:
+    rng = np.random.default_rng(seed=SEED)
+
+    # Baseline ~1% depth
+    baseline = 0.01
+
+    # Add small Gaussian noise
+    noise = 1e-4 * rng.standard_normal(size=1).astype(np.float32)
+
+    value = np.array([baseline + noise[0]], dtype=np.float32)
+
+    # Clip to [0, 1]
+    value = np.clip(value, 0.0, 1.0)
+
+    # Save
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    np.save(OUT_PATH, value)
+
+    # Validate
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(value)), "Non-finite values in FGS1"
+
+    print(f"[OK] Saved FGS1 tiny test value → {OUT_PATH.resolve()} value={value[0]:.6f}")
 
 if __name__ == "__main__":
-    outdir = Path("tests/data/tiny")
-    outdir.mkdir(parents=True, exist_ok=True)
-    arr = tiny_fgs1()
-    np.save(outdir / "fgs1.npy", arr)
-    print(f"[OK] Saved {arr.shape} array to {outdir/'fgs1.npy'}")
+    try:
+        main()
+    except Exception as e:
+        sys.stderr.write(f"[ERR] Failed to generate tiny FGS1 value: {e}\n")
+        sys.exit(1)
