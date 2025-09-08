@@ -1,0 +1,18 @@
+# configs/training/ablation.yaml
+# SpectraMind V50 — Loss ablation profile
+# Compose on top of train.yaml to zero specific terms:
+#   python -m spectramind train +defaults='[/training/ablation]'
+
+loss:
+  composite:
+    weights:
+      gll: 1.0           # keep main task on
+      smoothness: 0.0    # ⟵ ablate
+      nonneg: 0.0        # ⟵ ablate
+      band_coherence: 0.0
+      calibration: 0.0
+
+# Optional: make runs shorter when ablating
+trainer:
+  max_epochs: 25
+  val_check_interval: 0.5
