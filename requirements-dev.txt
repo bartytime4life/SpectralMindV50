@@ -40,7 +40,7 @@ pandas==2.2.2
 polars==1.33.0
 
 # --- CLI / Rich Output ------------------------------------------------
-rich==13.7.1               # colored logs, improved CLI UX
+rich==14.1.0               # colored logs, improved CLI UX
 
 # --- Docs / Diagrams --------------------------------------------------
 mkdocs==1.6.0
