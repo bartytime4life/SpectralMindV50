@@ -1,13 +1,12 @@
-# tests/unit/test_seed.py
 from __future__ import annotations
 
 import os
 import random
-from typing import List, Tuple
+from contextlib import contextmanager
+from typing import Any, List, Tuple
 
 import numpy as np
 import pytest
-
 
 # ----------------------------------------------------------------------------- #
 # Optional torch support (CI/Kaggle may be CPU-only)
@@ -62,7 +61,6 @@ def _set_all_seeds(seed: int) -> None:
         if _cuda_available():  # pragma: no cover (often CPU-only)
             torch.cuda.manual_seed_all(seed)
 
-        # Prefer strict determinism where available; some ops may still be nondet
         if hasattr(torch, "use_deterministic_algorithms"):
             # avoid throwing on nondeterministic ops during tests; we only check flag below
             torch.use_deterministic_algorithms(True, warn_only=True)  # type: ignore[arg-type]
@@ -72,9 +70,7 @@ def _set_all_seeds(seed: int) -> None:
 
 
 def _np_state_tuple():
-    """
-    Capture numpy RandomState state (legacy global) for equality testing.
-    """
+    """Capture numpy RandomState state (legacy global) for equality testing."""
     return tuple(np.random.get_state())
 
 
@@ -91,6 +87,32 @@ def _torch_state_cuda_all():
     return tuple(states)
 
 
+@contextmanager
+def _rng_state_guard():
+    """
+    Snapshot global RNG states for Python/NumPy/Torch(+CUDA); restore on exit.
+    Ensures helpers/ops inside the guard do not leak RNG mutation.
+    """
+    py_state = random.getstate()
+    np_state = _np_state_tuple()
+    if _HAS_TORCH:
+        torch_cpu_state = _torch_state_cpu()
+        torch_cuda_states = _torch_state_cuda_all()
+    else:
+        torch_cpu_state = None
+        torch_cuda_states = None
+    try:
+        yield
+    finally:
+        random.setstate(py_state)
+        np.random.set_state(np_state)
+        if _HAS_TORCH:
+            torch.random.set_rng_state(torch_cpu_state)  # type: ignore[arg-type]
+            if _cuda_available():  # pragma: no cover
+                for i, s in enumerate(torch_cuda_states or []):
+                    torch.cuda.set_rng_state(s, device=i)
+
+
 # ----------------------------------------------------------------------------- #
 # Tests
 # ----------------------------------------------------------------------------- #
@@ -99,10 +121,8 @@ def test_reproducible_seeds_across_libraries(rng_seed: int) -> None:
     Given the per-test seed (rng_seed) from conftest, draws should repeat exactly
     when we reseed to the same value and should differ for a different seed.
     """
-    # First draw sequence (conftest already seeded globals)
     a_py, a_np, a_torch = _sample_triplet()
 
-    # Re-seed with the same seed → must match exactly
     _set_all_seeds(rng_seed)
     b_py, b_np, b_torch = _sample_triplet()
 
@@ -111,12 +131,10 @@ def test_reproducible_seeds_across_libraries(rng_seed: int) -> None:
     if _HAS_TORCH:
         assert a_torch == b_torch
 
-    # Re-seed with a different seed → should differ with very high probability
     other = rng_seed + 1 if rng_seed != 2**31 - 1 else rng_seed - 1
     _set_all_seeds(other)
     c_py, c_np, c_torch = _sample_triplet()
 
-    # Not strictly guaranteed, but in practice these will differ immediately
     assert (
         a_py != c_py
         or not np.allclose(a_np, c_np)
@@ -125,28 +143,18 @@ def test_reproducible_seeds_across_libraries(rng_seed: int) -> None:
 
 
 def test_pythonhashseed_env_matches_fixture(rng_seed: int) -> None:
-    """
-    conftest sets PYTHONHASHSEED to the per-test seed for traceability.
-    (Changing it at runtime doesn't affect hashing behavior, so we only
-    assert consistency of the environment mirror.)
-    """
+    """conftest mirrors PYTHONHASHSEED to the per-test seed for traceability."""
     assert os.environ.get("PYTHONHASHSEED") == str(rng_seed)
 
 
 def test_numpy_state_equality_after_reseed(rng_seed: int) -> None:
-    """
-    Assert NumPy RNG state exactly matches after reseed to the same seed
-    and differs for a different seed (very high probability).
-    """
-    # State now (already seeded)
+    """NumPy RNG state exactly matches after reseed to same seed; differs for a different seed."""
     state_a = _np_state_tuple()
     _ = np.random.random()  # mutate state
-    # Reseed to fixture seed, state should reset
     np.random.seed(rng_seed)
     state_b = _np_state_tuple()
     assert state_a == state_b
 
-    # Reseed to a different seed → likely different state
     other = rng_seed + 12345
     np.random.seed(other)
     state_c = _np_state_tuple()
@@ -155,9 +163,7 @@ def test_numpy_state_equality_after_reseed(rng_seed: int) -> None:
 
 @pytest.mark.skipif(not _HAS_TORCH, reason="torch not installed")
 def test_torch_cpu_state_equality_after_reseed(rng_seed: int) -> None:
-    """
-    Torch CPU RNG states repeat exactly after reseed to same seed and differ on other seed.
-    """
+    """Torch CPU RNG states repeat after reseed to same seed and differ on other seed."""
     state_a = _torch_state_cpu()
     _ = torch.rand(3)  # mutate
     torch.manual_seed(rng_seed)
@@ -172,11 +178,8 @@ def test_torch_cpu_state_equality_after_reseed(rng_seed: int) -> None:
 
 @pytest.mark.skipif(not _cuda_available(), reason="CUDA not available")
 def test_torch_cuda_states_equality_after_reseed(rng_seed: int) -> None:
-    """
-    Optional CUDA RNG state check across all visible devices.
-    """
+    """Optional CUDA RNG state check across all visible devices."""
     states_a = _torch_state_cuda_all()
-    # mutate on device 0 if exists
     if torch.cuda.device_count() > 0:
         with torch.cuda.device(0):
             _ = torch.cuda.FloatTensor(4).uniform_()
@@ -193,24 +196,18 @@ def test_torch_cuda_states_equality_after_reseed(rng_seed: int) -> None:
 def test_torch_determinism_flags_enabled() -> None:
     """
     Validate that determinism knobs are ON when available.
-    We *observe flags* rather than enforce specific backend configs to avoid flakiness.
+    Observe flags rather than enforce backend configs to avoid flakiness.
     """
-    # torch.use_deterministic_algorithms → check readback API if present
     if hasattr(torch, "are_deterministic_algorithms_enabled"):
         assert torch.are_deterministic_algorithms_enabled()  # type: ignore[attr-defined]
 
-    # cudnn deterministic checks (guarded and non-fatal if unavailable)
     if hasattr(torch.backends, "cudnn"):
         cudnn = torch.backends.cudnn  # type: ignore[attr-defined]
-        # cudnn may be unavailable on CPU wheels; only assert attributes exist
         if hasattr(cudnn, "deterministic"):
             assert isinstance(cudnn.deterministic, bool)
         if hasattr(cudnn, "benchmark"):
-            # We *prefer* benchmark False for reproducibility, but don't hard fail.
-            # If your bootstrap enforces it, flip to assert not cudnn.benchmark.
             assert isinstance(cudnn.benchmark, bool)
 
-    # Environment hint for cuBLAS: not required on CPU wheels, but if set, ensure valid form
     cfg = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
     if cfg is not None:
         assert cfg in {":16:8", ":4096:8"}, "Unexpected CUBLAS_WORKSPACE_CONFIG value"
@@ -226,7 +223,6 @@ def test_no_net_fixture_blocks_remote_connect(no_net) -> None:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         with pytest.raises(RuntimeError) as exc:
-            # Use a well-known public DNS IP; the call is intercepted, not executed
             s.connect(("8.8.8.8", 53))
         msg = str(exc.value).lower()
         assert "network access blocked" in msg
@@ -235,10 +231,7 @@ def test_no_net_fixture_blocks_remote_connect(no_net) -> None:
 
 
 def test_reseeding_order_is_idempotent(rng_seed: int) -> None:
-    """
-    Make sure reseeding order across libs doesn't affect final joint reproducibility.
-    """
-    # Seed in order A
+    """Order of reseeding across libs must not affect final draws."""
     random.seed(rng_seed)
     np.random.seed(rng_seed)
     if _HAS_TORCH:
@@ -247,12 +240,10 @@ def test_reseeding_order_is_idempotent(rng_seed: int) -> None:
             torch.cuda.manual_seed_all(rng_seed)
     a = _sample_triplet()
 
-    # Perturb everything
     _ = _sample_triplet()
     if _HAS_TORCH:
         _ = torch.randn(5)
 
-    # Seed in order B (reverse)
     if _HAS_TORCH:
         if _cuda_available():  # pragma: no cover
             torch.cuda.manual_seed_all(rng_seed)
@@ -261,7 +252,76 @@ def test_reseeding_order_is_idempotent(rng_seed: int) -> None:
     random.seed(rng_seed)
     b = _sample_triplet()
 
-    assert a[0] == b[0]  # python
+    assert a[0] == b[0]
     assert np.allclose(a[1], b[1])
     if _HAS_TORCH:
         assert a[2] == b[2]
+
+
+def test_set_all_seeds_is_idempotent(rng_seed: int) -> None:
+    """Calling _set_all_seeds(seed) multiple times should not drift RNG states."""
+    _set_all_seeds(rng_seed)
+    py_a, np_a, torch_a = _sample_triplet()
+
+    _set_all_seeds(rng_seed)
+    py_b, np_b, torch_b = _sample_triplet()
+
+    assert py_a == py_b
+    assert np.allclose(np_a, np_b)
+    if _HAS_TORCH:
+        assert torch_a == torch_b
+
+
+def test_rng_state_guard_restores_states(rng_seed: int) -> None:
+    """The state guard must fully restore Python / NumPy / Torch states on exit."""
+    _set_all_seeds(rng_seed)
+
+    py_a = random.getstate()
+    np_a = _np_state_tuple()
+    tc_a = _torch_state_cpu() if _HAS_TORCH else None
+
+    with _rng_state_guard():
+        _ = random.random()
+        _ = np.random.rand()
+        if _HAS_TORCH:
+            _ = torch.rand(2)
+
+    assert random.getstate() == py_a
+    assert _np_state_tuple() == np_a
+    if _HAS_TORCH:
+        assert torch.equal(_torch_state_cpu(), tc_a)
+
+
+def test_numpy_generator_is_independent_of_global_seed(rng_seed: int) -> None:
+    """
+    NumPy's new Generator objects are independent of np.random.* singleton seeding.
+    Reminder that user code must seed Generators explicitly.
+    """
+    _set_all_seeds(rng_seed)
+    g1 = np.random.default_rng(12345)
+    g2 = np.random.default_rng(12345)
+    v1 = g1.random(4)
+    v2 = g2.random(4)
+    assert np.allclose(v1, v2)
+
+    v_glob1 = np.random.random(4)
+    _set_all_seeds(rng_seed)
+    v_glob2 = np.random.random(4)
+    assert np.allclose(v_glob1, v_glob2)
+
+
+def test_sampling_under_guard_has_no_leakage(rng_seed: int) -> None:
+    """Helpers can be used in a guard to avoid changing global RNG state."""
+    _set_all_seeds(rng_seed)
+
+    py0 = random.getstate()
+    np0 = _np_state_tuple()
+    tc0 = _torch_state_cpu() if _HAS_TORCH else None
+
+    with _rng_state_guard():
+        _ = _sample_triplet(n=10)
+
+    assert random.getstate() == py0
+    assert _np_state_tuple() == np0
+    if _HAS_TORCH:
+        assert torch.equal(_torch_state_cpu(), tc0)
