@@ -1,13 +1,96 @@
 # configs/training/logger.yaml
+# ======================================================================
 # SpectraMind V50 — Logger selector (Hydra-friendly indirection)
+# ======================================================================
+# Usage (examples):
+#   # default (JSONL to artifacts/logs)
+#   spectramind train
+#
+#   # pick TensorBoard (native PL)
+#   spectramind train +/logger@training.logger.choice=tensorboard
+#
+#   # pick Weights & Biases (offline-ok if WANDB_MODE=dryrun)
+#   spectramind train +/logger@training.logger.choice=wandb
+#
+#   # disable external loggers, keep only file callbacks
+#   spectramind train training.logger.enabled=false
+# ======================================================================
 
-# Pick ONE in defaults when composing this file or override at CLI.
-# Example:
-#   defaults:
-#     - logger: jsonl
-
+# ----------------------------------------------------------------------
+# Select ONE backend from the /logger config group
+# (expects files like configs/logger/jsonl.yaml, tensorboard.yaml, wandb.yaml, etc.)
+# ----------------------------------------------------------------------
 defaults:
-  - /logger: jsonl
+  - /logger@choice: jsonl
 
-# Optional shim if your training loop expects a concrete Lightning logger object.
-# If you use native file logging in callbacks, you can omit this entirely.
+# ----------------------------------------------------------------------
+# Normalized interface the trainer can rely on (backend-agnostic)
+# ----------------------------------------------------------------------
+enabled: true
+dir: ${paths.logs}                         # canonical logs root
+experiment_name: ${experiment.name}
+tags: ${experiment.tags}
+
+# Flush & cadence knobs applied where supported
+flush_every_n_steps: 50
+log_every_n_steps: 25
+log_graph: false                           # PL: log model graph if supported
+
+# Respect CI/Kaggle safety; lets code gate network use
+offline: ${oc.env:SM_LOG_OFFLINE, true}    # true on CI/Kaggle by default
+uuid_suffix: ${oc.env:SM_RUN_SUFFIX, ""}   # append to run name if provided
+
+# ----------------------------------------------------------------------
+# Lightning logger construction hints
+# (your factory can read these to build a concrete logger object)
+# ----------------------------------------------------------------------
+pl:
+  use_native: true                         # return a real PL logger when possible
+  # If false, rely purely on JSONL/CSV callbacks.
+
+# ----------------------------------------------------------------------
+# Derived, backend-specific settings passed through from the chosen logger
+# `choice` is the resolved /logger config; expose its keys under a stable path.
+# ----------------------------------------------------------------------
+backend:
+  name: ${choice.name}                     # e.g., "jsonl" | "tensorboard" | "wandb"
+  # All remaining backend-specific keys live under ${choice.*}
+  # Example fields that typical /logger configs provide:
+  #   - project (wandb/mlflow)
+  #   - run_name
+  #   - entity
+  #   - tracking_uri (mlflow)
+  #   - save_dir (tensorboard/jsonl/csv)
+  #   - mode/dryrun (wandb)
+  #   - filename/rotate (jsonl)
+  passthrough: ${choice}
+
+# ----------------------------------------------------------------------
+# Safety gates (the trainer or logger-factory can enforce)
+# ----------------------------------------------------------------------
+safety:
+  forbid_network_when_offline: true
+  create_dirs: true                         # ensure log dirs exist
+  rotate_large_files: true                  # if backend supports rotation
+  rotate_threshold_mb: 256
+
+# ----------------------------------------------------------------------
+# Notes
+# ----------------------------------------------------------------------
+# 1) Keep backend configs in configs/logger/*.yaml, e.g.:
+#      - jsonl.yaml      (writes JSONL under ${paths.logs})
+#      - csv.yaml        (writes CSV summaries)
+#      - tensorboard.yaml
+#      - wandb.yaml      (honor WANDB_MODE=dryrun when offline==true)
+#      - mlflow.yaml
+#      - none.yaml       (no-op)
+#
+# 2) Override the choice via:
+#      +/logger@training.logger.choice=tensorboard
+#    or set a different default by editing `defaults:` above.
+#
+# 3) Your factory can read:
+#      cfg.training.logger.enabled
+#      cfg.training.logger.pl.use_native
+#      cfg.training.logger.backend.name
+#      cfg.training.logger.backend.passthrough (raw backend-specific keys)
