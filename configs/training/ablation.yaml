@@ -1,18 +1,42 @@
-# configs/training/ablation.yaml
-# SpectraMind V50 — Loss ablation profile
-# Compose on top of train.yaml to zero specific terms:
+# ======================================================================
+# SpectraMind V50 — Loss Ablation Profile (Upgraded)
+# ======================================================================
+# Use this profile to zero out auxiliary physics-informed losses
+# and test the effect of ablating priors vs. full composite loss.
+#
+# Usage:
 #   python -m spectramind train +defaults='[/training/ablation]'
+#
+# Notes:
+# - Keeps Gaussian Log-Likelihood (GLL) term active for leaderboard metric.
+# - Auxiliary priors (smoothness, nonnegativity, band coherence,
+#   calibration) set to 0.0.
+# - Training shortened for faster turnaround.
+# ======================================================================
 
 loss:
   composite:
     weights:
-      gll: 1.0           # keep main task on
-      smoothness: 0.0    # ⟵ ablate
-      nonneg: 0.0        # ⟵ ablate
-      band_coherence: 0.0
-      calibration: 0.0
+      gll: ${oc.env:SM_ABL_GLL, 1.0}                 # main task
+      smoothness: ${oc.env:SM_ABL_SMOOTH, 0.0}       # ablated
+      nonneg: ${oc.env:SM_ABL_NONNEG, 0.0}           # ablated
+      band_coherence: ${oc.env:SM_ABL_BAND, 0.0}     # ablated
+      calibration: ${oc.env:SM_ABL_CALIB, 0.0}       # ablated
 
-# Optional: make runs shorter when ablating
+# ----------------------------------------------------------------------
+# Trainer overrides for ablation runs (shorter, faster, CI/Kaggle-safe)
+# ----------------------------------------------------------------------
 trainer:
-  max_epochs: 25
-  val_check_interval: 0.5
+  max_epochs: ${oc.env:SM_ABL_EPOCHS, 25}
+  val_check_interval: ${oc.env:SM_ABL_VAL_INTERVAL, 0.5}  # validate twice per epoch
+  log_every_n_steps: ${oc.env:SM_ABL_LOG_EVERY, 20}
+
+# ----------------------------------------------------------------------
+# Hydra bookkeeping for reproducibility
+# ----------------------------------------------------------------------
+hydra:
+  run:
+    dir: outputs/train-ablation/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/train-ablation/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
