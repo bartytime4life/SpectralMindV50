@@ -1,17 +1,18 @@
 # -----------------------------------------------------------------------------
 # SpectraMind V50 — Mission-grade Makefile (Upgraded)
 # -----------------------------------------------------------------------------
-# Shell safety
+# POSIX shell with strict mode
 SHELL := /usr/bin/env bash
 .ONESHELL:
 .SHELLFLAGS := -Eeuo pipefail -c
 
-# Colors (friendly in CI too)
+# Colors (safe in CI)
 C_RESET := \033[0m
 C_INFO  := \033[36m
 C_OK    := \033[32m
 C_WARN  := \033[33m
 C_ERR   := \033[31m
+notice  = @printf "$(C_INFO)» $(1)$(C_RESET)\n"
 
 # Python / package
 PKG        ?= spectramind
@@ -44,11 +45,11 @@ SUBMISSION_ZIP    ?= $(SUBMISSION_DIR)/submission.zip
 SUBMISSION_SCHEMA ?= schemas/submission.schema.json
 
 # Docker
-IMAGE_NAME        ?= spectramind-v50
-IMAGE_TAG         ?= local
-INSTALL_EXTRAS    ?= gpu,dev   # must match pyproject extras
-DOCKER_BUILDKIT   ?= 1
-GPU_FLAG          ?= --gpus all
+IMAGE_NAME     ?= spectramind-v50
+IMAGE_TAG      ?= local
+INSTALL_EXTRAS ?= gpu,dev   # must match pyproject extras
+DOCKER_BUILDKIT?= 1
+GPU_FLAG       ?= $(shell (command -v nvidia-smi >/dev/null 2>&1 && echo "--gpus all") || echo "")
 
 # Pipeline config (for scripts/run_pipeline.sh)
 CFG ?= train
@@ -64,14 +65,15 @@ export PYTHONHASHSEED = 0
 # -----------------------------------------------------------------------------
 # Phony targets
 # -----------------------------------------------------------------------------
-.PHONY: help env ensure-venv ensure-tools dev precommit lint format type test \
-        coverage check docs docs-serve \
+.PHONY: help about env ensure-venv ensure-tools ensure-precommit dev precommit \
+        lint fmt-check format type test test-fast coverage check \
+        docs docs-serve \
         train calibrate predict submit pipeline \
         dvc-setup dvc-repro dvc-push dvc-pull \
-        sbom pip-audit trivy scan licenses \
+        sbom pip-audit trivy scan licenses schema-check yaml-lint md-lint nb-clean \
         kaggle-package kaggle-verify kaggle-clean kaggle \
         docker-build docker-build-cpu docker-run docker-shell \
-        version tag push-tag release bump \
+        version tag push-tag release bump ensure-clean \
         diagrams diagrams-dark diagrams-clean clean distclean ci
 
 # -----------------------------------------------------------------------------
@@ -81,10 +83,16 @@ help:
 	@awk 'BEGIN{FS=":.*##"; printf "\n$(C_INFO)Available targets$(C_RESET)\n"} \
 	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  $(C_INFO)%-22s$(C_RESET) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
+about: ## Show environment diagnostics
+	$(call notice,Python: $$($(PY) --version 2>/dev/null || echo "missing"))
+	$(call notice,VENV:   $(VENV)  Exists? $$([ -d "$(VENV)" ] && echo yes || echo no))
+	$(call notice,GPU:    $$([ -n "$(GPU_FLAG)" ] && echo "NVIDIA detected" || echo "CPU only"))
+	$(call notice,Docker: $$((command -v docker >/dev/null 2>&1 && docker --version) || echo "missing"))
+
 # -----------------------------------------------------------------------------
 # Environment bootstrapping
 # -----------------------------------------------------------------------------
-env: ensure-venv ensure-tools ## Create .venv and install dev tools (fast if uv available)
+env: ensure-venv ensure-tools ensure-precommit ## Create .venv and install dev tools (fast if uv available)
 
 ensure-venv: ## Create virtualenv if missing
 	@if [ ! -d "$(VENV)" ]; then \
@@ -102,13 +110,15 @@ ensure-tools: ensure-venv ## Install dev dependencies and tools (prefers uv, fal
 	  $(PIP) install -e . -r requirements-dev.txt || true; \
 	fi
 	@if [ -f requirements-kaggle.txt ]; then $(PIP) install -r requirements-kaggle.txt || true; fi
-	@if command -v $(PRECOMMIT) >/dev/null 2>&1; then $(PRECOMMIT) install || true; fi
 	@echo "$(C_OK)Env ready$(C_RESET)"
+
+ensure-precommit: ## Install pre-commit hooks (if available)
+	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) install || true; fi
 
 dev: env precommit ## Setup local dev env & run pre-commit (once)
 
 precommit: ## Run pre-commit hooks on all files
-	@if command -v $(PRECOMMIT) >/dev/null 2>&1; then $(PRECOMMIT) run --all-files; else echo "::warning::pre-commit not installed"; fi
+	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) run --all-files; else echo "::warning::pre-commit not installed"; fi
 
 # -----------------------------------------------------------------------------
 # Code quality
@@ -118,8 +128,13 @@ lint: ## Lint (Ruff + TOML sort)
 	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff format --check src tests || true; fi
 	@if [ -x "$(VENV_BIN)/toml-sort" ]; then $(VENV_BIN)/toml-sort --check pyproject.toml || true; fi
 
-format: ## Auto-format code (Ruff)
-	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff format src tests; else echo "::warning::ruff not found"; fi
+fmt-check: ## Check formatting (Ruff + mdformat)
+	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff format --check src tests || true; fi
+	@if [ -x "$(VENV_BIN)/mdformat" ]; then $(VENV_BIN)/mdformat --check . || true; fi
+
+format: ## Auto-format code & docs (Ruff + mdformat)
+	@if [ -x "$(VENV_BIN)/ruff" ]; then $(VENV_BIN)/ruff format src tests; fi
+	@if [ -x "$(VENV_BIN)/mdformat" ]; then $(VENV_BIN)/mdformat . || true; fi
 
 type: ## Type-check (mypy)
 	@if [ -x "$(VENV_BIN)/mypy" ]; then $(VENV_BIN)/mypy src; else echo "::warning::mypy not found"; fi
@@ -127,13 +142,16 @@ type: ## Type-check (mypy)
 test: ## Run tests (pytest -q)
 	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest -q; else echo "::warning::pytest not found"; fi
 
+test-fast: ## Run fast tests (unit only, -k 'not integration')
+	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest -q -k "not integration"; else echo "::warning::pytest not found"; fi
+
 coverage: ## Run tests with coverage HTML report
 	@if [ -x "$(VENV_BIN)/pytest" ]; then \
 	  $(VENV_BIN)/pytest -q --cov=$(PKG) --cov-report=term --cov-report=html:$(ARTIFACTS_DIR)/coverage; \
 	  echo "::notice::Coverage HTML -> $(ARTIFACTS_DIR)/coverage/index.html"; \
 	else echo "::warning::pytest not found"; fi
 
-check: precommit lint type test ## Full local gate: pre-commit + lint + type + tests
+check: precommit lint fmt-check type test ## Full local gate
 
 # -----------------------------------------------------------------------------
 # Docs
@@ -220,6 +238,35 @@ pip-audit: ## Audit Python deps (pip-audit)
 	  echo "::warning::pip-audit not installed"; \
 	fi
 
+yaml-lint: ## Lint YAML (yamllint)
+	@if [ -x "$(VENV_BIN)/yamllint" ]; then $(VENV_BIN)/yamllint . || true; fi
+
+md-lint: ## Lint Markdown (mdformat check)
+	@if [ -x "$(VENV_BIN)/mdformat" ]; then $(VENV_BIN)/mdformat --check . || true; fi
+
+schema-check: ## Validate JSON files against schemas (check-jsonschema)
+	@if [ -x "$(VENV_BIN)/check-jsonschema" ]; then \
+	  find . -type f -name '*.json' -not -path './$(ARTIFACTS_DIR)/*' -print0 \
+	    | xargs -0 -I{} echo "{}" > /dev/null; \
+	  echo ">> Run schema checks where mappings exist (submission/events)"; \
+	  for j in $$(git ls-files '*.json'); do \
+	    case "$$j" in \
+	      *submission*.json|*events*.json) \
+	        echo "  - $$j"; \
+	        "$(VENV_BIN)/check-jsonschema" --schemafile "$(SUBMISSION_SCHEMA)" "$$j" || true ;; \
+	    esac; \
+	  done; \
+	else \
+	  echo "::warning::check-jsonschema not installed"; \
+	fi
+
+nb-clean: ## Strip outputs from notebooks (nbstripout)
+	@if [ -x "$(VENV_BIN)/nbstripout" ]; then \
+	  git ls-files '*.ipynb' | xargs -r $(VENV_BIN)/nbstripout; \
+	else echo "::warning::nbstripout not installed"; fi
+
+scan: pip-audit sbom yaml-lint md-lint schema-check licenses trivy ## Run all local security/quality scans
+
 trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	if command -v trivy >/dev/null 2>&1; then \
 	  trivy fs --exit-code 0 --severity HIGH,CRITICAL . || true; \
@@ -227,8 +274,6 @@ trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	else \
 	  echo "::warning::Trivy not installed; skipping scan."; \
 	fi
-
-scan: pip-audit sbom trivy licenses ## Run all local security scans
 
 # -----------------------------------------------------------------------------
 # Kaggle packaging (submission.zip -> artifacts/submission.zip)
@@ -348,6 +393,42 @@ define _ensure_clean
 	fi
 endef
 
+ensure-clean: ## Fail if git working tree is dirty
+	$(_ensure_clean)
+
+# Cross-platform TOML version set (no brittle sed; uses Python tomllib/tomli-w)
+define PY_SET_VERSION
+import sys, pathlib
+try:
+    import tomllib  # py311+
+except Exception:
+    import tomli as tomllib
+try:
+    import tomli_w as tomli_w
+except Exception as e:
+    print("tomli-w missing; please add to requirements-dev.txt", file=sys.stderr); sys.exit(1)
+pyproject = pathlib.Path("pyproject.toml")
+data = tomllib.loads(pyproject.read_text())
+data.setdefault("project", {})["version"] = sys.argv[1]
+pyproject.write_bytes(tomli_w.dumps(data))
+print(f"pyproject.toml version -> {sys.argv[1]}")
+endef
+export PY_SET_VERSION
+
+version: ## Sync VERSION -> pyproject.toml and commit (optionally tag if TAG=vX.Y.Z)
+	@set -Eeuo pipefail; \
+	ver="$$(tr -d '[:space:]' < $(VERSION_FILE))"; \
+	[ -n "$$ver" ] || { echo "❌ $(VERSION_FILE) empty"; exit 1; }; \
+	echo "🔄 Setting version to $$ver"; \
+	$(PYTHON) - <<'PY' "$$ver" \
+$(PY_SET_VERSION)
+PY
+	git add $(VERSION_FILE) pyproject.toml
+	git commit -m "chore: set version $$ver" || echo "ℹ️  No changes to commit"
+	if [ -n "$(TAG)" ]; then \
+	  if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo "⚠️  Tag $(TAG) exists"; else git tag -a "$(TAG)" -m "Release $(TAG)"; fi; \
+	fi
+
 define _read_version
 	@VER=$$(sed -e 's/[[:space:]]//g' $(VERSION_FILE)); \
 	echo "VERSION=$(VERSION_FILE) => $$VER"; \
@@ -360,24 +441,7 @@ define _read_version
 	fi
 endef
 
-version: ## Sync VERSION -> pyproject.toml and commit (optionally tag if TAG=vX.Y.Z)
-	@set -Eeuo pipefail; \
-	ver="$$(tr -d '[:space:]' < $(VERSION_FILE))"; \
-	[ -n "$$ver" ] || { echo "❌ $(VERSION_FILE) empty"; exit 1; }; \
-	echo "🔄 Setting version to $$ver"; \
-	pyproject="pyproject.toml"; \
-	[ -f "$$pyproject" ] || { echo "❌ $$pyproject missing"; exit 1; }; \
-	sed -i.bak -E "s/^(version\s*=\s*\").*(\")/\1$$ver\2/" "$$pyproject"; \
-	rm -f "$$pyproject.bak"; \
-	echo "✅ pyproject.toml version -> $$ver"; \
-	git add $(VERSION_FILE) "$$pyproject"; \
-	git commit -m "chore: set version $$ver" || echo "ℹ️  No changes to commit"; \
-	if [ -n "$(TAG)" ]; then \
-	  if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo "⚠️  Tag $(TAG) exists"; else git tag -a "$(TAG)" -m "Release $(TAG)"; fi; \
-	fi
-
-tag: ## Create annotated/signed tag (TAG=vX.Y.Z, GPG_SIGN=0|1)
-	$(_ensure_clean)
+tag: ensure-clean ## Create annotated/signed tag (TAG=vX.Y.Z, GPG_SIGN=0|1)
 	$(_read_version)
 	@if git rev-parse "$(TAG)" >/dev/null 2>&1; then echo >&2 "::error::Tag $(TAG) already exists."; exit 1; fi
 	@if [ "$(GPG_SIGN)" = "1" ]; then git tag -s "$(TAG)" -m "$(TAG_MSG)"; else git tag -a "$(TAG)" -m "$(TAG_MSG)"; fi
@@ -403,7 +467,9 @@ bump: ## Bump semver (BUMP=patch|minor|major) & update CHANGELOG header
 	esac; \
 	NEW_VER="$$MAJ.$$MIN.$$PAT"; \
 	echo "$$NEW_VER" > $(VERSION_FILE); \
-	if [ -f CHANGELOG.md ]; then sed -i.bak "1s/.*/## [$$NEW_VER] — $$(date +%Y-%m-%d)/" CHANGELOG.md; rm -f CHANGELOG.md.bak; fi; \
+	if [ -f CHANGELOG.md ]; then \
+	  awk 'BEGIN{printed=0} {if (!printed && $$0 ~ /^## \[Unreleased\]/){print $$0 RS RS "## [" ENVIRON["NEW_VER"] "] — " strftime("%Y-%m-%d") RS; printed=1} else print $$0 }' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md; \
+	fi; \
 	git add $(VERSION_FILE) CHANGELOG.md || true; \
 	git commit -m "chore(release): bump version to $$NEW_VER" || true; \
 	echo "::notice::Bumped to $$NEW_VER"
