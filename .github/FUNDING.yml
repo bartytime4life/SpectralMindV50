@@ -1,1 +1,17 @@
+# .github/FUNDING.yml
+# SpectraMind V50 — Funding configuration
+# Documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
 
+# GitHub Sponsors (replace with your username or org name)
+github: andy-barta   # or your-org-name
+
+# Other platforms (uncomment and fill in as needed)
+patreon: your-patreon-id
+open_collective: spectramind-v50
+ko_fi: your-kofi-username
+tidelift: ""           # e.g., pypi/spectramind
+community_bridge: ""   # e.g., project-name
+liberapay: ""          # e.g., your-liberapay-id
+issuehunt: ""          # e.g., your-issuehunt-id
+otechie: ""            # deprecated, usually left empty
+custom: ["https://buymeacoffee.com/andybarta", "https://paypal.me/andybarta"]
