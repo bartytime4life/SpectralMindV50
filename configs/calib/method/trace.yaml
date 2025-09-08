@@ -1,24 +1,57 @@
-# configs/calib/method/trace.yaml
 # ======================================================================
-# Trace / Wavelength Solution Calibration — SpectraMind V50
-# ======================================================================
-# Derives the wavelength solution for AIRS spectrometer channels.
-# This step maps detector pixels to physical wavelength bins using
-# instrument-provided trace functions and reference metadata.
+# SpectraMind V50 — Trace / Wavelength Solution Calibration
+# ----------------------------------------------------------------------
+# Purpose:
+#   Derives the wavelength solution for AIRS spectrometer channels by
+#   mapping detector pixels to physical wavelength bins using instrument
+#   trace functions and reference metadata (axis_info.parquet, etc.).
+#
+# Context:
+#   • Follows ESA Ariel pipeline convention: raw ADC → calibrated → trace.
+#   • Inputs: detector pixel coordinates, ADC/axis metadata, optional priors.
+#   • Outputs: wavelength grid per detector channel (monotonic, smoothed).
 #
 # Usage:
-#   python -m spectramind.calibrate +calib.method=trace
+#   spectramind calibrate +calib.method=trace
 #
-# Keys:
-#   _target_ : Python path to the trace calibration implementation
-#   order    : polynomial/spline order for wavelength fit
-#   smooth   : apply optional smoothing to the wavelength solution
-#   validate : enable wavelength-grid sanity checks
+# References:
+#   • Ariel Challenge 2025 dataset docs (axis_info.parquet, wavelengths.csv)
+#   • FFT/UMAP diagnostic pipeline [oai_citation:0‡FFT and UMAP_ A Comprehensive Technical Reference.pdf](file-service://file-KH1edKdSQWaqiLiUkKdtoW) 
+#   • Physics-informed calibration lessons [oai_citation:1‡Advanced Techniques for Exoplanet Spectrum Extraction (NeurIPS Ariel Data Challenge 2024–2025).pdf](file-service://file-8dtJibU1RNLHYacRH9AmsG)
 # ======================================================================
 
 _target_: spectramind.pipeline.calibrate.methods.TraceCalibration
 
-order: 3              # polynomial order for wavelength fitting
-smooth: true          # apply smoothing to reduce pixel jitter
-validate: true        # sanity-check wavelength monotonicity
-log_level: INFO       # per-step logging level
+# Polynomial or spline order for wavelength fitting.
+#   - 3 is standard cubic polynomial.
+#   - Higher order only if justified (risk of overfit).
+order: 3
+
+# Optional smoothing of wavelength grid to suppress pixel jitter.
+# Choices: false, savgol, moving_average
+smooth:
+  enabled: true
+  method: savgol
+  window_length: 11      # odd integer, tuned to pixel scale
+  polyorder: 2
+
+# Enforce sanity checks on wavelength solution.
+#   - monotonicity: strictly increasing wavelengths
+#   - bounds: within instrument metadata ranges
+validate:
+  monotonic: true
+  bounds: true
+
+# External references (injected via Hydra defaults if present).
+references:
+  axis_info: ${data.raw}/axis_info.parquet   # detector→wavelength metadata
+  wavelengths_csv: ${data.raw}/wavelengths.csv
+
+# Diagnostic options (saved under artifacts/diagnostics/trace/)
+diagnostics:
+  plot_solution: true       # save wavelength vs pixel plots
+  fft_analysis: false       # optional FFT spectral leakage check
+  save_json: true           # write calibrated solution to JSON
+
+# Logging
+log_level: INFO
