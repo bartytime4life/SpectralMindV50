@@ -1,63 +1,89 @@
 # 📜 Changelog — SpectraMind V50
 
 All notable changes to this project will be documented here.  
-This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and the
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ---
 
 ## [Unreleased]
 
 ### 🚀 Added
-* **Governance docs**: `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `LICENSE`.
-* Baseline **`VERSION` file** (0.1.x series).
-* Extended `dvc.yaml` with reproducible full pipeline:  
-  `calibrate → train → predict → diagnose → submit`.
-* `setup.cfg` with pytest, flake8, mypy, and Ruff lint/type rules.
-* `pyproject.toml` with runtime + dev extras (`gpu`, `dev`).
-* `requirements-kaggle.txt` (Kaggle-safe, pinned) and `requirements-dev.txt`.
-* CI: added **artifact sweeper**, **docs build**, and **branch-protection auto-merge** workflows.
-* Docs: added `ARCHITECTURE.md`, `docs/` with MkDocs config and diagrams.
+- **JSON Schemas**: `schemas/submission.tableschema.sample_id.json` (Tableschema with `sample_id` as the canonical key); stricter enums & patterns, full examples.
+- **Integration tests**: Calibration chain & CLI E2E smoke (`tests/integration/test_calib_chain.py`, `tests/integration/test_end_to_end_cli.py`).
+- **Kaggle assets**: Finalize `kaggle/README.md` and notebook template wiring; pinned `requirements-kaggle.txt`.
+- **Docs**: Expanded `docs/` with calibration internals (aperture/optimal, trace Horne-style), pipeline diagrams, and repository conventions.
 
 ### 🔄 Changed
-* Repo promoted from **scaffold → production-grade** (per ADR-0001).
-* Torch stack isolated into extras (`gpu`) for Kaggle compliance.
-* CI enforces **CodeQL**, **pip-audit**, **Trivy**, and **SBOM generation** (CycloneDX + SPDX).
-* CLI (`spectramind`) refactored to **Typer unified interface** with subcommands:  
-  `calibrate`, `train`, `predict`, `diagnose`, `submit`.
-* Dockerfile hardened: `python:3.10-slim`, rootless runtime, no unpinned system calls.
-
-### ⚠️ Deprecated
-* None.
-
-### ❌ Removed
-* None.
+- **Trace modeling**: Multi-order ready center/width, NaN-safe math, stable denominators, background models (`column_median`, `row_poly`), and Torch-first execution.
+- **Photometry**: Batch-aware `[..., T, H, W]`, adaptive apertures, PSF-weighted optimal extraction with variance propagation, full NaN safety.
+- **CI**: Hardened workflows (matrix pinning, cache keys, deterministic pytest); pre-commit stack (ruff/black/isort/mypy/bandit/secrets).
+- **Schemas**: Submission/events schema tightened; drift tests added.
 
 ### 🛠️ Fixed
-* Stable Hydra config composition (`configs/train.yaml`).
-* DVC pipeline now persists processed artifacts in `data/processed/`.
-* Kaggle notebooks auto-sync with repo; no duplicated pipeline logic.
-* Fixed schema validation drift (`schemas/events.schema.json` and `schemas/submission.schema.json`).
+- Time-axis normalization and mask/variance alignment across calib modules.
+- PSF normalization edge cases (degenerate/empty masks) in optimal extraction.
+- Minor docstring mismatches and dtype inconsistencies.
+
+### ⚠️ Deprecated
+- None.
+
+### ❌ Removed
+- None.
+
+---
+
+## [0.1.2] — 2025-09-08
+
+### 🚀 Added
+- **Calib self-tests**: Lightweight CPU-safe checks inside `photometry.py` and `trace.py`.
+- **Guardrails (Kaggle)**: Runtime checks and permissions tests (`tests/integration/test_kaggle_runtime_guardrails.py`).
+- **CI**: `ci.yml`, `kaggle_notebook_ci.yml`, `sbom-refresh.yml`, `artifact-sweeper.yml`.
+- **Pre-commit**: Mission-grade stack with autofix and repo-wide excludes.
+
+### 🔄 Changed
+- **`src/spectramind/calib/photometry.py`**:  
+  Batch-aware outputs, NaN-safe `_nansum`/`_nanmedian`, adaptive circular/elliptical apertures, robust sky annulus clipping, variance-aware errors.
+- **`src/spectramind/calib/trace.py`**:  
+  Robust axis normalization to `[..., T, Y, X]`, Horne-style optimal extraction with variance propagation, multi-order center/width, improved background modeling.
+- **CLI**: Unified Typer interface remains stable; logging clarifications in `setup.cfg` and tests.
+- **Docs**: Calibration and extraction sections expanded; ADR cross-links.
+
+### 🛠️ Fixed
+- PSF weight normalization in presence of masked pixels.
+- Stable denominator guards in optimal extraction to avoid `NaN/Inf` propagation.
+- Minor dtype casts and device moves in Torch paths.
+
+### 🧪 Performance
+- Vectorized inner loops; NumPy fallback only for polyfit/smoothing where necessary.
+- Reduced allocations in per-frame apertures and PSF grids.
 
 ---
 
 ## [0.1.1] — 2025-09-06
 
 ### 🚀 Added
-* Introduced `scripts/bump_version.sh` for automated semantic versioning.
+- `scripts/bump_version.sh` for automated semantic versioning.
 
 ### 🔄 Changed
-* Dependency upgrades: `pytest ≥8.1`, `ruff ≥0.6.8`, `mypy ≥1.11`.
-* Docs enhanced: reproducibility, Kaggle runtime constraints, ADR workflow clarified.
+- Dependency upgrades: `pytest ≥8.1`, `ruff ≥0.6.8`, `mypy ≥1.11`.
+- Docs: reproducibility notes, Kaggle runtime constraints, ADR workflow clarity.
 
 ---
 
 ## [0.1.0] — 2025-09-05
 
 ### 🚀 Added
-* 🎉 Initial public release of **SpectraMind V50** scaffold.
-* CLI (`spectramind`) with `calibrate`, `train`, `predict` commands.
-* DVC integration for raw → processed data lineage.
-* Initial configs (`configs/train.yaml`, `configs/env/`).
-* ADR system bootstrapped (`ADR/0001-choose-hydra-dvc.md`).
+- 🎉 Initial public release of **SpectraMind V50** scaffold.
+- CLI (`spectramind`) with `calibrate`, `train`, `predict`.
+- DVC integration for raw → processed lineage.
+- Initial configs (`configs/train.yaml`, `configs/env/`).
+- ADR system bootstrapped (`ADR/0001-choose-hydra-dvc.md`).
 
 ---
+
+## Changelog conventions
+
+- **Added / Changed / Fixed / Deprecated / Removed / Security / Performance** buckets.
+- Dates are in **YYYY-MM-DD** (UTC).
+- Patch releases focus on bug fixes & safety; minor releases may add features; major releases may break APIs.
