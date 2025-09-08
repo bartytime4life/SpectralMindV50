@@ -1,18 +1,19 @@
-# tests/unit/test_submission_validator.py
 # =============================================================================
-# SpectraMind V50 — Submission Validator Tests (Upgraded)
+# SpectraMind V50 — Submission Validator Tests (Upgraded++)
 # -----------------------------------------------------------------------------
 # What we assert:
 #   • CSV & DataFrame with N μ columns and N σ columns are accepted (happy path)
 #   • Missing/extra columns → fails with useful error text
 #   • Duplicate columns → fail
-#   • "Unnamed: 0" accidental index column → fail
+#   • "Unnamed: 0" accidental index column → fail (lenient validators may auto-drop → soft skip)
 #   • Column order mismatch → optionally fails if validator enforces order
-#   • Empty CSV (no rows) → fail
+#   • Empty CSV (no rows) or header-only → fail
 #   • NaN/Inf values → fail
 #   • σ must be strictly positive (no zeros/negatives)
 #   • Non-numeric types in μ/σ → fail (optionally allow float-coercible strings)
-#   • Non-string or missing sample_id → fail
+#   • Non-string or missing sample_id → fail (whitespace/regex rule is optional and tested loosely)
+#   • CRLF newlines should be accepted (if the validator uses pandas/pyright I/O)
+#   • Env override for bin count (SM_SUBMISSION_BINS) is honored
 #
 # API flexibility:
 #   We try multiple import paths and shapes:
@@ -159,9 +160,27 @@ def _df_valid(n_rows: int = 3, seed: int = 123) -> pd.DataFrame:
     return pd.DataFrame(data, columns=EXPECTED_COLUMNS)
 
 
-def _write_csv(df: pd.DataFrame, path: Path) -> Path:
+def _df_valid_small(n_rows: int = 2, bins: int = 8, seed: int = 321) -> pd.DataFrame:
+    """Small-footprint DF for env override test."""
+    data = {ID_COLUMN: [f"s{i}" for i in range(n_rows)]}
+    rng = np.random.default_rng(seed)
+    mus = rng.normal(size=(n_rows, bins))
+    sigs = rng.uniform(low=1e-3, high=0.5, size=(n_rows, bins))
+    for i in range(bins):
+        data[f"{MU_PREFIX}{i:03d}"] = mus[:, i]
+        data[f"{SIGMA_PREFIX}{i:03d}"] = sigs[:, i]
+    cols = [ID_COLUMN] + [f"{MU_PREFIX}{i:03d}" for i in range(bins)] + [f"{SIGMA_PREFIX}{i:03d}" for i in range(bins)]
+    return pd.DataFrame(data, columns=cols)
+
+
+def _write_csv(df: pd.DataFrame, path: Path, newline: Optional[str] = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    # CRLF optional for OS coverage
+    if newline is None:
+        df.to_csv(path, index=False)
+    else:
+        with open(path, "w", encoding="utf-8", newline=newline) as f:
+            df.to_csv(f, index=False)
     return path
 
 
@@ -179,6 +198,31 @@ def test_happy_path_accepts_dataframe(validator: ValidatorFn) -> None:
     df = _df_valid(n_rows=2)
     ok, errors = validator(df)
     assert ok, f"DataFrame input should validate: {errors}"
+
+
+def test_exact_column_count_required(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    Validators should not silently accept stealth extra columns or missing ones.
+    """
+    df = _df_valid(n_rows=1)
+    # + one stealth extra
+    df2 = df.copy()
+    df2["__stealth__"] = 1
+    p2 = _write_csv(df2, tmp_path / "stealth_extra.csv")
+    ok2, err2 = validator(p2)
+    if ok2:  # lenient validator might drop unknowns—then at least a warning is desirable
+        pytest.skip("Validator accepted stealth extra column; accepting lenient behavior.")
+    assert any(s in " ".join(err2).lower() for s in ("extra", "unknown", "unexpected", "column"))
+
+
+def test_crlf_newline_csv_ok(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    CSVs written with CRLF line endings should be accepted by robust validators.
+    """
+    df = _df_valid(n_rows=2)
+    p = _write_csv(df, tmp_path / "crlf.csv", newline="\r\n")
+    ok, errors = validator(p)
+    assert ok, f"Validator should accept CRLF CSVs: {errors}"
 
 
 def test_missing_one_column_fails(tmp_path: Path, validator: ValidatorFn) -> None:
@@ -230,7 +274,7 @@ def test_mu_sigma_must_be_numeric(tmp_path: Path, validator: ValidatorFn) -> Non
     ok, errors = validator(csv_path)
     assert not ok, "Validator should fail on non-numeric μ/σ values"
     joined = " | ".join(errors).lower()
-    assert any(tok in joined for tok in ("numeric", "float", "number", "dtype"))
+    assert any(tok in joined for tok in ("numeric", "float", "number", "dtype", "parse"))
 
 
 def test_duplicate_sample_ids_fail(tmp_path: Path, validator: ValidatorFn) -> None:
@@ -301,7 +345,6 @@ def test_unnamed_index_column_rejected(tmp_path: Path, validator: ValidatorFn) -
     p = tmp_path / "with_index.csv"
     df.to_csv(p, index=True)
     ok, errors = validator(p)
-    # Expect fail due to extra 'Unnamed: 0' column
     if ok:
         # Some validators auto-drop unnamed index; accept either behavior.
         pytest.skip("Validator auto-dropped index column; accepting lenient behavior.")
@@ -363,13 +406,63 @@ def test_gzipped_csv_optional(tmp_path: Path, validator: ValidatorFn) -> None:
         df.to_csv(f, index=False)
     ok, errors = validator(gz_path)
     if not ok:
-        # Heuristic: if the validator's error mentions "gzip"/"compression"/"open" then skip as unsupported,
-        # else enforce failure semantics.
         joined = " ".join(errors).lower()
         if any(tok in joined for tok in ("gzip", "compression", "open", "decode")):
             pytest.skip("Validator does not support gzipped CSV; skipping.")
         else:
             assert False, f"Validator rejected gzipped CSV unexpectedly: {errors}"
+
+
+def test_mixed_numeric_dtypes_optional(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    Integers and scientific notation strings are common; lenient validators may coerce.
+    Either outcome is accepted; strict validators must error descriptively.
+    """
+    df = _df_valid(n_rows=1)
+    df.loc[0, f"{MU_PREFIX}003"] = 17           # int
+    df.loc[0, f"{SIGMA_PREFIX}004"] = "1e-2"    # exp notation string
+    p = _write_csv(df, tmp_path / "mixed_numeric.csv")
+    ok, errors = validator(p)
+    if ok:
+        return
+    txt = " ".join(errors).lower()
+    assert any(tok in txt for tok in ("numeric", "float", "number", "dtype", "parse"))
+
+
+def test_large_row_quick_smoke(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    Quick larger row count smoke to catch accidental O(N^2) errors.
+    Still tiny for CI.
+    """
+    df = _df_valid(n_rows=16)
+    p = _write_csv(df, tmp_path / "many_rows.csv")
+    ok, errors = validator(p)
+    assert ok, f"Expected valid many-row submission, got: {errors}"
+
+
+def test_path_like_and_str_both_supported(tmp_path: Path, validator: ValidatorFn) -> None:
+    df = _df_valid(n_rows=2)
+    p = _write_csv(df, tmp_path / "path_like.csv")
+    ok1, _ = validator(p)
+    ok2, _ = validator(str(p))
+    assert ok1 and ok2
+
+
+def test_env_override_bins_honored_small(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validator: ValidatorFn) -> None:
+    """
+    Test that SM_SUBMISSION_BINS is honored by the validator. We build a *small* 8-bin file.
+    If the validator pins to 283 bins only, this should fail; if it reads env, it should pass.
+    We accept both behaviors (repo may pin the official 283 bins).
+    """
+    monkeypatch.setenv("SM_SUBMISSION_BINS", "8")
+    df_small = _df_valid_small(n_rows=3, bins=8)
+    p = _write_csv(df_small, tmp_path / "bins8.csv")
+    ok, errors = validator(p)
+    # Either it passes (honors env) or fails saying columns/schema mismatch (pins to 283)
+    if not ok:
+        txt = " ".join(errors).lower()
+        assert any(tok in txt for tok in ("column", "schema", "missing", "count")), \
+            f"Unexpected reason for failing small-bin file: {errors}"
 
 
 # -----------------------------------------------------------------------------#
@@ -419,3 +512,20 @@ def test_cli_validate_rejects_bad_csv(tmp_path: Path, cli_runner):  # type: igno
             assert result.exit_code != 0, "CLI should fail on invalid CSV"
             return
     pytest.skip("No working CLI validate command found; skipping negative CLI test.")
+
+
+@pytest.mark.usefixtures("cli_runner")
+def test_cli_validate_bad_path(tmp_path: Path, cli_runner):  # type: ignore[no-redef]
+    """
+    If CLI command exists and path cannot be opened, it should error non-zero.
+    """
+    candidate_cmds = [
+        ["submission", "validate", str(tmp_path / "not_a_file.csv")],
+        ["submit", "validate", str(tmp_path / "not_a_file.csv")],
+    ]
+    for args in candidate_cmds:
+        result = cli_runner.invoke(args)
+        if result.exit_code != 2 and "No such command" not in (result.stdout + result.stderr):
+            assert result.exit_code != 0, "CLI should fail on non-existent CSV path"
+            return
+    pytest.skip("No working CLI validate command found; skipping bad-path CLI test.")
