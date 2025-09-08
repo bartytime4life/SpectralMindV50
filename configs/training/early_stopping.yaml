@@ -1,0 +1,23 @@
+# configs/training/early_stopping.yaml
+# SpectraMind V50 — Early Stopping Configuration
+# Controls patience and monitoring for PyTorch Lightning callbacks.
+
+_target_: pytorch_lightning.callbacks.EarlyStopping
+
+# Which metric to monitor (must match your logged metrics in training)
+monitor: "val/loss"
+
+# Mode can be "min" (stop when metric stops decreasing) or "max"
+mode: "min"
+
+# How many epochs to wait after last improvement before stopping
+patience: 10
+
+# Minimum change in the monitored quantity to qualify as an improvement
+min_delta: 0.0
+
+# Whether to stop training immediately when condition is met
+strict: true
+
+# Verbosity (set to false to silence)
+verbose: true
