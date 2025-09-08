@@ -5,6 +5,7 @@
 # • Torch stack lives in extras (install locally or in GH Actions)
 # • CLI exposed as `spectramind` (mirrors `python -m spectramind`)
 # • Package-data ensures configs/schemas ship inside the wheel
+# • Pytest/mypy configuration lives in setup.cfg (avoid duplication)
 # =====================================================================
 
 [build-system]
@@ -13,7 +14,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectramind-v50"
-version = "0.1.0"                             # kept static; Makefile syncs this from VERSION
+version = "0.1.0"  # kept static; Makefile syncs this from VERSION
 description = "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,44 +34,51 @@ classifiers = [
 
 # ---- Runtime dependencies (Kaggle-safe core; heavy stacks moved to extras) ----
 dependencies = [
+  # CLI & config
   "typer[all]==0.12.3",
   "hydra-core==1.3.2",
   "omegaconf==2.3.0",
   "pydantic==2.7.4",
-  "numpy==1.26.4",            # NumPy <2 keeps manylinux wheel coverage on Kaggle
+  "pyyaml==6.0.1",
+  "jsonschema==4.22.0",    # keep in lockstep with requirements files
+  "packaging==24.1",
+
+  # Core scientific stack
+  "numpy==1.26.4",         # NumPy <2 keeps manylinux wheel coverage on Kaggle
   "scipy==1.11.4",
   "pandas==2.2.2",
   "polars==0.20.31",
-  "pyyaml==6.0.1",
+  "pyarrow==16.1.0",       # parquet/arrow I/O (pandas/polars compatible)
+
+  # Logging / progress / viz
   "tqdm==4.66.4",
   "rich==13.7.1",
   "matplotlib==3.8.4",
+  "seaborn==0.13.2",
   "umap-learn==0.5.6",
   "networkx==3.2.1",
-  "jsonschema==4.23.0",
-  "packaging==24.1",
 ]
 
 [project.optional-dependencies]
-# GPU stack: install on local/dev hosts or GH Actions (not in core Kaggle env).
+# GPU stack: install on local/dev or CI. In Kaggle, prefer the boot script (wheels tied to CUDA).
 gpu = [
   "torch==2.2.2",
   "torchvision==0.17.2",
-  "torchaudio==2.2.2",          # helpful for consistent Torch wheel set
+  "torchaudio==2.2.2",
   "lightning==2.3.3",
   "torch-geometric==2.5.3",
 ]
 
-# CPU-friendly analysis/physics helpers; separate from core runtime to keep slim.
+# CPU-friendly helpers (kept separate to keep core slim).
 analysis = [
   "scikit-learn==1.5.1",
   "joblib==1.4.2",
   "statsmodels==0.14.2",
   "sympy==1.13.1",
-  "numba==0.60.0",
+  "numba==0.59.1",  # 0.60+ requires NumPy 2.x; keep 1.26.x compatibility
 ]
 
-# Tooling for dev/test/typing/linting (aligned with Makefile targets).
+# Dev/test/typing/linting (tool configs live in setup.cfg).
 dev = [
   "pytest==8.3.3",
   "pytest-cov==5.0.0",
@@ -79,6 +87,7 @@ dev = [
   "hypothesis==6.112.0",
   "ruff==0.6.9",
   "mypy==1.11.2",
+  "typing-extensions==4.12.2",
   "toml-sort==0.23.1",
   "check-jsonschema==0.30.0",
   "types-PyYAML==6.0.12.20240808",
@@ -91,7 +100,6 @@ docs = [
   "mkdocs==1.6.0",
   "mkdocs-material==9.5.39",
   "pymdown-extensions==10.8.1",
-  # Enable when needed:
   # "mkdocs-mermaid2-plugin==1.1.1",
   # "mkdocs-gen-files==0.5.0",
   # "mkdocs-literate-nav==0.6.1",
@@ -103,10 +111,8 @@ security = [
   # "bandit==1.7.9",
 ]
 
-# Meta-extras for convenience
-all = [
-  "spectramind-v50[analysis,dev,docs,security]",
-]
+# Meta-extra for a full local workstation
+all = ["spectramind-v50[analysis,dev,docs,security]"]
 
 [project.urls]
 Homepage = "https://github.com/your-org/spectramind-v50"
@@ -137,14 +143,13 @@ spectramind = [
   "assets/diagrams/rendered/*.*",
 ]
 
-# (Optional) exclude noisy data if sitting under package root
 [tool.setuptools.exclude-package-data]
 spectramind = ["**/*.tmp", "**/*.bak"]
 
 # --------------------------------- Ruff -----------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"   # aligns with setup.cfg mypy python_version=3.11
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C90"]
@@ -155,35 +160,6 @@ known-first-party = ["spectramind"]
 force-sort-within-sections = true
 combine-as-imports = true
 
-# --------------------------------- mypy -----------------------------------
-[tool.mypy]
-python_version = "3.10"
-mypy_path = ["src"]
-ignore_missing_imports = true
-strict = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-warn_unused_configs = true
-show_error_codes = true
-plugins = ["pydantic.mypy"]
-
-[tool.pydantic-mypy]
-init_typed = true
-warn_required_dynamic_aliases = true
-warn_untyped_fields = true
-
-# -------------------------------- Pytest -----------------------------------
-[tool.pytest.ini_options]
-minversion = "8.1"
-addopts = "-q --disable-warnings"
-testpaths = ["tests", "src/spectramind"]
-timeout = 180
-xfail_strict = true
-
-# ------------------------------ TOML Sort ----------------------------------
-[tool.tomlsort]
-in_place = false
-check = true
-sort_inline_tables = true
-trailing_comma_inline_array = true
-spaces_indent_inline_array = 0
+# ---------------------------- Centralized tooling --------------------------
+# Pytest and mypy configuration are centralized in setup.cfg to avoid duplication.
+# (See: [tool:pytest], [mypy] in setup.cfg)
