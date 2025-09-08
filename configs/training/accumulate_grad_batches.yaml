@@ -1,25 +1,38 @@
-# configs/training/accumulate_grad_batches.yaml
-# SpectraMind V50 — Gradient Accumulation Configuration
-# ------------------------------------------------------
-# Controls how many mini-batches are accumulated before
-# one optimizer step. Useful for effective larger batch
-# sizes on GPU-limited environments (e.g. Kaggle).
+# ======================================================================
+# SpectraMind V50 — Gradient Accumulation Config
+# ======================================================================
+# Defines how many mini-batches to accumulate before one optimizer step.
+# This allows simulation of larger effective batch sizes under GPU/VRAM
+# constraints (esp. Kaggle’s 16 GB GPUs).
 #
-# Usage (Hydra override):
-#   spectramind train +training/accumulate_grad_batches=4
+# Usage:
+#   spectramind train +training/accumulate_grad_batches=2
 #
 # Notes:
+# - Effective batch size = dataloader.batch_size * accumulate_grad_batches
 # - Value = 1 → no accumulation (default).
-# - Effective batch size = dataloader.batch_size * accumulate_grad_batches.
-# - Make sure to adjust learning rate if scaling up a lot.
+# - Adjust LR scaling when increasing accumulation (linear scaling rule).
+# ======================================================================
 
-accumulate_grad_batches: 2   # default value
+# Default accumulation factor
+accumulate_grad_batches: ${oc.env:SM_ACCUM, 2}
 
-# Optional profiles for common environments
+# ----------------------------------------------------------------------
+# Profiles tuned for common environments
+# ----------------------------------------------------------------------
 profiles:
   kaggle:
-    accumulate_grad_batches: 2   # safe for 16 GB GPUs
+    accumulate_grad_batches: ${oc.env:SM_ACCUM_KAGGLE, 2}   # safe for T4 / 16 GB
   local:
-    accumulate_grad_batches: 1   # no accumulation on workstation
+    accumulate_grad_batches: ${oc.env:SM_ACCUM_LOCAL, 1}    # no accumulation
   large_gpu:
-    accumulate_grad_batches: 4   # for A100/RTX 6000
+    accumulate_grad_batches: ${oc.env:SM_ACCUM_LARGE, 4}    # A100/RTX6000 class
+  debug:
+    accumulate_grad_batches: 1                              # ensure quick feedback
+
+# ----------------------------------------------------------------------
+# Hydra bookkeeping
+# ----------------------------------------------------------------------
+hydra:
+  run:
+    dir: outputs/training/accum/${now:%Y-%m-%d_%H-%M-%S}
