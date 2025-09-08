@@ -1,0 +1,39 @@
+# configs/training/callbacks.yaml
+# SpectraMind V50 — Callback bundle for PyTorch Lightning (Hydra-compatible)
+
+# You can override any of these at the CLI, e.g.:
+#   python -m spectramind train training.callbacks.callbacks[0].patience=20
+
+callbacks:
+  # ── Early Stopping ──────────────────────────────────────────────────────────────
+  - _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: "val/loss"     # e.g. "val/gll" if you log Gaussian Log-Likelihood (then mode: "max")
+    mode: "min"
+    patience: 10
+    min_delta: 0.0
+    strict: true
+    verbose: true
+
+  # ── Model Checkpoint ───────────────────────────────────────────────────────────
+  - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    monitor: "val/loss"
+    mode: "min"
+    save_top_k: 3
+    save_last: true
+    every_n_epochs: 1
+    # Use your repo's standard paths; these vars are common in V50 configs
+    dirpath: "${paths.checkpoints}"
+    filename: "epoch{epoch:03d}-valloss{val/loss:.4f}"
+    auto_insert_metric_name: false
+
+  # ── Learning Rate Monitor ─────────────────────────────────────────────────────
+  - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: "epoch"
+    log_momentum: false
+
+  # ── JSONL Metrics Logger (custom callback) ────────────────────────────────────
+  # Expects you have this callback in src/spectramind/train/callbacks.py
+  - _target_: spectramind.train.callbacks.JsonlMetricsLogger
+    out_path: "${paths.artifacts}/metrics.jsonl"
+    append: true
+    flush_every_n_steps: 0   # 0 = flush on close; set to >0 to force periodic flushes
