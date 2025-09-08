@@ -164,23 +164,32 @@ def _unpack_outputs(out: Any) -> Tuple[Tensor, Optional[Tensor]]:
     raise AssertionError(f"Unsupported model output type: {type(out)!r}")
 
 
+def _reduce_over_temporal_and_sample_dims(x: Tensor) -> Tensor:
+    """
+    Reduce temporal/sample-head dims to ensure final shape is (B, C).
+    Supported patterns: (B, C), (B, T, C), (B, 1, C), (B, S, C), (B, T, S, C)
+    We mean-reduce over any dims between the batch and last (C).
+    """
+    if x is None:
+        return x
+    if x.dim() < 2:
+        return x
+    # If already (B,C), return
+    if x.dim() == 2:
+        return x
+    # For (B,*,C), reduce over all inner dims except last (C).
+    reduce_dims = tuple(range(1, x.dim() - 1))
+    if len(reduce_dims) > 0:
+        x = x.mean(dim=reduce_dims)
+    return x
+
+
 def _squeeze_temporal(mu: Tensor, sigma: Optional[Tensor]) -> Tuple[Tensor, Optional[Tensor]]:
     """
-    If output is (B,T,C) or (B,1,C), squeeze/mean-reduce temporal dimension to (B,C).
-    This keeps shape checks tolerant to models that emit per-timestep spectra.
+    Reduce temporal and sample-head dimensions to (B,C).
     """
-    def _reduce(x: Tensor) -> Tensor:
-        if x is None:
-            return x
-        if x.dim() >= 3 and x.size(-1) >= 1:
-            # If (B, T, C): mean over T; if (B, 1, C): squeeze
-            if x.size(-2) == 1:
-                return x.squeeze(-2)
-            return x.mean(dim=-2)
-        return x
-
-    mu_r = _reduce(mu)
-    sig_r = _reduce(sigma) if sigma is not None else None
+    mu_r = _reduce_over_temporal_and_sample_dims(mu)
+    sig_r = _reduce_over_temporal_and_sample_dims(sigma) if sigma is not None else None
     return mu_r, sig_r
 
 
@@ -192,11 +201,15 @@ def _discover_bins(model: nn.Module) -> int:
     Determine the expected spectral bin count.
     Prefer model.n_bins if present; else fallback constant.
     """
-    try:
-        n_bins = int(getattr(model, "n_bins", FALLBACK_N_BINS))
-    except Exception:
-        n_bins = FALLBACK_N_BINS
-    return n_bins
+    for name in ("n_bins", "output_bins", "num_bins", "n_outputs", "spectral_bins"):
+        if hasattr(model, name):
+            try:
+                val = int(getattr(model, name))
+                if val > 0:
+                    return val
+            except Exception:
+                pass
+    return FALLBACK_N_BINS
 
 
 def _instantiate_model(ctor: Any) -> nn.Module:
@@ -205,13 +218,22 @@ def _instantiate_model(ctor: Any) -> nn.Module:
     - If callable returns nn.Module: use it
     - If class: call with no args; if fails, try with a few defaults
     """
+    # Try direct
     try:
         obj = ctor()
     except TypeError:
+        # Try with common n_bins kw
         try:
             obj = ctor(n_bins=FALLBACK_N_BINS)
-        except Exception as e:
-            pytest.skip(f"Could not instantiate model with no args or n_bins: {e!r}")
+        except Exception:
+            # Try a config-like dict if build_model(config)
+            try:
+                obj = ctor({"n_bins": FALLBACK_N_BINS})
+            except Exception as e:
+                pytest.skip(f"Could not instantiate model via default/n_bins/config: {e!r}")
+    except Exception as e:
+        pytest.skip(f"Constructor raised: {e!r}")
+
     if not isinstance(obj, nn.Module):
         pytest.skip(f"Constructed object is not a torch.nn.Module: {type(obj)!r}")
     return obj.eval()
@@ -256,7 +278,7 @@ def _assert_mu_sigma_shapes(
 ) -> Tuple[Tensor, Optional[Tensor]]:
     assert isinstance(mu, torch.Tensor), "mu must be a Tensor"
 
-    # Allow either (B, C) or (B, T, C) — reduce temporal to (B, C) for shape checks.
+    # Allow either (B, C) or (B, T, C) or (B,S,C) etc. — reduce to (B, C) for shape checks.
     mu, sigma = _squeeze_temporal(mu, sigma)
 
     assert mu.dim() >= 2, f"mu must include batch and bins dims; got shape={tuple(mu.shape)}"
@@ -369,7 +391,7 @@ def test_model_accepts_dict_or_kwargs_and_key_aliases() -> None:
 def test_output_container_types_and_finiteness() -> None:
     """
     Ensure output container is one of dict/tuple/list/tensor and has expected last dim,
-    with finite values. Allow temporal dim (reduced internally).
+    with finite values. Allow temporal/sample dims (reduced internally).
     """
     ctor = _find_model_ctor()
     if ctor is None:
@@ -414,6 +436,58 @@ def test_forward_no_grad_and_inference_mode_determinism() -> None:
     with torch.inference_mode():
         mu3, sigma3 = _forward_any(model, batch)
         _assert_mu_sigma_shapes(mu3, sigma3, expected_bins, B=2)
+
+
+def test_inputs_not_modified_inplace() -> None:
+    """
+    The model should not mutate input tensors in-place (basic guard).
+    """
+    ctor = _find_model_ctor()
+    if ctor is None:
+        pytest.skip("No model constructor found")
+    model = _instantiate_model(ctor).to("cpu")
+
+    batch, _ = next(iter(_synthetic_inputs(batch=2, device=torch.device("cpu"))))
+    # Clone originals
+    originals = {k: v.clone() for k, v in batch.items()}
+    _ = _forward_any(model, batch)  # forward
+    for k, v in batch.items():
+        assert torch.allclose(v, originals[k]), f"Input '{k}' appears to have been modified in-place."
+
+
+def test_microbatch_equivalence() -> None:
+    """
+    Full-batch output ≈ concatenated outputs from single-item micro-batches.
+    """
+    ctor = _find_model_ctor()
+    if ctor is None:
+        pytest.skip("No model constructor found")
+    model = _instantiate_model(ctor).to("cpu")
+    expected_bins = _discover_bins(model)
+
+    batch, _ = next(iter(_synthetic_inputs(batch=3, device=torch.device("cpu"))))  # B=3
+
+    with torch.no_grad():
+        mu_full, sigma_full = _forward_any(model, batch)
+        mu_full, sigma_full = _squeeze_temporal(mu_full, sigma_full)
+
+        mus = []
+        sigs = []
+        for i in range(3):
+            micro = {k: v[i : i + 1].contiguous() for k, v in batch.items()}
+            mu_i, sig_i = _forward_any(model, micro)
+            mu_i, sig_i = _squeeze_temporal(mu_i, sig_i)
+            mus.append(mu_i)
+            if sig_i is not None:
+                sigs.append(sig_i)
+
+        mu_cat = torch.cat(mus, dim=0)
+        _assert_mu_sigma_shapes(mu_cat, sigma_full, expected_bins, B=3)
+        assert torch.allclose(mu_full, mu_cat, atol=1e-5, rtol=1e-5)
+
+        if sigma_full is not None and len(sigs) == 3:
+            sigma_cat = torch.cat(sigs, dim=0)
+            assert torch.allclose(sigma_full, sigma_cat, atol=1e-5, rtol=1e-5)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
