@@ -35,7 +35,7 @@ classifiers = [
 # ---- Runtime dependencies (Kaggle-safe core; heavy stacks moved to extras) ----
 dependencies = [
   # CLI & config
-  "typer[all]==0.12.3",
+  "typer[all]==0.17.4",
   "hydra-core==1.3.2",
   "omegaconf==2.3.0",
   "pydantic==2.7.4",
