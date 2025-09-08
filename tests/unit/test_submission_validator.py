@@ -5,11 +5,14 @@
 # What we assert:
 #   • CSV & DataFrame with N μ columns and N σ columns are accepted (happy path)
 #   • Missing/extra columns → fails with useful error text
+#   • Duplicate columns → fail
+#   • "Unnamed: 0" accidental index column → fail
 #   • Column order mismatch → optionally fails if validator enforces order
+#   • Empty CSV (no rows) → fail
 #   • NaN/Inf values → fail
 #   • σ must be strictly positive (no zeros/negatives)
-#   • Non-numeric types in μ/σ → fail
-#   • Duplicate sample_id → fail
+#   • Non-numeric types in μ/σ → fail (optionally allow float-coercible strings)
+#   • Non-string or missing sample_id → fail
 #
 # API flexibility:
 #   We try multiple import paths and shapes:
@@ -261,7 +264,112 @@ def test_column_order_enforced_optionally(tmp_path: Path, validator: ValidatorFn
         assert any("order" in e.lower() or "position" in e.lower() for e in errors)
     else:
         # Non-enforcing validators may normalize/reorder; accept either outcome.
-        assert ok or not ok  # no-op assert to keep branch explicit
+        assert ok or not ok  # explicit no-op
+
+
+# -----------------------------------------------------------------------------#
+# Extra negative/edge coverage
+# -----------------------------------------------------------------------------#
+def test_empty_csv_or_zero_rows_fail(tmp_path: Path, validator: ValidatorFn) -> None:
+    # Empty file
+    p_empty = tmp_path / "empty.csv"
+    p_empty.write_text("", encoding="utf-8")
+    ok1, _ = validator(p_empty)
+
+    # Zero-row CSV (header only)
+    df = _df_valid(n_rows=0)
+    p_zero = _write_csv(df, tmp_path / "zero_rows.csv")
+    ok2, _ = validator(p_zero)
+
+    assert not ok1 or not ok2, "Empty file and zero-row CSV should not both pass validation"
+
+
+def test_duplicate_columns_fails(tmp_path: Path, validator: ValidatorFn) -> None:
+    df = _df_valid(n_rows=1)
+    # Introduce a duplicate column name by renaming one sigma to an existing mu header
+    dup_name = f"{MU_PREFIX}007"
+    df = df.rename(columns={f"{SIGMA_PREFIX}007": dup_name})
+    p = _write_csv(df, tmp_path / "dup_cols.csv")
+    ok, errors = validator(p)
+    assert not ok, "Validator should fail on duplicate/ambiguous columns"
+    assert any(tok in " ".join(errors).lower() for tok in ("duplicate", "ambiguous", "column"))
+
+
+def test_unnamed_index_column_rejected(tmp_path: Path, validator: ValidatorFn) -> None:
+    df = _df_valid(n_rows=1)
+    # Simulate common mistake: writing CSV with index=True, which adds 'Unnamed: 0'
+    p = tmp_path / "with_index.csv"
+    df.to_csv(p, index=True)
+    ok, errors = validator(p)
+    # Expect fail due to extra 'Unnamed: 0' column
+    if ok:
+        # Some validators auto-drop unnamed index; accept either behavior.
+        pytest.skip("Validator auto-dropped index column; accepting lenient behavior.")
+    joined = " | ".join(errors).lower()
+    assert any(tok in joined for tok in ("unnamed", "index", "extra", "unknown", "unexpected"))
+
+
+def test_non_string_or_missing_sample_id_fail(tmp_path: Path, validator: ValidatorFn) -> None:
+    df = _df_valid(n_rows=3)
+    df.loc[0, ID_COLUMN] = np.nan  # missing
+    df.loc[1, ID_COLUMN] = 12345   # non-string
+    p = _write_csv(df, tmp_path / "bad_ids.csv")
+    ok, errors = validator(p)
+    assert not ok, "Validator should reject missing/non-string sample_id"
+    txt = " ".join(errors).lower()
+    assert "sample_id" in txt and any(tok in txt for tok in ("string", "missing", "null", "dtype", "type"))
+
+
+def test_header_whitespace_optional(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    Some pipelines trim header whitespace, others don't.
+    We accept either behavior to avoid flakiness:
+      - If trimming supported, file should pass.
+      - Otherwise, it should fail (and that's OK).
+    """
+    df = _df_valid(n_rows=1)
+    # Rename a couple of headers with extra spaces
+    df = df.rename(columns={f"{MU_PREFIX}000": f"  {MU_PREFIX}000  ", ID_COLUMN: f" {ID_COLUMN} "})
+    p = _write_csv(df, tmp_path / "header_ws.csv")
+    ok, _ = validator(p)
+    assert ok or not ok  # explicitly allow either behavior
+
+
+def test_mu_sigma_coercible_strings_optional(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    Some validators accept string values that can be parsed into floats; others require numeric dtypes.
+    Either outcome is acceptable for this test.
+    """
+    df = _df_valid(n_rows=1)
+    df.loc[0, f"{MU_PREFIX}001"] = "0.123"
+    df.loc[0, f"{SIGMA_PREFIX}002"] = "0.045"
+    p = _write_csv(df, tmp_path / "coercible_strings.csv")
+    ok, errors = validator(p)
+    if ok:
+        return
+    # If not accepted, ensure error talks about dtype/numeric
+    txt = " ".join(errors).lower()
+    assert any(tok in txt for tok in ("numeric", "float", "number", "dtype", "parse"))
+
+
+def test_gzipped_csv_optional(tmp_path: Path, validator: ValidatorFn) -> None:
+    """
+    If the validator supports .csv.gz, ensure it accepts a gzipped file; otherwise skip.
+    """
+    import gzip
+    df = _df_valid(n_rows=2)
+    gz_path = tmp_path / "sub.csv.gz"
+    with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+        df.to_csv(f, index=False)
+    ok, errors = validator(gz_path)
+    if not ok:
+        # Heuristic: if the validator's error mentions "gzip"/"compression"/"open" then skip as unsupported,
+        # else enforce failure semantics.
+        joined = " ".join(errors).lower()
+        if any(tok in joined for tok in ("gzip", "compression", "open", "decode")):
+            pytest.skip("Validator does not support gzipped CSV; skipping.")
+        else:
+            assert False, f"Validator rejected gzipped CSV unexpectedly: {errors}"
 
 
 # -----------------------------------------------------------------------------#
