@@ -1,40 +1,39 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# SpectraMind V50 — DVC Remote Sync Helper
+# SpectraMind V50 — DVC Remote Sync Helper (Upgraded)
 # -----------------------------------------------------------------------------
 # Safely sync DVC artifacts to/from a configured remote.
-# - Kaggle-aware (disables push/gc; offline-safe)
-# - Concurrency-safe (flock)
-# - Repo-root auto-detection
-# - Helpful flags and dry-run mode
+# • Kaggle-aware (disables push/gc; offline-safe)
+# • Concurrency-safe (flock)
+# • Repo-root auto-detection
+# • Retries with exponential backoff on network-y DVC ops
+# • Dry-run (no effect) and optional JSON summary
 #
-# Usage examples:
+# Usage:
 #   bin/sync_dvc_remote.sh --status
-#   bin/sync_dvc_remote.sh --pull --remote my-s3
-#   bin/sync_dvc_remote.sh --push --jobs 8
+#   bin/sync_dvc_remote.sh --pull --remote my-s3 --jobs 8
 #   bin/sync_dvc_remote.sh --fetch --repro
 #   bin/sync_dvc_remote.sh --list-remotes
 #
-# Environment overrides:
-#   DVC_REMOTE       default remote name (overridden by --remote)
-#   DVC_JOBS         default jobs if --jobs not supplied
-#   DVC_DRY_RUN      "1" to simulate commands without executing
+# Env overrides:
+#   DVC_REMOTE     default remote name (overridden by --remote)
+#   DVC_JOBS       default jobs if --jobs not supplied (default 4)
+#   DVC_DRY_RUN    "1" to simulate commands without executing
+#   DVC_JSON       "1" to emit a JSON summary to stdout at the end
 # -----------------------------------------------------------------------------
 
 set -Eeuo pipefail
 
-# ---- small helpers -----------------------------------------------------------
-ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+# --------- small helpers ------------------------------------------------------
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { echo "[$(ts)] $*"; }
-err() { echo "[$(ts)] ERROR: $*" >&2; exit 1; }
+warn() { echo "[$(ts)] WARN: $*" >&2; }
+die() { echo "[$(ts)] ERROR: $*" >&2; exit 1; }
 
-is_kaggle() {
-  [[ -d "/kaggle/input" ]] || [[ "${KAGGLE_KERNEL_RUN_TYPE:-}" != "" ]]
-}
-
+is_kaggle() { [[ -d "/kaggle/input" ]] || [[ -n "${KAGGLE_KERNEL_RUN_TYPE:-}" ]]; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# ---- usage -------------------------------------------------------------------
+# --------- usage --------------------------------------------------------------
 usage() {
   cat <<'EOF'
 DVC Remote Sync Helper
@@ -49,178 +48,245 @@ Flags:
   --repro              dvc repro  (recompute pipeline stages)
   --list-remotes       dvc remote list
   --jobs N             Parallel jobs for transfer (default: $DVC_JOBS or 4)
+  --all-branches       Include all branches/tags for gc (dangerous)
   --dry-run            Print commands without executing (or set DVC_DRY_RUN=1)
-  --all-branches       Include all branches for gc (careful!)
+  --json               Emit JSON summary to stdout (or set DVC_JSON=1)
   -h|--help            Show this help
 
 Notes:
-  * On Kaggle, push/gc are blocked to keep runs offline-safe.
-  * The script uses a simple flock to avoid concurrent DVC operations.
+  * On Kaggle, push/gc are blocked for safety; use pull/fetch/status only.
+  * Uses flock to avoid concurrent DVC operations.
+  * Exits non-zero if any selected operation fails.
 EOF
 }
 
-# ---- defaults ----------------------------------------------------------------
+# --------- defaults -----------------------------------------------------------
 REMOTE="${DVC_REMOTE:-}"
-DO_PUSH="0"
-DO_PULL="0"
-DO_FETCH="0"
-DO_STATUS="0"
-DO_GC="0"
-DO_REPRO="0"
-DO_LIST="0"
+DO_PUSH=0; DO_PULL=0; DO_FETCH=0; DO_STATUS=0; DO_GC=0; DO_REPRO=0; DO_LIST=0
 JOBS="${DVC_JOBS:-4}"
 DRY_RUN="${DVC_DRY_RUN:-0}"
-ALL_BRANCHES="0"
+ALL_BRANCHES=0
+WANT_JSON="${DVC_JSON:-0}"
 
-# ---- parse args --------------------------------------------------------------
+# --------- parse args ---------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --remote)        REMOTE="${2:-}"; shift ;;
-    --push)          DO_PUSH="1" ;;
-    --pull)          DO_PULL="1" ;;
-    --fetch)         DO_FETCH="1" ;;
-    --status)        DO_STATUS="1" ;;
-    --gc)            DO_GC="1" ;;
-    --repro)         DO_REPRO="1" ;;
-    --list-remotes)  DO_LIST="1" ;;
-    --jobs)          JOBS="${2:-}"; shift ;;
-    --dry-run)       DRY_RUN="1" ;;
-    --all-branches)  ALL_BRANCHES="1" ;;
+    --remote)        REMOTE="${2:-}"; shift 2 ;;
+    --push)          DO_PUSH=1; shift ;;
+    --pull)          DO_PULL=1; shift ;;
+    --fetch)         DO_FETCH=1; shift ;;
+    --status)        DO_STATUS=1; shift ;;
+    --gc)            DO_GC=1; shift ;;
+    --repro)         DO_REPRO=1; shift ;;
+    --list-remotes)  DO_LIST=1; shift ;;
+    --jobs)          JOBS="${2:-}"; shift 2 ;;
+    --all-branches)  ALL_BRANCHES=1; shift ;;
+    --dry-run)       DRY_RUN=1; shift ;;
+    --json)          WANT_JSON=1; shift ;;
     -h|--help)       usage; exit 0 ;;
-    *)               err "Unknown argument: $1 (use --help)" ;;
+    *)               die "Unknown argument: $1 (use --help)";;
   esac
-  shift
 done
 
-# ---- locate repo root --------------------------------------------------------
+# Validate jobs
+[[ "$JOBS" =~ ^[0-9]+$ ]] || die "--jobs expects an integer"
+
+# --------- repo root detection ------------------------------------------------
 if have_cmd git; then
-  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 else
   REPO_ROOT=""
 fi
-
 if [[ -z "$REPO_ROOT" ]]; then
-  # fallback: search upward for dvc.yaml
   REPO_ROOT="$(pwd)"
   while [[ "$REPO_ROOT" != "/" && ! -f "$REPO_ROOT/dvc.yaml" ]]; do
     REPO_ROOT="$(dirname "$REPO_ROOT")"
   done
 fi
-
-[[ -f "$REPO_ROOT/dvc.yaml" ]] || err "Could not find dvc.yaml. Run from inside repo or set REPO_ROOT."
-
+[[ -f "$REPO_ROOT/dvc.yaml" ]] || die "Could not find dvc.yaml. Run from inside repo or set DVC working dir."
 cd "$REPO_ROOT"
 
-# ---- sanity checks -----------------------------------------------------------
-have_cmd dvc || err "dvc not found. Please install DVC (pip install dvc[<remote>])"
-have_cmd flock || log "flock not found; continuing without interprocess lock (low risk)."
+# --------- sanity checks ------------------------------------------------------
+have_cmd dvc || die "dvc not found. Install with: pip install 'dvc[<remote>]'"
+have_cmd flock || warn "flock not found; proceeding without interprocess lock (low risk)."
 
-# ---- resolve default remote if not provided ----------------------------------
+# --------- resolve remote (if not provided) -----------------------------------
 if [[ -z "$REMOTE" ]]; then
-  # try reading default remote from dvc config
-  REMOTE="$(dvc remote list --quiet 2>/dev/null | awk 'NR==1{print $1}')"
-  REMOTE="${REMOTE%%:*}"
+  # first remote listed becomes default
+  REMOTE="$(dvc remote list --quiet 2>/dev/null | awk 'NR==1{print $1}' | sed 's/://')"
 fi
 
-# ---- Kaggle safety gates -----------------------------------------------------
-if is_kaggle; then
-  if [[ "$DO_PUSH" == "1" || "$DO_GC" == "1" ]]; then
-    err "Push/GC is disabled on Kaggle (offline environment). Use pull/fetch/status only."
+# Validate explicit remote exists (when specified)
+if [[ -n "$REMOTE" ]]; then
+  if ! dvc remote list --quiet 2>/dev/null | awk -F: '{print $1}' | grep -qx "$REMOTE"; then
+    die "Remote '$REMOTE' not defined in this repo (dvc remote list)"
   fi
 fi
 
-# ---- run helper with dry-run support -----------------------------------------
-_run() {
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "[DRY-RUN] $*"
+# --------- Kaggle safety gates ------------------------------------------------
+if is_kaggle; then
+  if (( DO_PUSH==1 || DO_GC==1 )); then
+    die "Push/GC is disabled on Kaggle (offline safety). Use --pull/--fetch/--status."
+  fi
+fi
+
+# --------- exec helpers (no eval) --------------------------------------------
+dry_echo() { echo "[DRY-RUN]" "$@"; }
+
+run_cmd() {
+  # run_cmd <arg1> <arg2> ...
+  if (( DRY_RUN==1 )); then
+    dry_echo "$@"
   else
-    eval "$@"
+    "$@"
   fi
 }
 
-# ---- lock to prevent concurrent DVC ops -------------------------------------
+# Retry wrapper for networked DVC ops
+retry_run() {
+  # retry_run <max_tries> -- <command...>
+  local tries="$1"; shift
+  [[ "$1" == "--" ]] && shift
+  local attempt=1 backoff=2
+  while true; do
+    if run_cmd "$@"; then
+      return 0
+    fi
+    if (( DRY_RUN==1 )); then
+      # in dry-run we don't actually fail retries; just echo once
+      return 0
+    fi
+    if (( attempt >= tries )); then
+      return 1
+    fi
+    warn "Retry $attempt/$tries for: $*"
+    sleep "$backoff"; backoff=$(( backoff*2 )); attempt=$(( attempt+1 ))
+  done
+}
+
+# --------- locking ------------------------------------------------------------
 LOCK_DIR="${REPO_ROOT}/.dvc_sync_lock"
 mkdir -p "$LOCK_DIR"
 LOCK_FILE="${LOCK_DIR}/lockfile"
 
 with_lock() {
   if have_cmd flock; then
-    flock -w 60 200 || err "Could not acquire DVC sync lock within 60s"
-    "$@"
-    # flock will be released when FD 200 closes
+    # shellcheck disable=SC2094
+    flock -w 60 "$LOCK_FILE" "$@"
   else
     "$@"
   fi
 }
 
-# ---- operations --------------------------------------------------------------
-list_remotes() {
-  log "DVC remotes:"
-  _run "dvc remote list"
-}
-
+# --------- ops ---------------------------------------------------------------
 status_cloud() {
-  local rflag=""
-  [[ -n "$REMOTE" ]] && rflag="--remote ${REMOTE}"
-  log "Checking DVC cloud status ${REMOTE:+(remote: $REMOTE)}"
-  _run "dvc status --cloud ${rflag}"
+  local args=(status --cloud)
+  [[ -n "$REMOTE" ]] && args+=(--remote "$REMOTE")
+  args+=(-v)
+  log "dvc ${args[*]}"
+  retry_run 3 -- dvc "${args[@]}"
 }
 
 do_fetch() {
-  local rflag=""
-  [[ -n "$REMOTE" ]] && rflag="--remote ${REMOTE}"
-  log "Fetching DVC objects ${REMOTE:+from $REMOTE} (jobs=${JOBS})"
-  _run "dvc fetch ${rflag} -j ${JOBS}"
+  local args=(fetch -j "$JOBS")
+  [[ -n "$REMOTE" ]] && args+=(--remote "$REMOTE")
+  log "dvc ${args[*]}"
+  retry_run 3 -- dvc "${args[@]}"
 }
 
 do_pull() {
-  local rflag=""
-  [[ -n "$REMOTE" ]] && rflag="--remote ${REMOTE}"
-  log "Pulling DVC objects ${REMOTE:+from $REMOTE} (jobs=${JOBS})"
-  _run "dvc pull ${rflag} -j ${JOBS}"
+  local args=(pull -j "$JOBS")
+  [[ -n "$REMOTE" ]] && args+=(--remote "$REMOTE")
+  log "dvc ${args[*]}"
+  retry_run 3 -- dvc "${args[@]}"
 }
 
 do_push() {
-  local rflag=""
-  [[ -n "$REMOTE" ]] && rflag="--remote ${REMOTE}"
-  log "Pushing DVC objects ${REMOTE:+to $REMOTE} (jobs=${JOBS})"
-  _run "dvc push ${rflag} -j ${JOBS}"
+  local args=(push -j "$JOBS")
+  [[ -n "$REMOTE" ]] && args+=(--remote "$REMOTE")
+  log "dvc ${args[*]}"
+  retry_run 3 -- dvc "${args[@]}"
 }
 
 do_gc() {
-  local base="dvc gc -c"
-  [[ "$ALL_BRANCHES" == "1" ]] && base+=" --all-branches --all-tags"
-  log "Garbage collecting unused DVC objects (cloud) ${ALL_BRANCHES:+[all branches/tags]}"
-  _run "$base"
+  local args=(gc -c)
+  (( ALL_BRANCHES==1 )) && args+=(--all-branches --all-tags)
+  log "dvc ${args[*]}"
+  run_cmd dvc "${args[@]}"
 }
 
 do_repro() {
-  log "Reproducing pipeline stages (dvc repro)"
-  _run "dvc repro"
+  local args=(repro)
+  log "dvc ${args[*]}"
+  run_cmd dvc "${args[@]}"
 }
 
-# ---- main dispatch -----------------------------------------------------------
-main() {
-  # If no verb given, default to --status
-  if [[ "$DO_PUSH$DO_PULL$DO_FETCH$DO_STATUS$DO_GC$DO_REPRO$DO_LIST" == "0000000" ]]; then
-    DO_STATUS="1"
-  fi
-
-  {
-    exec 200>"$LOCK_FILE"
-    with_lock bash -c '
-      set -Eeuo pipefail
-
-      [[ "'"$DO_LIST"'" == "1" ]]   && list_remotes
-      [[ "'"$DO_STATUS"'" == "1" ]] && status_cloud
-      [[ "'"$DO_FETCH"'" == "1" ]]  && do_fetch
-      [[ "'"$DO_PULL"'" == "1" ]]   && do_pull
-      [[ "'"$DO_PUSH"'" == "1" ]]   && do_push
-      [[ "'"$DO_GC"'" == "1" ]]     && do_gc
-      [[ "'"$DO_REPRO"'" == "1" ]]  && do_repro
-    '
-  }
-  log "Done."
+list_remotes() {
+  log "dvc remote list"
+  run_cmd dvc remote list
 }
 
-main "$@"
+# --------- dispatch -----------------------------------------------------------
+# default verb: --status
+if (( DO_PUSH==0 && DO_PULL==0 && DO_FETCH==0 && DO_STATUS==0 && DO_GC==0 && DO_REPRO==0 && DO_LIST==0 )); then
+  DO_STATUS=1
+fi
+
+START_TS="$(ts)"
+START_EPOCH="$(date +%s)"
+FAIL=0
+
+with_lock bash -c '
+  set -Eeuo pipefail
+  # Export functions & vars to subshell for readability
+  '"$(typeset -f log warn run_cmd retry_run status_cloud do_fetch do_pull do_push do_gc do_repro list_remotes)"'
+  DO_LIST='"$DO_LIST"'
+  DO_STATUS='"$DO_STATUS"'
+  DO_FETCH='"$DO_FETCH"'
+  DO_PULL='"$DO_PULL"'
+  DO_PUSH='"$DO_PUSH"'
+  DO_GC='"$DO_GC"'
+  DO_REPRO='"$DO_REPRO"'
+
+  (( DO_LIST==1 ))   && list_remotes || true
+  (( DO_STATUS==1 )) && status_cloud || true
+  (( DO_FETCH==1 ))  && status_cloud && do_fetch || true
+  (( DO_PULL==1 ))   && do_pull || true
+  (( DO_PUSH==1 ))   && do_push || true
+  (( DO_GC==1 ))     && do_gc || true
+  (( DO_REPRO==1 ))  && do_repro || true
+' || FAIL=$?
+
+END_TS="$(ts)"
+END_EPOCH="$(date +%s)"
+DUR=$(( END_EPOCH - START_EPOCH ))
+
+# --------- summary ------------------------------------------------------------
+if (( WANT_JSON==1 )); then
+  # JSON summary to stdout (no jq required)
+  cat <<JSON
+{
+  "ts_start": "${START_TS}",
+  "ts_end": "${END_TS}",
+  "duration_sec": ${DUR},
+  "kaggle": $( is_kaggle && echo true || echo false ),
+  "remote": "$(printf '%s' "${REMOTE}")",
+  "jobs": ${JOBS},
+  "ops": {
+    "list": $( ((DO_LIST)) && echo true || echo false ),
+    "status": $( ((DO_STATUS)) && echo true || echo false ),
+    "fetch": $( ((DO_FETCH)) && echo true || echo false ),
+    "pull": $( ((DO_PULL)) && echo true || echo false ),
+    "push": $( ((DO_PUSH)) && echo true || echo false ),
+    "gc": $( ((DO_GC)) && echo true || echo false ),
+    "repro": $( ((DO_REPRO)) && echo true || echo false )
+  },
+  "dry_run": $( ((DRY_RUN)) && echo true || echo false ),
+  "exit_code": ${FAIL}
+}
+JSON
+else
+  log "Done in ${DUR}s (exit=${FAIL})."
+fi
+
+exit "${FAIL}"
