@@ -30,7 +30,7 @@ types-PyYAML==6.0.12.20240808
 types-requests==2.32.0.20240907
 
 # --- JSON / Schema Validation ----------------------------------------
-check-jsonschema==0.30.0
+check-jsonschema==0.33.3
 # Keep dev in lockstep with runtime to avoid resolver drift:
 jsonschema==4.22.0
 
