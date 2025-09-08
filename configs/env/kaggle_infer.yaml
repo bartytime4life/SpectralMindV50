@@ -1,0 +1,61 @@
+# configs/env/kaggle_infer.yaml
+# SpectraMind V50 — Kaggle inference profile
+# Use (example):
+#   python -m spectramind predict env=kaggle_infer \
+#     +paths.input=/kaggle/input/ariel-data-challenge-2025 \
+#     +submission.out_path=/kaggle/working/submission.csv
+
+name: kaggle_infer
+
+seed: 42
+reproducibility:
+  torch_deterministic_algorithms: true
+  cudnn_benchmark: false
+  allow_tf32: false
+
+device: "cuda"
+precision: "16-mixed"                # switch to "32-true" if needed
+
+dataloader:
+  num_workers: 2
+  persistent_workers: false
+  pin_memory: true
+
+paths:
+  project_root: /kaggle/working/spectramind-v50
+  artifacts_root: ${paths.project_root}/artifacts
+  runs: ${paths.artifacts_root}/runs
+  input: /kaggle/input/ariel-data-challenge-2025
+
+# Where to write final CSV (consumed by your predict stage)
+submission:
+  out_path: /kaggle/working/submission.csv
+
+# Hydra run directories under /kaggle/working
+hydra:
+  run:
+    dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${paths.artifacts_root}/sweeps
+    subdir: ${hydra.job.num}
+
+# Trainer — keep lean; predict step won’t train
+trainer:
+  accelerator: auto
+  devices: 1
+  strategy: auto
+  max_epochs: 1                  # ignored by predict; harmless
+  enable_model_summary: false
+  detect_anomaly: false
+  benchmark: false
+  log_every_n_steps: 1000        # silence logs
+
+# Disable WANDB; favor local JSONL if needed
+logger:
+  wandb:
+    mode: disabled
+    project: "spectramind-v50"
+    entity: null
+  jsonl:
+    log_dir: ${hydra:run.dir}/logs/jsonl
+    append: true
