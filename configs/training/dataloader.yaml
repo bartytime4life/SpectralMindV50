@@ -1,51 +1,48 @@
-# configs/training/dataloader.yaml
 # ======================================================================
-# SpectraMind V50 — DataLoader Config
+# SpectraMind V50 — DataLoader Config (Upgraded)
 # ======================================================================
-# Defines batch size, worker threads, prefetching, pinning, and collate
-# strategies for training/eval dataloaders. Designed to handle long
-# exoplanet transit sequences (FGS1) and spectral cubes (AIRS).
+# Governs DataLoader behavior across training/validation/test:
+# - batch sizing
+# - shuffling / drop_last
+# - worker threading & memory pinning
+# - custom collate functions for dual-sensor fusion (FGS1 + AIRS)
+#
+# Designed for Kaggle/CI constraints: limited CPU cores, no internet,
+# heavy GPU I/O. All keys are Hydra/oc.env overridable (SM_*).
 # ======================================================================
 
 dataloader:
-  # ------------------------------------------------------------------
-  # General loader params
-  # ------------------------------------------------------------------
-  batch_size: ${oc.env:SM_BATCH_SIZE, 32}   # default; tune per GPU
-  shuffle: true                             # shuffle training set
-  drop_last: true                           # drop incomplete last batch
+  # ------------------------------ General ------------------------------
+  batch_size: ${oc.env:SM_BATCH_SIZE, 32}
+  shuffle: ${oc.env:SM_SHUFFLE, true}
+  drop_last: ${oc.env:SM_DROP_LAST, true}
 
-  # ------------------------------------------------------------------
-  # Workers / performance
-  # ------------------------------------------------------------------
-  num_workers: ${oc.env:SM_WORKERS, 4}      # Kaggle safe (≤ CPU cores)
-  prefetch_factor: 2                        # per-worker prefetch
-  persistent_workers: true                  # reuse workers across epochs
-  pin_memory: true                          # pin host memory for CUDA transfer
+  # ------------------------------ Workers ------------------------------
+  num_workers: ${oc.env:SM_WORKERS, 2}          # Kaggle-safe default
+  prefetch_factor: ${oc.env:SM_PREFETCH, 2}     # per-worker prefetch
+  persistent_workers: ${oc.env:SM_PERSISTENT, false}
+  pin_memory: ${oc.env:SM_PIN_MEMORY, true}
 
-  # ------------------------------------------------------------------
-  # Collation / custom batching
-  # ------------------------------------------------------------------
-  collate_fn: "spectramind.data.collate.dual_channel_collate"
-  # This collate aligns:
-  #   - FGS1 long time-series (possibly binned:contentReference[oaicite:3]{index=3})
-  #   - AIRS spectral cubes (283 bins:contentReference[oaicite:4]{index=4})
-  # and ensures consistent shapes + masks across a batch.
+  # ------------------------------ Collate ------------------------------
+  collate_fn: ${oc.env:SM_COLLATE, "spectramind.data.collate.dual_channel_collate"}
+  # The collate function aligns:
+  #   - FGS1 long time-series (possibly binned / detrended)
+  #   - AIRS 283-bin spectral cubes (μ, σ targets)
+  # Produces consistent tensors + masks across a batch.
 
-  # ------------------------------------------------------------------
-  # Validation / test loader overrides
-  # ------------------------------------------------------------------
+  # -------------------------- Validation Loader ------------------------
   val:
-    batch_size: 64
+    batch_size: ${oc.env:SM_VAL_BATCH_SIZE, 64}
     shuffle: false
     drop_last: false
 
+  # ----------------------------- Test Loader ---------------------------
   test:
-    batch_size: 64
+    batch_size: ${oc.env:SM_TEST_BATCH_SIZE, 64}
     shuffle: false
     drop_last: false
 
-# Hydra output isolation
+# ------------------------------ Hydra I/O ------------------------------
 hydra:
   job_logging:
     root:
