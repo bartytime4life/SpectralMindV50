@@ -1,23 +1,28 @@
-# configs/training/early_stopping.yaml
+# ======================================================================
 # SpectraMind V50 — Early Stopping Configuration
-# Controls patience and monitoring for PyTorch Lightning callbacks.
+# ======================================================================
+# Encapsulates PyTorch Lightning EarlyStopping callback parameters.
+# Designed to be Hydra-composable and CLI-override-safe. Values can be
+# overridden via environment variables (SM_*). Works in concert with
+# configs/training/lightning.yaml and fast_ci.yaml profiles.
+# ======================================================================
 
 _target_: pytorch_lightning.callbacks.EarlyStopping
 
-# Which metric to monitor (must match your logged metrics in training)
-monitor: "val/loss"
+# Which metric to monitor — must be logged by Lightning
+monitor: ${oc.env:SM_ES_MONITOR, "val/loss"}
 
-# Mode can be "min" (stop when metric stops decreasing) or "max"
-mode: "min"
+# Mode: "min" → stop when metric stops decreasing; "max" → stop when increasing
+mode: ${oc.env:SM_ES_MODE, "min"}
 
-# How many epochs to wait after last improvement before stopping
-patience: 10
+# How many validation epochs to wait for improvement
+patience: ${oc.env:SM_ES_PATIENCE, 10}
 
-# Minimum change in the monitored quantity to qualify as an improvement
-min_delta: 0.0
+# Minimum relative change to qualify as improvement
+min_delta: ${oc.env:SM_ES_MIN_DELTA, 0.0}
 
-# Whether to stop training immediately when condition is met
-strict: true
+# Whether to raise if the monitored metric is missing
+strict: ${oc.env:SM_ES_STRICT, true}
 
-# Verbosity (set to false to silence)
-verbose: true
+# Verbosity of logging
+verbose: ${oc.env:SM_ES_VERBOSE, true}
