@@ -1,0 +1,54 @@
+name: sbom
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+      - '.github/workflows/sbom.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'  # weekly refresh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cyclonedx:
+    name: CycloneDX SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            poetry.lock
+            setup.cfg
+            setup.py
+
+      - name: Install CycloneDX
+        run: python -m pip install --upgrade cyclonedx-bom
+
+      - name: Generate SBOM (JSON)
+        run: |
+          mkdir -p reports
+          cyclonedx-bom -r -o reports/sbom.json || true
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: reports/sbom.json
+          retention-days: 14
