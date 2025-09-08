@@ -2,11 +2,16 @@
 # requirements-kaggle.txt — SpectraMind V50
 # ------------------------------------------------------------------------------
 # Purpose:
-#   Runtime-only deps for Kaggle kernels & DVC stages.
+#   Runtime-only deps for Kaggle kernels & DVC stages (no dev/lint/test).
 #   Torch/TV/PyG installed via bin/kaggle-boot.sh to match Kaggle CUDA wheels.
 #
 # Usage:
 #   pip install -r requirements-kaggle.txt
+#
+# Notes:
+#   • Pin to NumPy 1.26.x for broad binary wheel availability on Kaggle.
+#   • numba pinned to 0.59.x (0.60+ requires NumPy 2.x).
+#   • Keep package count small to speed up cold-start installs.
 # ==============================================================================
 
 # --- CLI & Config ---
@@ -16,12 +21,16 @@ omegaconf==2.3.0
 pydantic==2.7.4
 pyyaml==6.0.1
 jsonschema==4.22.0
+packaging==24.1
 
 # --- Core Scientific Stack ---
 numpy==1.26.4
 scipy==1.11.4
 pandas==2.2.2
-polars==0.20.31        # faster tabular ops (opt-in, safe)
+polars==0.20.31        # opt-in, pure-Rust wheels; fast tabular ops
+
+# --- Parquet / Arrow I/O ---
+pyarrow==16.1.0        # parquet/arrow; matches pandas engine expectations
 
 # --- Progress / Logging ---
 tqdm==4.66.4
@@ -30,18 +39,23 @@ loguru==0.7.2          # structured logging, lightweight
 
 # --- Visualization & Diagnostics ---
 matplotlib==3.8.4
+seaborn==0.13.2        # Kaggle-preinstalled; pin for safety
 umap-learn==0.5.6
 networkx==3.2.1
-seaborn==0.13.2        # Kaggle-preinstalled, pinned for safety
 
 # --- Model Utils (non-Torch) ---
 scikit-learn==1.5.1    # classical ML baselines & preprocessing
-joblib==1.4.2          # lightweight caching
+joblib==1.4.2          # caching
 statsmodels==0.14.2    # ARIMA, regression diagnostics
 
 # --- Symbolic / Physics-informed ---
-sympy==1.13.1          # symbolic checks & constraints
-numba==0.60.0          # JIT acceleration (safe for Kaggle)
+sympy==1.13.1
+numba==0.59.1          # 0.60+ requires NumPy 2.x; keep 1.26.x compatibility
+
+# --- DVC (core only; no remote extras) ---
+# Use plain 'dvc' for local pipeline execution/caching in kernels.
+# Remotes (s3/ssh/gcs) are configured outside Kaggle or via bin scripts.
+dvc==3.51.2
 
 # ⚠️ Torch stack handled separately by bin/kaggle-boot.sh:
 # torch==2.8.0
