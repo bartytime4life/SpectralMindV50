@@ -37,7 +37,7 @@ jsonschema==4.22.0
 # --- Data Science Utils (dev convenience) -----------------------------
 # Mirror runtime pins to prevent test env skew.
 pandas==2.2.2
-polars==0.20.31
+polars==1.33.0
 
 # --- CLI / Rich Output ------------------------------------------------
 rich==13.7.1               # colored logs, improved CLI UX
