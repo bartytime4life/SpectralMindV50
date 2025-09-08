@@ -44,3 +44,17 @@ Each ADR captures the **context, decision, consequences, and compliance gates** 
 * ADR-0009 — [TBD: Artifact Retention & Governance (cleanup, archive, provenance policy)]  
 
 ---
+
+## ADR Dependency Graph
+
+```mermaid
+flowchart TD
+  A["ADR-0001 Hydra + DVC"] --> B["ADR-0005 CLI-First Orchestration"]
+  B --> C["ADR-0006 Reproducibility Standards"]
+  C --> D["ADR-0007 Submission Schema & Validation"]
+
+  A --> E["ADR-0002 Physics-Informed Losses"]
+  E --> F["ADR-0004 Dual Encoder Fusion"]
+
+  A --> G["ADR-0003 CI ↔ CUDA Parity"]
+  G --> C
