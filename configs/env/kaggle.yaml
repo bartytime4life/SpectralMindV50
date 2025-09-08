@@ -3,30 +3,72 @@
 # Kaggle Environment Config — SpectraMind V50
 # ======================================================================
 # Defines runtime settings for execution inside Kaggle notebooks/kernels.
-# This config enforces Kaggle’s constraints:
+# Kaggle constraints:
 #   - No internet access
 #   - Pre-mounted competition data under /kaggle/input/
 #   - Writable scratch space under /kaggle/working/
 #
 # Usage:
-#   python -m spectramind.train +env=kaggle
-#
-# Keys:
-#   name        : environment label
-#   device      : default compute device ("cuda" if GPU enabled)
-#   num_workers : DataLoader worker threads (safe default = 2 on Kaggle)
-#   seed        : default random seed
-#   paths       : canonical directories for data, logs, artifacts
+#   python -m spectramind train env=kaggle
 # ======================================================================
 
+# Label for the environment
 name: kaggle
 
-device: "cuda"          # Kaggle GPU → "cuda"; force "cpu" if no GPU quota
-num_workers: 2          # conservative worker count for Kaggle 2-core CPUs
-seed: 42                # reproducibility across runs
+# Reproducibility
+seed: 42
+reproducibility:
+  torch_deterministic_algorithms: true
+  cudnn_benchmark: false
+  allow_tf32: false
 
+# Compute / precision
+device: "cuda"             # Force "cpu" if no GPU quota
+precision: "16-mixed"      # Prefer AMP on Kaggle GPUs; override to "32-true" if unstable
+
+# DataLoader ergonomics on Kaggle
+dataloader:
+  num_workers: 2
+  persistent_workers: false
+  pin_memory: true
+
+# Canonical directories for Kaggle
 paths:
-  root: /kaggle/working/spectramind-v50
-  logs: ${paths.root}/logs           # training + diagnostics logs
-  artifacts: ${paths.root}/artifacts # checkpoints + submission bundles
+  project_root: /kaggle/working/spectramind-v50
+  artifacts_root: ${paths.project_root}/artifacts
+  runs: ${paths.artifacts_root}/runs
+  # Competition input (mounted by Kaggle)
   data: /kaggle/input/ariel-data-challenge-2025
+
+# Hydra run directories (timestamped under /kaggle/working/artifacts)
+hydra:
+  run:
+    dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${paths.artifacts_root}/sweeps
+    subdir: ${hydra.job.num}
+
+# Trainer overrides for Kaggle
+trainer:
+  accelerator: auto         # cpu/cuda
+  devices: 1
+  strategy: auto
+  detect_anomaly: false
+  benchmark: false
+  enable_model_summary: true
+  log_every_n_steps: 25
+
+# Disable WANDB by default on Kaggle; prefer JSONL/CSV
+logger:
+  wandb:
+    mode: disabled
+    project: "spectramind-v50"
+    entity: null
+  jsonl:
+    log_dir: ${hydra:run.dir}/logs/jsonl
+    append: true
+
+# Notes:
+# - Access data under ${paths.data}; e.g., `${paths.data}/train.csv`.
+# - Write artifacts (checkpoints, submission.csv) under ${hydra:run.dir}/...,
+#   which resolves to /kaggle/working/spectramind-v50/artifacts/runs/<timestamp>/...
