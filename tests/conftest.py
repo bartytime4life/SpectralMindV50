@@ -8,7 +8,7 @@
 #   • CLI runner for `spectramind` Typer app
 #   • Hydra-friendly (per-test runtime dirs, full error traces)
 #   • Kaggle/offline guardrails (no net, stable threads)
-#   • Device selection fixture (CUDA/CPU auto, with env override)
+#   • Device selection fixture (CUDA/CPU/MPS auto, with env override)
 #
 # Usage
 #   pytest -q
@@ -30,28 +30,30 @@ from typing import Iterator, Optional
 import numpy as np
 import pytest
 
+# ──────────────────────────────────────────────────────────────────────────────
 # Optional deps (gracefully degrade if absent)
+# ──────────────────────────────────────────────────────────────────────────────
 try:
-    import torch
+    import torch  # type: ignore
 except Exception:  # pragma: no cover
     torch = None  # type: ignore
 
 try:
-    from typer.testing import CliRunner
+    from typer.testing import CliRunner  # type: ignore
 except Exception:  # pragma: no cover
     CliRunner = None  # type: ignore
 
-# Hydra is optional in unit tests that don't compose configs
-# We avoid importing hydra at module level to prevent global state issues
-# and only adjust environment knobs here.
+# Headless/quiet plotting for tests that import plotting modules
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
+
+# Hydra full tracebacks; confine run dirs to CWD (we chdir per test)
 os.environ.setdefault("HYDRA_FULL_ERROR", "1")
-# Keep Hydra output contained in tmp per-test dirs (see tmp_workdir fixture)
-os.environ.setdefault("HYDRA_RUN_DIR", ".")  # hydra==1.x respects per-run cwd
+os.environ.setdefault("HYDRA_RUN_DIR", ".")
 
-
-# -----------------------------------------------------------------------------#
-# Utility helpers
-# -----------------------------------------------------------------------------#
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def _find_repo_root(start: Optional[Path] = None) -> Path:
     """Ascend from `start` (or CWD) until a repo root marker is found."""
     start = (start or Path.cwd()).resolve()
@@ -61,7 +63,7 @@ def _find_repo_root(start: Optional[Path] = None) -> Path:
         if any((cur / m).exists() for m in markers):
             return cur
         if cur.parent == cur:
-            return start  # fallback to start if nothing found
+            return start  # fallback to original start
         cur = cur.parent
 
 
@@ -71,11 +73,8 @@ def _add_src_to_syspath(repo_root: Path) -> None:
         sys.path.insert(0, str(src))
 
 
-# -----------------------------------------------------------------------------#
-# Global session tweaks (stable, reproducible tests)
-# -----------------------------------------------------------------------------#
 def _pin_threads() -> None:
-    # Reasonable defaults for CI/Kaggle stability; override in env if needed.
+    """Reasonable defaults for CI/Kaggle stability; override in env if needed."""
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -84,10 +83,9 @@ def _pin_threads() -> None:
 
 _pin_threads()
 
-
-# -----------------------------------------------------------------------------#
+# ──────────────────────────────────────────────────────────────────────────────
 # Session-scoped fixtures
-# -----------------------------------------------------------------------------#
+# ──────────────────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="session")
 def repo_root() -> Path:
     """Path to the repository root (heuristic: .git/ or pyproject.toml)."""
@@ -101,20 +99,21 @@ def _session_env(repo_root: Path) -> None:
     """
     Session-level environment hygiene:
       • Ensure PYTHONHASHSEED set (deterministic hashing)
-      • Point XDG-ish caches inside repo/.pytest_cache if available
+      • Point XDG-ish caches inside repo/.pytest_cache
+      • Default to offline unless explicitly allowed
     """
     os.environ.setdefault("PYTHONHASHSEED", "0")
-    # Keep tooling caches local to repo to avoid cross-project contamination
     cache_base = (repo_root / ".pytest_cache").resolve()
     cache_base.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_base))
-    # Prevent accidental internet usage in CI unless explicitly allowed
     os.environ.setdefault("SPECTRAMIND_ALLOW_NET", "0")
+    # Nicer numpy printing for debugging failures
+    np.set_printoptions(precision=6, suppress=True, linewidth=140)
 
 
-# -----------------------------------------------------------------------------#
+# ──────────────────────────────────────────────────────────────────────────────
 # Function-scoped fixtures
-# -----------------------------------------------------------------------------#
+# ──────────────────────────────────────────────────────────────────────────────
 @pytest.fixture
 def rng_seed() -> int:
     """Default seed value (override via env SPECTRAMIND_TEST_SEED)."""
@@ -138,22 +137,22 @@ def seeded(rng_seed: int) -> None:
             torch.use_deterministic_algorithms(True)  # type: ignore[attr-defined]
             os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
         except Exception:
-            # Older torch or CPU-only; ignore
-            pass
+            pass  # older torch / CPU-only
 
 
 @pytest.fixture
 def tmp_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
-    Temporary working directory for each test.
-    We chdir into it to:
-      • isolate Hydra run dirs
-      • avoid polluting the repo
+    Per-test isolated working directory:
+      • chdir to it (Hydra run dir lives here)
+      • standard artifacts subfolders
     """
     monkeypatch.chdir(tmp_path)
-    # Create standard per-run artifact locations used by the project
     for d in ["artifacts", "outputs", "logs", "cache"]:
-        (tmp_path / d).mkdir(exist_ok=True, parents=True)
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    # Matplotlib cache inside tmp to avoid cross-test contention
+    (tmp_path / "cache" / "matplotlib").mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(tmp_path / "cache" / "matplotlib"))
     return tmp_path
 
 
@@ -161,8 +160,7 @@ def tmp_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def no_net(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Block outbound network calls by monkeypatching socket.
-    Allow localhost and Unix sockets.
-    Opt-out by setting SPECTRAMIND_ALLOW_NET=1.
+    Allow localhost and Unix sockets. Opt-out via SPECTRAMIND_ALLOW_NET=1.
     """
     if os.environ.get("SPECTRAMIND_ALLOW_NET", "0") == "1":
         return
@@ -171,7 +169,7 @@ def no_net(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class _BlockedSocket(socket.socket):  # type: ignore[misc]
         def connect(self, address):  # type: ignore[override]
-            host, *_ = address if isinstance(address, tuple) else (address, )
+            host, *_ = address if isinstance(address, tuple) else (address,)
             allow = {"127.0.0.1", "::1", "localhost"}
             if isinstance(host, str) and (host in allow or host.startswith("/")):
                 return real_socket.connect(self, address)
@@ -194,7 +192,6 @@ def kaggle_like_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setenv("TERM", "dumb")
     monkeypatch.setenv("SPECTRAMIND_ALLOW_NET", "0")
-    # Torch deterministic flags are handled by `seeded`
 
 
 @pytest.fixture
@@ -247,17 +244,21 @@ def cli_runner(repo_root: Path):
     if CliRunner is None:
         pytest.skip("typer is not installed")
     _add_src_to_syspath(repo_root)
-    # Import here to avoid importing the package at collection time globally
+
+    # Import under repo_root to pick up local package
     with _temporarily_cwd(repo_root):
         try:
-            from spectramind.cli import app  # type: ignore
+            # Your project exposes the Typer app as `cli_app` (not `app`)
+            from spectramind.cli import cli_app  # type: ignore
         except Exception as e:  # pragma: no cover
             pytest.skip(f"CLI not available: {e}")
 
     runner = CliRunner(mix_stderr=False)
+
     class _Runner:
         def invoke(self, args: list[str] | tuple[str, ...], **kwargs):
-            return runner.invoke(app, list(args), **kwargs)
+            return runner.invoke(cli_app, list(args), **kwargs)
+
     return _Runner()
 
 
@@ -271,9 +272,8 @@ def _temporarily_cwd(path: Path) -> Iterator[None]:
         os.chdir(prev)
 
 
-# -----------------------------------------------------------------------------#
+# ──────────────────────────────────────────────────────────────────────────────
 # Optional: asyncio event loop fixture (only if you use pytest-asyncio)
-# Uncomment if needed to ensure fresh loop per test.
 # -----------------------------------------------------------------------------
 # import asyncio
 # @pytest.fixture
