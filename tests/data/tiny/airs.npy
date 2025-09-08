@@ -1,1 +1,20 @@
+import numpy as np
+from pathlib import Path
 
+# Deterministic seed for reproducibility
+rng = np.random.default_rng(seed=42)
+
+# Simulated smooth baseline spectrum with faint sinusoidal features
+x = np.linspace(0, 1, 283)
+baseline = 0.01 + 0.001 * np.sin(2 * np.pi * 3 * x)  # ~1% transit depth
+noise = 1e-4 * rng.standard_normal(size=283)         # small Gaussian noise
+spectrum = baseline + noise
+
+# Clip to [0, 1] (physically valid transit depth)
+spectrum = np.clip(spectrum, 0.0, 1.0)
+
+out_path = Path("tests/data/tiny/airs.npy")
+out_path.parent.mkdir(parents=True, exist_ok=True)
+np.save(out_path, spectrum)
+
+print(f"Saved AIRS tiny test spectrum → {out_path.resolve()} shape={spectrum.shape}")
