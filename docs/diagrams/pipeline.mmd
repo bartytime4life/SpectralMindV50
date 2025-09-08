@@ -1,33 +1,46 @@
 flowchart LR
+
   %% =============================
   %% USER / CLI ENTRY
   %% =============================
-  A["User / CI<br/>(spectramind CLI)"] --> B["Hydra Configs<br/>(env, data, calib, model, loss, training)"]
+  A["👤 User / CI<br/>(spectramind CLI)"] --> B["⚙️ Hydra Configs<br/>(env, data, calib, model, loss, training)"]
 
   %% =============================
   %% PIPELINE STAGES
   %% =============================
-  B --> C["Calibrate<br/>(raw → calibrated)"]
-  C --> D["Preprocess<br/>(calibrated → tensors)"]
-  D --> E["Train<br/>(tensors → checkpoints)"]
-  E --> F["Predict<br/>(checkpoints → μ, σ)"]
-  F --> G["Diagnose<br/>(inject-&-recover, HTML dashboard)"]
-  F --> H["Submit<br/>(package, schema validate, zip/json)"]
+  B --> C["🔧 Calibrate<br/>(raw → calibrated)"]
+  C --> D["🧹 Preprocess<br/>(calibrated → tensors)"]
+  D --> E["🧑‍🏫 Train<br/>(tensors → checkpoints)"]
+  E --> F["🔮 Predict<br/>(checkpoints → μ, σ)"]
+  F --> G["🩺 Diagnose<br/>(inject-&-recover, HTML dashboard)"]
+  F --> H["📦 Submit<br/>(package, schema validate, zip/json)"]
 
   %% =============================
   %% ARTIFACTS & STORAGE
   %% =============================
-  C -.-> Z["data/interim/calibrated/ (DVC)"]
-  D -.-> Y["data/processed/tensors/ (DVC)"]
-  E -.-> X["artifacts/checkpoints/model.ckpt"]
-  F -.-> W["artifacts/predictions/{mu.csv,sigma.csv}"]
-  G -.-> V["artifacts/reports/diagnostics_dashboard.html"]
-  H -.-> U["dist/submission.{zip,json,csv}"]
+  C -.-> Z["📂 data/interim/calibrated/ (DVC)"]
+  D -.-> Y["📂 data/processed/tensors/ (DVC)"]
+  E -.-> X["💾 artifacts/checkpoints/model.ckpt"]
+  F -.-> W["📑 artifacts/predictions/{mu.csv, sigma.csv}"]
+  G -.-> V["📊 artifacts/reports/diagnostics_dashboard.html"]
+  H -.-> U["🗜️ dist/submission.{zip,json,csv}"]
 
   %% =============================
   %% REMOTE CACHE
   %% =============================
-  Z -.-> R["DVC Remote<br/>(local/S3/SSH)"]
+  Z -.-> R["☁️ DVC Remote<br/>(local / S3 / SSH)"]
   Y -.-> R
   X -.-> R
   W -.-> R
+
+  %% =============================
+  %% FLEXIBLE / SKIP PATHS
+  %% =============================
+  %% Start from pre-calibrated data
+  B -.skip.-> D
+  %% Reuse tensors without retraining
+  D -.skip.-> F
+  %% Reuse old checkpoints directly for inference
+  X -.reuse.-> F
+  %% Predict-only Kaggle kernel path
+  B -.predict-only.-> F
