@@ -69,6 +69,7 @@ app = typer.Typer(
 
 # Subapps
 calib_app = typer.Typer(help="Calibration (raw → calibrated cubes)")
+preproc_app = typer.Typer(help="Preprocess (calibrated → model-ready tensors)")  # NEW
 train_app = typer.Typer(help="Model training")
 predict_app = typer.Typer(help="Prediction / inference")
 diagnose_app = typer.Typer(help="Diagnostics & reporting")
@@ -76,6 +77,7 @@ submit_app = typer.Typer(help="Submission packaging / validation")
 sys_app = typer.Typer(help="System utilities (doctor, version, env, cfg-tools)")
 
 app.add_typer(calib_app, name="calibrate")
+app.add_typer(preproc_app, name="preprocess")
 app.add_typer(train_app, name="train")
 app.add_typer(predict_app, name="predict")
 app.add_typer(diagnose_app, name="diagnose")
@@ -483,6 +485,57 @@ def calibrate_run(
         _fail(str(e))
 
 # ======================================================================================
+# preprocess (NEW)
+# ======================================================================================
+
+@preproc_app.command("run")
+def preprocess_run(
+    ctx: typer.Context,
+    calib_dir: Path = typer.Argument(..., exists=True, help="Directory with calibrated data (from 'calibrate')"),
+    out_dir: Path = typer.Option(Path("data/processed/tensors_train"), help="Output directory for model tensors"),
+    config: Optional[Path] = typer.Option(None, help="Optional preprocessing config (.yaml/.json)"),
+    set: List[str] = typer.Option([], "--set", "-s", help="Config overrides: key=value (repeatable)"),
+    use_dvc: bool = typer.Option(False, help="Reproduce via DVC stage 'preprocess' if available"),
+    dvc_print_cmd: bool = typer.Option(False, help="Print DVC command"),
+    dry_run: bool = typer.Option(False, help="Don't execute, just show actions"),
+) -> None:
+    """
+    Run preprocessing / feature extraction (calibrated → model-ready tensors).
+
+    This stage isolates detrending, segmentation, feature engineering, and standardization
+    from the upstream calibration step to maximize DVC cache hits and reproducibility.
+    """
+    events_path: Path = ctx.obj["events_path"]
+    try:
+        cfg = _merge_overrides(_load_config_any(config), set)
+        cfg_hash = _hash_config_dict(cfg)
+        _ensure_exists(calib_dir, "calib_dir")
+        ensure_dir(out_dir)
+
+        _write_event(events_path, "preprocess:start", "begin", cfg_hash=cfg_hash, calib=str(calib_dir), out=str(out_dir))
+
+        if use_dvc:
+            _run_dvc("preprocess", dry_run=dry_run, print_cmd=dvc_print_cmd)
+        else:
+            if dry_run:
+                _ok("DRY-RUN: would call spectramind.pipeline.preprocess.run(...)")
+            else:
+                # Delegate to your real preprocessor
+                # from spectramind.pipeline.preprocess import run as preproc_impl
+                # preproc_impl(calib_dir=calib_dir, out_dir=out_dir, cfg=cfg)
+                _warn("Using placeholder preprocessor — wire spectramind.pipeline.preprocess.run(...)")
+                (Path(out_dir) / "_preprocess_done.txt").write_text("ok\n", encoding="utf-8")
+
+        _write_event(events_path, "preprocess:end", "done", out=str(out_dir))
+        _ok(f"Preprocess completed → {out_dir}")
+    except SpectraMindError as e:
+        _write_event(events_path, "preprocess:error", str(e))
+        _fail(str(e))
+    except Exception as e:
+        _write_event(events_path, "preprocess:error", f"unhandled: {e}")
+        _fail(f"Preprocess failed: {e}")
+
+# ======================================================================================
 # train
 # ======================================================================================
 
@@ -594,6 +647,50 @@ def predict_run(
 # ======================================================================================
 # diagnose
 # ======================================================================================
+
+@diagnose_app.command("run")  # NEW
+def diagnose_run(
+    ctx: typer.Context,
+    preds: Path = typer.Argument(..., exists=True, help="Predictions CSV: id,bin,mu,sigma"),
+    out_dir: Path = typer.Option(Path("artifacts/diagnostics"), help="Diagnostics output directory"),
+    truth: Optional[Path] = typer.Option(None, help="Optional ground-truth CSV: id,bin,target"),
+    use_dvc: bool = typer.Option(False, help="Reproduce via DVC stage 'diagnose' if available"),
+    dvc_print_cmd: bool = typer.Option(False, help="Print DVC command"),
+    dry_run: bool = typer.Option(False, help="Don't execute, just show actions"),
+) -> None:
+    """
+    Run metrics & sanity checks (GLL, residuals, coverage, smoothness) and emit JSON summary.
+    """
+    events_path: Path = ctx.obj["events_path"]
+    try:
+        _ensure_exists(preds, "preds")
+        ensure_dir(out_dir)
+
+        if use_dvc:
+            _run_dvc("diagnose", dry_run=dry_run, print_cmd=dvc_print_cmd)
+            if not dry_run:
+                _ok("Diagnostics (DVC) completed")
+            return
+
+        if dry_run:
+            _ok(f"DRY-RUN: would call spectramind.diagnostics.run_diagnostics(...) → {out_dir}")
+            return
+
+        # Delegate to diagnostics module (added in src/spectramind/diagnostics/__init__.py)
+        try:
+            from spectramind.diagnostics import run_diagnostics
+        except Exception as e:
+            _fail(f"diagnostics module not available: {e}")
+
+        summary = run_diagnostics(preds_path=preds, truth_path=truth, out_dir=out_dir, report_name="report.html")
+        _write_event(events_path, "diagnose:end", "done", out=str(out_dir), summary=summary)
+        _ok(f"Diagnostics summary written → {out_dir / 'summary.json'}")
+    except SpectraMindError as e:
+        _write_event(events_path, "diagnose:error", str(e))
+        _fail(str(e))
+    except Exception as e:
+        _write_event(events_path, "diagnose:error", f"unhandled: {e}")
+        _fail(f"Diagnostics failed: {e}")
 
 @diagnose_app.command("report")
 def diagnose_report(
