@@ -1,0 +1,75 @@
+name: integration
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'configs/**'
+      - 'dvc.yaml'
+      - 'dvc.lock'
+      - 'scripts/**'
+      - '.github/workflows/integration.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/**'
+      - 'configs/**'
+      - 'dvc.yaml'
+      - 'dvc.lock'
+      - 'scripts/**'
+      - '.github/workflows/integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dvc-cli:
+    name: DVC + CLI Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            poetry.lock
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install dvc[s3]
+
+      # If you have OIDC S3 access, uncomment and set your role arn in secrets
+      # - name: AWS OIDC
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      #     aws-region: us-east-1
+
+      - name: DVC dry-run
+        env: { DVC_NO_ANALYTICS: "true" }
+        run: |
+          dvc version
+          dvc doctor
+          dvc repro --dry
+
+      - name: CLI help smoke
+        run: |
+          python -m spectramind --help
+          python -m spectramind calibrate --help
+          python -m spectramind train --help
+          python -m spectramind predict --help
+          python -m spectramind diagnose --help
+          python -m spectramind submit --help
