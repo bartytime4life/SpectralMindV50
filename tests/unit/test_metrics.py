@@ -1,3 +1,6 @@
+# tests/train/test_metrics.py
+from __future__ import annotations
+
 import math
 import numpy as np
 import pytest
@@ -11,7 +14,24 @@ from spectramind.train.metrics import (
     sharpness,
 )
 
+# ----------------------------------------------------------------------------- #
+# Helpers
+# ----------------------------------------------------------------------------- #
+def _rng(seed: int = 0) -> np.random.Generator:
+    return np.random.default_rng(seed)
 
+
+def _has_torch() -> bool:
+    try:
+        import torch  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# ----------------------------------------------------------------------------- #
+# gaussian_nll
+# ----------------------------------------------------------------------------- #
 def test_gaussian_nll_scalar_numpy():
     y = np.array([1.0])
     mu = np.array([1.5])
@@ -20,11 +40,11 @@ def test_gaussian_nll_scalar_numpy():
     var = sigma ** 2
     manual = 0.5 * (np.log(2.0 * math.pi * var) + (y - mu) ** 2 / var)
     got = gaussian_nll(y, mu, sigma, reduction="mean")
-    assert np.isclose(got, manual, rtol=1e-7, atol=0)
+    assert np.isclose(got, manual, rtol=1e-7, atol=0.0)
 
 
 def test_gaussian_nll_batch_numpy_reductions():
-    rng = np.random.default_rng(0)
+    rng = _rng(7)
     N, D = 4, 6
     y = rng.normal(size=(N, D))
     mu = y + rng.normal(scale=0.1, size=(N, D))
@@ -37,10 +57,27 @@ def test_gaussian_nll_batch_numpy_reductions():
     assert np.isfinite(nll_mean)
     assert np.isfinite(nll_sum)
     assert nll_none.shape == (N, D)
-    # mean ~ sum / count
+    # mean ≈ sum / count
     assert np.isclose(nll_mean, np.nansum(nll_none) / (N * D), rtol=1e-6)
+    assert np.isclose(nll_sum, np.nansum(nll_none), rtol=1e-6)
 
 
+def test_gaussian_nll_broadcasting_numpy():
+    # y, mu broadcast across last dim; sigma is scalar broadcast
+    y = np.array([[0.0, 1.0, 2.0]])
+    mu = np.array([[0.5, 1.5, 1.0]])
+    sigma = np.array(0.2)  # scalar broadcast
+    # Should run and return appropriate shape with reduction="none"
+    out = gaussian_nll(y, mu, sigma, reduction="none")
+    assert out.shape == y.shape
+    # other reductions should be scalar
+    assert np.isscalar(gaussian_nll(y, mu, sigma, reduction="mean"))
+    assert np.isscalar(gaussian_nll(y, mu, sigma, reduction="sum"))
+
+
+# ----------------------------------------------------------------------------- #
+# challenge_gll
+# ----------------------------------------------------------------------------- #
 def test_challenge_gll_fgs1_weighting_effect():
     # Two-bin spectrum: bin0 is FGS1
     # Make an error only in bin0 so weighting dominates
@@ -63,6 +100,9 @@ def test_challenge_gll_fgs1_weighting_effect():
     assert np.isclose(w58, expected, rtol=1e-6)
 
 
+# ----------------------------------------------------------------------------- #
+# point metrics
+# ----------------------------------------------------------------------------- #
 def test_mae_rmse_basic_and_masks():
     y = np.array([[0.0, 2.0, 4.0]])
     mu = np.array([[0.0, 1.0, 1.0]])
@@ -73,27 +113,30 @@ def test_mae_rmse_basic_and_masks():
     assert np.isclose(rmse(y, mu, mask=mask), math.sqrt(9.0 / 2.0))
 
 
-def test_uncertainty_diagnostics():
-    rng = np.random.default_rng(1)
+# ----------------------------------------------------------------------------- #
+# uncertainty diagnostics
+# ----------------------------------------------------------------------------- #
+def test_uncertainty_diagnostics_deterministic_inside_interval():
+    # Make y guaranteed to be inside the 95% interval to avoid stochastic flakiness.
     N, D = 8, 5
     mu = np.zeros((N, D))
     sigma = np.full((N, D), 0.1)
-    # Sample y inside the 95% interval around mu with small noise
-    y = mu + rng.normal(scale=0.05, size=(N, D))
+    # 95% interval ≈ μ ± 1.96σ; choose y within ±0.5σ
+    y = mu + 0.5 * sigma
     cov = coverage(y, mu, sigma, alpha=0.95)
     shp = sharpness(sigma)
-    assert 0.8 <= cov <= 1.0  # usually high coverage for small noise, not guaranteed exact
+    assert np.isclose(cov, 1.0, rtol=0, atol=0)  # all points inside interval
     assert np.isclose(shp, 0.1)  # mean sigma
 
 
-@pytest.mark.skipif("torch" not in globals(), reason="Torch not installed")
+# ----------------------------------------------------------------------------- #
+# torch parity
+# ----------------------------------------------------------------------------- #
+@pytest.mark.skipif(not _has_torch(), reason="Torch not installed")
 def test_torch_equivalence_to_numpy():
-    try:
-        import torch
-    except Exception:
-        pytest.skip("Torch not available")
+    import torch  # type: ignore
 
-    rng = np.random.default_rng(123)
+    rng = _rng(123)
     N, D = 3, 7
     y_np = rng.normal(size=(N, D))
     mu_np = y_np + rng.normal(scale=0.1, size=(N, D))
