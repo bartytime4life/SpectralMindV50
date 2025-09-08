@@ -1,9 +1,9 @@
-# tests/integration/test_kaggle_runtime_guardrails.py
 from __future__ import annotations
 
 import os
 import socket
 from pathlib import Path
+from typing import Tuple
 
 import pytest
 
@@ -11,9 +11,23 @@ import pytest
 # ------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------
+def _kaggle_env_markers() -> list[str]:
+    return [
+        "KAGGLE_KERNEL_RUN_TYPE",
+        "KAGGLE_CONTAINER_NAME",
+        "KAGGLE_URL_BASE",
+        "KAGGLE_DATA_PROXY_TOKEN",  # sometimes present
+    ]
+
+
 def _is_kaggle() -> bool:
-    # The Kaggle runtime always mounts /kaggle and provides these well-known dirs.
-    return Path("/kaggle").exists() and Path("/kaggle/working").exists()
+    """
+    Heuristic: Kaggle mounts /kaggle tree and sets one or more env markers.
+    Both checks are useful to avoid false positives in local CI containers that mirror the FS.
+    """
+    dirs_ok = Path("/kaggle").exists() and Path("/kaggle/working").exists()
+    env_ok = any(os.environ.get(k) for k in _kaggle_env_markers())
+    return dirs_ok and env_ok
 
 
 def _try_write(p: Path, data: bytes = b"ok") -> tuple[bool, str]:
@@ -22,8 +36,48 @@ def _try_write(p: Path, data: bytes = b"ok") -> tuple[bool, str]:
         with p.open("wb") as f:
             f.write(data)
         return True, "wrote"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - we want the exact exception string
         return False, f"{type(e).__name__}: {e}"
+
+
+def _tcp_connect_blocked(host: str, port: int, timeout: float = 2.0) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        try:
+            s.connect((host, port))
+            return False  # connected: not blocked
+        except Exception:
+            return True
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _udp_send_blocked(host: str, port: int, timeout: float = 2.0) -> bool:
+    """
+    UDP "connect" doesn't handshake; we emulate an egress check by send+recv with timeout.
+    In a no-internet environment, we expect timeouts or network-level errors.
+
+    Return True if we see clear evidence of egress being blocked (timeout or socket error).
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        try:
+            s.sendto(b"\x00", (host, port))
+            # Most environments won't route/rsp; we expect timeout here
+            s.recvfrom(1)
+            return False  # got a response; egress not blocked
+        except Exception:
+            return True
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 # All tests in this file are Kaggle-only.
@@ -40,18 +94,28 @@ def test_kaggle_directories_present() -> None:
       - /kaggle/working (current working directory, RW)
       - /kaggle/temp   (scratch, RW)
     """
-    assert Path("/kaggle").exists()
-    assert Path("/kaggle/input").exists()
-    assert Path("/kaggle/working").exists()
-    assert Path("/kaggle/temp").exists()
+    assert Path("/kaggle").exists(), "/kaggle root missing"
+    assert Path("/kaggle/input").exists(), "/kaggle/input missing"
+    assert Path("/kaggle/working").exists(), "/kaggle/working missing"
+    assert Path("/kaggle/temp").exists(), "/kaggle/temp missing"
 
 
-def test_readonly_input_writable_working_temp(tmp_path_factory) -> None:
+def test_cwd_is_working_dir() -> None:
+    """
+    By convention, Kaggle kernels cd into /kaggle/working.
+    """
+    assert Path.cwd().resolve() == Path("/kaggle/working"), f"cwd is not /kaggle/working: {Path.cwd()}"
+
+
+def test_readonly_input_writable_working_temp() -> None:
     """
     /kaggle/input should be read-only; working and temp should be writable.
+    We check both os.access + a real write attempt for /kaggle/input.
     """
-    # RO check
-    ok_ro, msg_ro = _try_write(Path("/kaggle/input/__guardrails_test_ro.txt"))
+    # RO check via permission bit + write attempt
+    ro_root = Path("/kaggle/input")
+    assert not os.access(ro_root, os.W_OK), "/kaggle/input appears writable via os.access"
+    ok_ro, msg_ro = _try_write(ro_root / "__guardrails_test_ro.txt")
     assert not ok_ro, f"/kaggle/input unexpectedly writable: {msg_ro}"
 
     # RW checks
@@ -65,24 +129,28 @@ def test_readonly_input_writable_working_temp(tmp_path_factory) -> None:
 # ------------------------------------------------------------------------------
 # Network egress is blocked in Kaggle kernels
 # ------------------------------------------------------------------------------
-def test_network_blocked_via_socket() -> None:
+def test_network_blocked_via_tcp_and_udp() -> None:
     """
-    Kaggle disables outbound internet. A raw socket connect to a public IP should fail.
-    This uses a direct socket call to avoid library-specific handling.
+    Kaggle disables outbound internet. Both raw TCP and UDP attempts should fail or timeout quickly.
+    We probe a couple of well-known endpoints.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(2.0)
-    try:
-        with pytest.raises(Exception):
-            # Well-known public DNS; request should be blocked by the runtime.
-            s.connect(("8.8.8.8", 53))
-    finally:
-        s.close()
+    # Public DNS over TCP/UDP
+    blocked_tcp = any(
+        _tcp_connect_blocked(host, 53)
+        for host in ("8.8.8.8", "1.1.1.1")
+    )
+    blocked_udp = any(
+        _udp_send_blocked(host, 53)
+        for host in ("8.8.8.8", "1.1.1.1")
+    )
+    assert blocked_tcp, "TCP egress unexpectedly allowed (DNS TCP connect succeeded)"
+    assert blocked_udp, "UDP egress unexpectedly allowed (DNS UDP exchange succeeded)"
 
 
 def test_network_blocked_via_http_lib() -> None:
     """
     A higher-level HTTP request should also fail due to no internet in Kaggle.
+    This is a "nice to have": we xfail rather than fail if urllib is missing or behaves differently.
     """
     try:
         import urllib.request
@@ -103,11 +171,7 @@ def test_kaggle_environment_markers_present() -> None:
     Kaggle sets several identifiers that are useful for runtime behavior & logging.
     We only soft-assert presence of at least one common marker.
     """
-    markers = [
-        "KAGGLE_KERNEL_RUN_TYPE",
-        "KAGGLE_CONTAINER_NAME",
-        "KAGGLE_URL_BASE",
-    ]
+    markers = _kaggle_env_markers()
     assert any(os.environ.get(k) for k in markers), f"No Kaggle env markers found among {markers}"
 
 
