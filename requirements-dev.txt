@@ -12,19 +12,19 @@
 # =====================================================================
 
 # --- Testing ----------------------------------------------------------
-pytest==8.3.3              # unit/integration tests
-pytest-cov==5.0.0          # coverage reporting
-pytest-xdist==3.6.1        # parallel test execution
-pytest-timeout==2.3.1      # fail fast on hangs
+pytest==8.4.2              # unit/integration tests
+pytest-cov==6.3.0          # coverage reporting
+pytest-xdist==3.8.0        # parallel test execution
+pytest-timeout==2.4.0      # fail fast on hangs
 hypothesis==6.112.0        # property-based tests (optional but powerful)
 
 # --- Linting & Style --------------------------------------------------
-ruff==0.6.9                # linter + formatter (supersedes flake8/isort/black)
+ruff==0.12.12                # linter + formatter (supersedes flake8/isort/black)
 toml-sort==0.23.1          # keep pyproject.toml sorted/stable
 pre-commit==3.7.1          # run linters/formatters consistently
 
 # --- Type Checking ----------------------------------------------------
-mypy==1.11.2               # static typing
+mypy==1.17.1               # static typing
 typing-extensions==4.12.2  # stabilize typing features for mypy/py3.11+
 types-PyYAML==6.0.12.20240808
 types-requests==2.32.0.20240907
