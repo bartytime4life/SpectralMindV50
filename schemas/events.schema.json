@@ -1,21 +1,38 @@
 {
+  "$id": "https://spectramind-v50.org/schemas/events.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "SpectraMind V50 — Event JSONL",
   "description": "Structured log event used across CLI, pipeline, and diagnostics. One JSON object per line in events.jsonl.",
   "type": "object",
+  "additionalProperties": false,
 
   "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for this event (UUID or ULID)."
+    },
     "ts": {
       "type": "number",
       "description": "Unix timestamp (float seconds since epoch). Required for ordering and replay."
     },
     "kind": {
       "type": "string",
-      "description": "Categorical event type, e.g. cli_invoked, stage_start, stage_end, metric, error."
+      "description": "Categorical event type.",
+      "enum": [
+        "cli_invoked",
+        "stage_start",
+        "stage_end",
+        "metric",
+        "error",
+        "warning",
+        "artifact",
+        "lineage"
+      ]
     },
     "payload": {
       "type": "object",
-      "description": "Event-specific payload; schema depends on kind."
+      "description": "Event-specific payload. Shape depends on 'kind'.",
+      "additionalProperties": true
     },
 
     "run_id": {
@@ -37,15 +54,19 @@
     },
     "lineage": {
       "type": "object",
-      "description": "Optional lineage block linking to inputs/outputs for audit trails.",
+      "description": "Optional lineage block linking inputs/outputs for audit trails.",
       "properties": {
-        "inputs": { "type": "array", "items": { "type": "string" } },
-        "outputs": { "type": "array", "items": { "type": "string" } }
+        "inputs": { "type": "array", "items": { "type": "string", "format": "uri-reference" } },
+        "outputs": { "type": "array", "items": { "type": "string", "format": "uri-reference" } }
       },
       "additionalProperties": false
+    },
+    "tags": {
+      "type": "array",
+      "description": "Optional freeform tags for filtering/search (e.g., stage=calibrate).",
+      "items": { "type": "string" }
     }
   },
 
-  "required": ["ts", "kind", "payload"],
-  "additionalProperties": false
+  "required": ["id", "ts", "kind", "payload"]
 }
