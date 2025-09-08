@@ -1,0 +1,61 @@
+name: sbom-refresh
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  sbom:
+    name: Generate & Upload SBOM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Syft (SBOM generator)
+        uses: anchore/sbom-action/download-syft@v0.17.0
+
+      - name: Generate SBOM (CycloneDX JSON)
+        run: |
+          syft dir:. -o cyclonedx-json > sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.json
+
+  scan:
+    name: Scan Dependencies
+    runs-on: ubuntu-latest
+    needs: sbom
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Grype (vulnerability scanner)
+        uses: anchore/scan-action/download-grype@v3
+
+      - name: Run vulnerability scan
+        run: |
+          grype sbom:sbom.json -o sarif > results.sarif
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
