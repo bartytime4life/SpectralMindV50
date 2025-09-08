@@ -35,36 +35,37 @@ classifiers = [
 # ---- Runtime dependencies (Kaggle-safe core; heavy stacks moved to extras) ----
 dependencies = [
   # CLI & config
-  "typer[all]==0.17.4",
+  "typer[all]==0.12.5",        # stable Typer; keeps click in good range
   "hydra-core==1.3.2",
   "omegaconf==2.3.0",
   "pydantic==2.7.4",
   "pyyaml==6.0.2",
-  "jsonschema==4.22.0",    # keep in lockstep with requirements files
+  "jsonschema==4.22.0",
   "packaging==24.1",
 
   # Core scientific stack
-  "numpy==1.26.4",         # NumPy <2 keeps manylinux wheel coverage on Kaggle
+  "numpy==1.26.4",             # NumPy <2 for broad manylinux on Kaggle
   "scipy==1.11.4",
   "pandas==2.2.2",
   "polars==1.33.0",
-  "pyarrow==16.1.0",       # parquet/arrow I/O (pandas/polars compatible)
+  "pyarrow==16.1.0",
 
   # Logging / progress / viz
   "tqdm==4.66.4",
   "rich==14.1.0",
   "matplotlib==3.8.4",
   "seaborn==0.13.2",
-  "umap-learn==0.5.9.post2",
+  "umap-learn==0.5.6",
   "networkx==3.2.1",
 ]
 
 [project.optional-dependencies]
 # GPU stack: install on local/dev or CI. In Kaggle, prefer the boot script (wheels tied to CUDA).
+# Versions aligned (torch 2.2.x trio).
 gpu = [
   "torch==2.2.2",
   "torchvision==0.17.2",
-  "torchaudio==2.8.0",
+  "torchaudio==2.2.2",
   "lightning==2.3.3",
   "torch-geometric==2.5.3",
 ]
@@ -80,13 +81,13 @@ analysis = [
 
 # Dev/test/typing/linting (tool configs live in setup.cfg).
 dev = [
-  "pytest==8.4.2",
-  "pytest-cov==6.3.0",
-  "pytest-xdist==3.8.0",
-  "pytest-timeout==2.4.0",
+  "pytest==8.3.3",
+  "pytest-cov==6.0.0",
+  "pytest-xdist==3.5.0",
+  "pytest-timeout==2.3.1",
   "hypothesis==6.112.0",
-  "ruff==0.12.12",
-  "mypy==1.17.1",
+  "ruff==0.6.3",             # aligned with .pre-commit-config.yaml
+  "mypy==1.11.2",            # aligned with pre-commit mirror
   "typing-extensions==4.12.2",
   "toml-sort==0.23.1",
   "check-jsonschema==0.33.3",
@@ -94,6 +95,8 @@ dev = [
   "types-requests==2.32.0.20240907",
   "pre-commit==3.7.1",
   "pip-licenses==4.5.1",
+  # Optional but useful locally:
+  # "dvc[gdrive,s3]==3.55.2",
 ]
 
 docs = [
@@ -149,7 +152,7 @@ spectramind = ["**/*.tmp", "**/*.bak"]
 # --------------------------------- Ruff -----------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py311"   # aligns with setup.cfg mypy python_version=3.11
+target-version = "py311"   # aligns with mypy python_version=3.11 in setup.cfg
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C90"]
