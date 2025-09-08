@@ -19,21 +19,23 @@ pytest-timeout==2.3.1      # fail fast on hangs
 hypothesis==6.112.0        # property-based tests (optional but powerful)
 
 # --- Linting & Style --------------------------------------------------
-ruff==0.6.9                # linter + formatter (replaces flake8/isort/black)
+ruff==0.6.9                # linter + formatter (supersedes flake8/isort/black)
 toml-sort==0.23.1          # keep pyproject.toml sorted/stable
 pre-commit==3.7.1          # run linters/formatters consistently
 
 # --- Type Checking ----------------------------------------------------
 mypy==1.11.2               # static typing
+typing-extensions==4.12.2  # stabilize typing features for mypy/py3.11+
 types-PyYAML==6.0.12.20240808
 types-requests==2.32.0.20240907
 
 # --- JSON / Schema Validation ----------------------------------------
 check-jsonschema==0.30.0
-jsonschema==4.23.0
+# Keep dev in lockstep with runtime to avoid resolver drift:
+jsonschema==4.22.0
 
 # --- Data Science Utils (dev convenience) -----------------------------
-# Keep dev pins aligned with runtime to avoid env drift during tests.
+# Mirror runtime pins to prevent test env skew.
 pandas==2.2.2
 polars==0.20.31
 
@@ -53,3 +55,8 @@ pymdown-extensions==10.8.1
 pip-audit==2.7.3           # Python supply-chain vuln audit
 cyclonedx-bom==4.3.12      # SBOM generation (CycloneDX)
 # bandit==1.7.9             # (optional) static security analysis of Python code
+
+# --- Packaging / Release (optional but useful in CI) ------------------
+packaging==24.1
+build==1.2.2.post1
+twine==5.1.1
