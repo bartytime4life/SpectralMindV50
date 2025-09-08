@@ -3,17 +3,22 @@
 SpectraMind V50 — Training Service
 ----------------------------------
 Config-driven training entry for the V50 pipeline (PyTorch Lightning).
+
+What this does
+--------------
 - Seeds everything for reproducibility
 - Builds model & datamodule from factory helpers
-- Configures Lightning Trainer + callbacks
+- Configures Lightning Trainer + callbacks (checkpoint, early stop, LR monitor, etc.)
 - Writes run manifests (config snapshot, hashes, metrics)
-- Plays nice with Kaggle/CI constraints
+- Plays nice with Kaggle/CI constraints (progress bars, deterministic, no internet)
+- Tolerates PL 1.7 → 2.x API deltas (accelerator/devices/ckpt_path/etc.)
 
 Expected Config (subset)
 -----------------------
 training:
   max_epochs: 20
-  gpus: 1              # or devices/accelerator per PL >=1.7
+  accelerator: auto         # prefers PL >= 1.7; falls back to legacy 'gpus'
+  devices: auto
   precision: 16
   accumulate_grad_batches: 1
   limit_train_batches: 1.0
@@ -23,12 +28,12 @@ training:
   num_sanity_val_steps: 2
   log_every_n_steps: 50
   profiler: null
-  resume_from: null      # optional checkpoint path
-  strategy: null         # e.g. "auto", "ddp", "fsdp"
+  resume_from: null              # optional checkpoint path (string)
+  strategy: null                 # e.g. "auto", "ddp", "fsdp"
   detect_anomaly: false
   inference_mode: true
   enable_model_summary: true
-  enable_progress_bar: auto  # auto/true/false
+  enable_progress_bar: auto      # auto/true/false
 
 callbacks:
   checkpoint:
@@ -58,7 +63,7 @@ data: {}         # passed to build_datamodule(...)
 
 Notes
 -----
-- Model & Data factories must exist:
+- Factories must exist:
     spectramind.models.__models__.build_model(cfg: dict) -> nn.Module | LightningModule
     spectramind.data.datamodule.build_datamodule(cfg: dict) -> LightningDataModule
 - If your model is a plain nn.Module, wrap it in a LightningModule in your factory.
@@ -80,6 +85,7 @@ from spectramind.utils.io import p, ensure_dir, write_json
 # --- Optional heavy deps (guarded) ---
 try:  # pragma: no cover
     import pytorch_lightning as pl
+    from pytorch_lightning.utilities.rank_zero import rank_zero_only
 except Exception as _e:  # pragma: no cover
     raise RuntimeError(
         "Training requires PyTorch Lightning. Install `pytorch-lightning`."
@@ -88,7 +94,7 @@ except Exception as _e:  # pragma: no cover
 # Factories (must be implemented in your repo)
 from spectramind.models.__models__ import build_model  # type: ignore
 from spectramind.data.datamodule import build_datamodule  # type: ignore
-from spectramind.train.callbacks import build_callbacks  # central callback factory
+from spectramind.train.callbacks import build_callbacks  # centralized callback factory
 
 
 # ---------- small helpers ----------
@@ -119,12 +125,22 @@ def _as_bool_auto(val: Any, default: bool) -> bool:
         v = val.strip().lower()
         if v == "auto":
             return not _is_ci_or_kaggle()
-        return v in {"1", "true", "yes", "y", "on"}
+        return v in {"1", "true", "t", "yes", "y", "on"}
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
         return bool(val)
     return default
+
+
+def _add_if_supported(kwargs: Dict[str, Any], key: str, value: Any) -> None:
+    """Set kwargs[key]=value only if the current PL Trainer supports that key."""
+    try:
+        pl.Trainer(**{key: value})  # dry instantiate for feature probe
+        kwargs[key] = value
+    except TypeError:
+        # key not supported in installed PL; ignore silently
+        pass
 
 
 # ---------- trainer construction ----------
@@ -134,25 +150,30 @@ def _build_trainer(cfg: Dict[str, Any], callbacks, logger, default_root_dir: Pat
 
     enable_progress_bar = _as_bool_auto(tr_cfg.get("enable_progress_bar", "auto"), True)
 
-    trainer_kwargs = dict(
-        max_epochs=tr_cfg.get("max_epochs", 20),
-        log_every_n_steps=tr_cfg.get("log_every_n_steps", 50),
-        accumulate_grad_batches=tr_cfg.get("accumulate_grad_batches", 1),
-        gradient_clip_val=tr_cfg.get("gradient_clip_val", 0.0),
-        deterministic=tr_cfg.get("deterministic", True),
-        num_sanity_val_steps=tr_cfg.get("num_sanity_val_steps", 2),
+    # Base kwargs (common across PL 1.7 → 2.x)
+    trainer_kwargs: Dict[str, Any] = dict(
+        max_epochs=int(tr_cfg.get("max_epochs", 20)),
+        log_every_n_steps=int(tr_cfg.get("log_every_n_steps", 50)),
+        accumulate_grad_batches=int(tr_cfg.get("accumulate_grad_batches", 1)),
+        gradient_clip_val=float(tr_cfg.get("gradient_clip_val", 0.0)),
+        deterministic=bool(tr_cfg.get("deterministic", True)),
+        num_sanity_val_steps=int(tr_cfg.get("num_sanity_val_steps", 2)),
         limit_train_batches=tr_cfg.get("limit_train_batches", 1.0),
         limit_val_batches=tr_cfg.get("limit_val_batches", 1.0),
         callbacks=callbacks,
-        logger=logger,  # use Python logging handlers already configured
+        logger=logger,  # can be True/False/Logger, we forward to python logging
         enable_checkpointing=True,
-        enable_progress_bar=enable_progress_bar,
         default_root_dir=str(default_root_dir),
         detect_anomaly=bool(tr_cfg.get("detect_anomaly", False)),
         inference_mode=bool(tr_cfg.get("inference_mode", True)),
         enable_model_summary=bool(tr_cfg.get("enable_model_summary", True)),
-        enable_fault_tolerance=True,  # safe default across envs
     )
+
+    # Progress bar toggle
+    _add_if_supported(trainer_kwargs, "enable_progress_bar", enable_progress_bar)
+
+    # Fault tolerance only if supported in installed PL
+    _add_if_supported(trainer_kwargs, "enable_fault_tolerance", True)
 
     # Precision
     if "precision" in tr_cfg:
@@ -178,10 +199,10 @@ def _build_trainer(cfg: Dict[str, Any], callbacks, logger, default_root_dir: Pat
     if tr_cfg.get("profiler"):
         trainer_kwargs["profiler"] = tr_cfg["profiler"]
 
-    # ckpt_path handled at .fit(...) time (Lightning supports ckpt_path=None)
     return pl.Trainer(**trainer_kwargs)
 
 
+@rank_zero_only
 def _write_run_manifest(
     cfg: Dict[str, Any],
     workdir: Path,
@@ -213,8 +234,8 @@ class TrainerService:
 
     Example
     -------
-    svc = TrainerService(cfg)
-    ckpt_path, metrics = svc.run()
+    >>> svc = TrainerService(cfg)
+    >>> ckpt_path, metrics = svc.run()
     """
 
     def __init__(self, cfg: Dict[str, Any]):
@@ -243,20 +264,22 @@ class TrainerService:
         self.logger.info("Building model...")
         model = build_model(self.cfg.get("model", {}) or {})
 
-        # Callbacks + Trainer (centralized & JSONL metrics)
+        # Callbacks + Trainer (centralized & JSONL metrics, ckpt reporting)
         callbacks, ckpt_cb = build_callbacks(self.cfg, self.ckpt_dir, self.logs_dir)
 
         # Build trainer
         pl_logger = True  # forward to Python logging handlers
         trainer = _build_trainer(self.cfg, callbacks, pl_logger, self.workdir)
 
-        # Fit (with resume support via ckpt_path)
+        # Fit (with resume support via ckpt_path/legacy resume_from)
         self.logger.info("Starting training loop...")
         status = "ok"
         val_metrics: Dict[str, Any] = {}
         ckpt_resume = _cfg_get(self.cfg, "training.resume_from", None)
+        ckpt_resume_path = str(p(ckpt_resume)) if ckpt_resume else None
+
         try:
-            trainer.fit(model=model, datamodule=datamodule, ckpt_path=str(p(ckpt_resume)) if ckpt_resume else None)
+            trainer.fit(model=model, datamodule=datamodule, ckpt_path=ckpt_resume_path)
 
             # Validate at end (optional but handy for manifest)
             self.logger.info("Final validation...")
@@ -271,11 +294,15 @@ class TrainerService:
             status = "failed"
             self.logger.exception("Training loop failed: %s", e)
 
-        # Checkpoint path from callback
-        ckpt_path = ckpt_cb.best_model_path or ckpt_cb.last_model_path  # type: ignore[attr-defined]
+        # Checkpoint path from callback (prefer best, fall back to last)
+        ckpt_path = None
+        try:
+            ckpt_path = getattr(ckpt_cb, "best_model_path", None) or getattr(ckpt_cb, "last_model_path", None)
+        except Exception:
+            pass
         ckpt_file = Path(ckpt_path) if ckpt_path else None
 
-        # Write manifest regardless of success/failure
+        # Write manifest regardless of success/failure (rank zero only)
         t1 = time.perf_counter()
         manifest = _write_run_manifest(self.cfg, self.workdir, ckpt_file, val_metrics, status, t0, t1)
         self.logger.info("Run manifest written to %s", manifest)
