@@ -1,81 +1,124 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Hydra Config Snapshot",
-  "description": "Immutable snapshot of a composed Hydra configuration (data, model, training, etc.) used for reproducible runs.",
+  "description": "Immutable snapshot of a composed Hydra configuration (env, data, calib, model, training, loss, logger, submission, etc.) used for reproducible SpectraMind V50 runs.",
   "type": "object",
+
   "properties": {
     "_target_": {
       "type": "string",
       "description": "Optional fully-qualified class/function path if Hydra target is present."
     },
+
     "defaults": {
       "type": "array",
-      "items": {
-        "type": ["string", "object"]
-      },
+      "items": { "type": ["string", "object"] },
       "description": "Hydra defaults list capturing config composition order."
     },
+
     "run": {
       "type": "object",
       "description": "Run metadata (timestamp, seed, working dir, job name, etc.).",
       "properties": {
-        "id": { "type": "string" },
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_.-]+$" },
         "dir": { "type": "string" },
-        "seed": { "type": "integer" },
-        "time": { "type": "string", "format": "date-time" }
+        "seed": { "type": "integer", "minimum": 0 },
+        "time": { "type": "string", "format": "date-time" },
+        "user": { "type": "string" }
       },
       "required": ["id", "dir"]
     },
+
     "env": {
       "type": "object",
-      "description": "Environment profile (local, kaggle, ci, etc.).",
+      "description": "Environment profile (local, kaggle, ci, debug).",
+      "properties": {
+        "name": { "type": "string" },
+        "device": { "enum": ["cpu", "cuda"] },
+        "num_workers": { "type": "integer", "minimum": 0 },
+        "seed": { "type": "integer", "minimum": 0 }
+      },
       "additionalProperties": true
     },
+
     "data": {
       "type": "object",
       "description": "Dataset config (splits, paths, preprocessing).",
       "additionalProperties": true
     },
+
     "calib": {
       "type": "object",
-      "description": "Calibration config (ADC, dark, flat, phase, etc.).",
+      "description": "Calibration config (ADC, dark, flat, trace, phase).",
       "additionalProperties": true
     },
+
     "model": {
       "type": "object",
       "description": "Model architecture config (encoders, fusion, decoder).",
       "additionalProperties": true
     },
+
     "training": {
       "type": "object",
-      "description": "Training loop config (optimizer, scheduler, early stopping, precision).",
+      "description": "Training loop config (optimizer, scheduler, precision, early stopping).",
       "additionalProperties": true
     },
+
     "loss": {
       "type": "object",
-      "description": "Loss function settings (composite, smoothness, non-negativity, band coherence).",
+      "description": "Loss settings (composite, smoothness, nonnegativity, coherence, calibration).",
       "additionalProperties": true
     },
+
     "logger": {
       "type": "object",
       "description": "Logging config (wandb, csv, jsonl).",
       "additionalProperties": true
     },
+
+    "diagnostics": {
+      "type": "object",
+      "description": "Diagnostics config (FFT, UMAP, SHAP, symbolic checks).",
+      "additionalProperties": true
+    },
+
     "submission": {
       "type": "object",
       "description": "Submission packaging config (filenames, Kaggle metadata).",
       "additionalProperties": true
     },
+
     "overrides": {
       "type": "array",
       "items": { "type": "string" },
       "description": "Command-line overrides applied at runtime."
     },
+
     "hash": {
       "type": "string",
-      "description": "SHA256 or similar hash of the snapshot for lineage tracking."
+      "pattern": "^[a-fA-F0-9]{64}$",
+      "description": "SHA256 hash of the snapshot for lineage tracking."
+    },
+
+    "version": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9]+)?$",
+      "description": "Semantic version of the repo/config snapshot."
+    },
+
+    "provenance": {
+      "type": "object",
+      "description": "Optional provenance info (git commit, DVC hash, dataset ID).",
+      "properties": {
+        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+        "dvc_hash": { "type": "string" },
+        "dataset_id": { "type": "string" }
+      },
+      "additionalProperties": false
     }
   },
+
   "required": ["defaults", "run", "data", "model", "training"],
   "additionalProperties": false
 }
