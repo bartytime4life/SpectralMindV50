@@ -15,7 +15,6 @@
 stages:
   calibrate:
     desc: "Raw → calibrated tensors (FGS1 + AIRS) with physics-informed preprocessing"
-    wdir: .
     cmd: >
       spectramind calibrate
       --config-name ${params.hydra.config_name_calibrate}
@@ -37,7 +36,6 @@ stages:
 
   train:
     desc: "Train dual-channel encoders + heteroscedastic decoder (μ, σ)"
-    wdir: .
     cmd: >
       spectramind train
       --config-name ${params.hydra.config_name_train}
@@ -59,9 +57,10 @@ stages:
       - hydra.training
       - hydra.loss
       - hydra.logger
+    # Mark as checkpointed so `dvc exp run` can resume/branch mid-training.
     outs:
       - path: artifacts/ckpt.pt
-        cache: true
+        checkpoint: true
       - path: artifacts/metrics.json
         cache: true
     outs_no_cache:
@@ -71,15 +70,15 @@ stages:
           cache: false
           type: json
           xpath: .
-    # If you log with dvclive, enable this block:
+    # If you log with dvclive, enable this block for live curves:
     # live:
     #   path: dvclive
     #   summary: true
     #   html: true
+    #   # DVC will auto-publish loss/metrics charts from dvclive/*.tsv
 
   predict:
     desc: "Run inference on processed data → predictions CSV"
-    wdir: .
     cmd: >
       spectramind predict
       --config-name ${params.hydra.config_name_predict}
@@ -100,7 +99,6 @@ stages:
 
   diagnose:
     desc: "Post-hoc diagnostics: GLL, FFT/UMAP, sanity checks, HTML report"
-    wdir: .
     cmd: >
       spectramind diagnose
       --config-name ${params.hydra.config_name_diagnose}
@@ -121,7 +119,7 @@ stages:
       - path: artifacts/diagnostics/plots/
         cache: true
     plots:
-      # dvc plots show artifacts/diagnostics/plots/ --open
+      # Visual assets (PNG/SVG/TSV) rendered by the diagnostics step
       - artifacts/diagnostics/plots/
     metrics:
       - artifacts/diagnostics/summary.json:
@@ -131,7 +129,6 @@ stages:
 
   submit:
     desc: "Package submission artifacts"
-    wdir: .
     cmd: >
       spectramind submit
       --config-name ${params.hydra.config_name_submit}
