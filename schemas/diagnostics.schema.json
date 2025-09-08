@@ -4,9 +4,34 @@
   "title": "Diagnostics Report",
   "type": "object",
   "additionalProperties": false,
+
   "required": ["run_id", "model", "datasets", "checks"],
+
   "properties": {
-    "run_id": { "type": "string" },
+    "run_id": {
+      "type": "string",
+      "description": "Stable run identifier (UUIDv4 or short hash).",
+      "pattern": "^[A-Za-z0-9_.:-]{6,64}$"
+    },
+
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp of diagnostics generation."
+    },
+
+    "provenance": {
+      "type": "object",
+      "description": "Code/data lineage for reproducibility.",
+      "additionalProperties": false,
+      "properties": {
+        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+        "git_branch": { "type": "string" },
+        "dvc_hash": { "type": "string" },
+        "dataset_id": { "type": "string" }
+      }
+    },
+
     "model": {
       "type": "object",
       "required": ["arch", "checkpoint"],
@@ -17,6 +42,7 @@
         "params": { "type": "object", "additionalProperties": true }
       }
     },
+
     "datasets": {
       "type": "array",
       "minItems": 1,
@@ -27,59 +53,141 @@
         "properties": {
           "name": { "type": "string" },
           "split": { "type": "string", "enum": ["train", "val", "test", "holdout"] },
-          "n_samples": { "type": "integer", "minimum": 0 }
+          "n_samples": { "type": "integer", "minimum": 0 },
+          "filters": { "type": "object", "additionalProperties": true }
         }
       }
     },
-    "fft": {
+
+    "scores": {
       "type": "object",
-      "description": "Optional FFT summaries per channel.",
-      "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "freqs": { "type": "array", "items": { "type": "number" } },
-          "power": { "type": "array", "items": { "type": "number", "minimum": 0 } }
-        },
-        "required": ["freqs", "power"],
-        "additionalProperties": false
+      "description": "Key metrics captured during diagnostics.",
+      "additionalProperties": { "type": "number" },
+      "properties": {
+        "gll": { "type": "number" },
+        "loss": { "type": "number" },
+        "val_loss": { "type": "number" }
       }
     },
+
+    "resources": {
+      "type": "object",
+      "description": "Runtime and resource footprint for traceability.",
+      "additionalProperties": false,
+      "properties": {
+        "wall_ms": { "type": "integer", "minimum": 0 },
+        "cpu_ms": { "type": "integer", "minimum": 0 },
+        "gpu_ms": { "type": "integer", "minimum": 0 },
+        "max_rss_mb": { "type": "number", "minimum": 0 }
+      }
+    },
+
+    "fft": {
+      "type": "object",
+      "description": "Optional FFT summaries per named signal/channel (e.g., FGS1, AIRS_bin_###).",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["freqs", "power"],
+        "properties": {
+          "freqs": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "number" }
+          },
+          "power": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "number", "minimum": 0 }
+          },
+          "sampling_rate_hz": { "type": "number", "minimum": 0 },
+          "window": { "type": "string" }
+        }
+      }
+    },
+
     "umap": {
       "type": "object",
-      "description": "2D embeddings for qualitative inspection.",
+      "description": "2D/3D embeddings for qualitative inspection.",
+      "additionalProperties": false,
+      "required": ["points"],
       "properties": {
         "points": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "type": "array",
             "minItems": 2,
-            "maxItems": 2,
+            "maxItems": 3,
             "items": { "type": "number" }
-          }
+          },
+          "description": "List of [x,y] or [x,y,z] coordinates."
         },
-        "labels": { "type": "array", "items": { "type": ["number", "string"] } }
-      },
-      "required": ["points"]
-    },
-    "shap": {
-      "type": "object",
-      "description": "Feature importance summaries.",
-      "properties": {
-        "mean_abs_shap": {
+        "labels": {
+          "type": "array",
+          "items": { "type": ["number", "string", "boolean"] },
+          "description": "Optional per-point labels (length should match points)."
+        },
+        "params": {
           "type": "object",
-          "additionalProperties": { "type": "number" }
+          "additionalProperties": false,
+          "properties": {
+            "n_components": { "type": "integer", "enum": [2, 3] },
+            "n_neighbors": { "type": "integer", "minimum": 2 },
+            "min_dist": { "type": "number", "minimum": 0, "maximum": 1 },
+            "metric": { "type": "string" },
+            "random_state": { "type": "integer" }
+          }
         }
       }
     },
+
+    "shap": {
+      "type": "object",
+      "description": "Feature importance summaries.",
+      "additionalProperties": false,
+      "properties": {
+        "mean_abs_shap": {
+          "type": "object",
+          "additionalProperties": { "type": "number" },
+          "description": "Mapping feature_name -> mean(|SHAP|)."
+        },
+        "top_features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of top contributing features."
+        }
+      }
+    },
+
     "checks": {
       "type": "object",
       "description": "Symbolic/physics checks summarised.",
-      "required": ["nonnegativity", "smoothness", "fgs1_weighting"],
       "additionalProperties": false,
+      "required": ["nonnegativity", "smoothness", "fgs1_weighting"],
       "properties": {
         "nonnegativity": { "type": "boolean" },
         "smoothness": { "type": "number", "minimum": 0 },
-        "fgs1_weighting": { "type": "number", "minimum": 0 }
+        "fgs1_weighting": { "type": "number", "minimum": 0 },
+        "range_ok": {
+          "type": "boolean",
+          "description": "All predicted depths within [0,1] (if evaluated)."
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "description": "Optional list of generated plot/report artifacts for traceability.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+          "content_type": { "type": "string" }
+        }
       }
     }
   }
