@@ -1,26 +1,167 @@
-# configs/calib/method/phase.yaml
 # ======================================================================
 # Phase Alignment Calibration — SpectraMind V50
 # ======================================================================
-# Aligns calibrated time-series (FGS1 + AIRS) into a common phase grid
-# relative to the transit midpoint. This ensures consistent binning
-# across channels and observations.
+# Aligns calibrated time-series (FGS1 + AIRS) onto a common orbital
+# phase grid relative to the transit reference (typically mid-transit).
 #
-# Usage:
-#   python -m spectramind.calibrate +calib.method=phase
+# Pipeline order: after ADC/CDS/DARK/FLAT; before fusion/photometry.
 #
-# Keys:
-#   _target_ : Python path to the phase calibration implementation
-#   n_bins   : number of bins for phase-folding
-#   center   : definition of phase zero ("mid_transit", "first_contact")
-#   wrap     : whether to wrap phases into [-0.5, 0.5]
-#   validate : run consistency checks on phase coverage
+# CLI:
+#   spectramind calibrate +calib.method=phase
+#
+# Implementation:
+#   spectramind.pipeline.calibrate.methods.PhaseCalibration
 # ======================================================================
 
+# ----------------------------------------------------------------------
+# Wiring
+# ----------------------------------------------------------------------
 _target_: spectramind.pipeline.calibrate.methods.PhaseCalibration
+_convert_: all
 
-n_bins: 200             # number of bins for phase folding
-center: "mid_transit"   # phase zero definition
-wrap: true              # wrap to [-0.5, 0.5]
-validate: true          # ensure full coverage & no NaNs
+enable: true
+apply_to: ["fgs1", "airs"]
+
+# ----------------------------------------------------------------------
+# Time sources & ephemeris
+# ----------------------------------------------------------------------
+# Where to read timestamps from and how to derive phase.
+time:
+  time_key: "time"               # per-record timestamp key
+  time_unit: "jd"                # ["unix_s","mjd","jd","iso8601"]
+  # Optional: convert to BJD_TDB if correction metadata is present
+  barycentric:
+    enabled: false               # set true if you provide observatory/target meta
+    # If enabled, implementation will look for RA/Dec, obs location, etc.
+
+ephemeris:
+  # Choose how to provide transit T0 and period P
+  source: "static"               # ["static","file","metadata"]
+  static:
+    t0: null                     # reference epoch (same unit as time_key)
+    period: null                 # orbital period (days if jd/mjd, seconds if unix_s)
+    duration: null               # transit duration (same units as period); optional
+  file:
+    path: ${paths.data}/calib/ephemeris.csv
+    # Columns used when source=file
+    columns:
+      target_id: "target_id"
+      t0:        "t0"
+      period:    "period"
+      duration:  "duration"
+    match_key: "target_id"       # event/series identifier to join on
+  metadata:
+    t0_key: "T0"
+    period_key: "PERIOD"
+    duration_key: "DURATION"
+
+# Optional per-channel lag (e.g., timing offsets between FGS1 and AIRS)
+channel_lag:
+  enabled: false
+  seconds:
+    fgs1: 0.0
+    airs: 0.0
+
+# ----------------------------------------------------------------------
+# Phase grid & binning
+# ----------------------------------------------------------------------
+grid:
+  n_bins: ${oc.decode:${n_bins},200}   # keep top-level n_bins for backward compat
+  wrap: ${wrap}                        # [-0.5,0.5] when true, else [0,1)
+  center: ${center}                    # ["mid_transit","first_contact","custom"]
+  center_offset: 0.0                   # add a fractional phase offset if custom
+
+# How to assign samples to bins and combine them
+binning:
+  method: "center"              # ["center","left","right"] bin edge convention
+  aggregator: "mean"            # ["mean","median","weighted_mean"]
+  weight_key: null              # optional per-sample weight for weighted_mean
+  min_samples_per_bin: 1
+  # If bin is empty, choose how to fill
+  fill_empty: "interp"          # ["interp","nan","nearest"]
+  oversample_factor: 1          # integer ≥1 to compute on finer grid then rebin
+
+# Interpolation settings used by fill_empty/interp outputs
+interp:
+  kind: "linear"                # ["nearest","linear","cubic"]
+  clamp_edges: true             # do not extrapolate beyond covered phase
+
+# ----------------------------------------------------------------------
+# Ordering, quality, and masks
+# ----------------------------------------------------------------------
+ordering:
+  sort_by_time: true
+  allow_equal_timestamps: true
+
+quality:
+  drop_nan: true                # drop samples with NaN flux/uncertainty
+  mask_keys: []                 # additional boolean masks (1=bad)
+  max_masked_fraction: 0.5      # drop frame if >50% pixels masked (for image-derived metrics)
+
+outliers:
+  enable: true
+  method: "sigma"               # ["sigma","mad","none"]
+  sigma: 6.0
+  iters: 1
+
+# ----------------------------------------------------------------------
+# Backend, precision & performance
+# ----------------------------------------------------------------------
+backend: auto                   # ["auto","numpy","torch"]
+device: auto                    # ["auto","cpu","cuda"] when backend=torch
+dtype_out: float32
+numeric:
+  eps: 1.0e-9
+  deterministic: true
+  num_threads: ${oc.env:SM_NUM_THREADS, 2}
+
+# Chunked processing across time axis (OOM safety on Kaggle/CI)
+chunking:
+  enabled: true
+  frames_per_chunk: 2048
+  min_frames_per_chunk: 256
+
+# ----------------------------------------------------------------------
+# Validation gates (fail fast if pathological)
+# ----------------------------------------------------------------------
+validate: ${validate}
+validation:
+  finite_phase: true
+  finite_output: true
+  coverage:
+    min_phase_coverage: 0.6     # at least 60% of bins must be populated (pre-fill)
+    max_empty_fraction: 0.5     # ≤50% bins empty before interpolation
+  monotonic_time: true
+  # Basic sanity on ephemeris numbers
+  ephemeris:
+    period_min: 1.0e-4          # days (≈8.64 s) if jd/mjd
+    period_max: 1.0e3           # days
+  # Ensure output std is not trivially zero
+  min_output_std: 1.0e-12
+
+# ----------------------------------------------------------------------
+# Outputs
+# ----------------------------------------------------------------------
+outputs:
+  phase_key: "phase"            # per-sample computed phase
+  binned_phase_key: "phase_bin" # bin centers
+  binned_value_key: "flux_bin"  # aggregated value per bin
+  binned_unc_key: "flux_bin_sigma"  # aggregated uncertainty per bin (if available)
+  meta_prefix: "phase"
+
+# ----------------------------------------------------------------------
+# Diagnostics
+# ----------------------------------------------------------------------
+diagnostics:
+  enable: false
+  save_phase_hist: true
+  save_bin_coverage: true
+  out_dir: ${paths.runtime}/reports/phase
+
+# ----------------------------------------------------------------------
+# Backward-compatible top-level keys (preserved)
+# ----------------------------------------------------------------------
+n_bins: 200
+center: "mid_transit"
+wrap: true
 log_level: INFO
