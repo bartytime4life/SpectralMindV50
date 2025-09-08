@@ -1,4 +1,4 @@
-🛰️ SpectraMind V50 — Architecture Overview (Upgraded)
+#🛰️ SpectraMind V50 — Architecture Overview (Upgraded)
 
 Mission-grade, physics-informed, neuro-symbolic pipeline for the NeurIPS 2025 Ariel Data Challenge.
 Implements multi-sensor fusion of FGS1 time-series + AIRS spectroscopy, producing calibrated per-bin μ/σ predictions across 283 spectral channels ￼ ￼.
