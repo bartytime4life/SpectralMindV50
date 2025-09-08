@@ -1,16 +1,25 @@
 # syntax=docker/dockerfile:1.7-labs
 ################################################################################
-# SpectraMind V50 — CUDA Runtime Image (Prod)
+# SpectraMind V50 — CUDA Runtime Image (Prod, Upgraded)
 ################################################################################
+
 ARG CUDA_VERSION=12.1.0
 ARG UBUNTU_VERSION=22.04
+
+############################
+# Base CUDA runtime
+############################
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn8-runtime-ubuntu${UBUNTU_VERSION} AS runtime
 
 # ---------- metadata ----------
-LABEL org.opencontainers.image.title="SpectraMind V50"
-LABEL org.opencontainers.image.description="NeurIPS 2025 Ariel Data Challenge — physics-informed, neuro-symbolic pipeline"
-LABEL org.opencontainers.image.source="https://github.com/your-org/spectramind-v50"
-LABEL org.opencontainers.image.licenses="MIT"
+ARG VCS_REF=""
+ARG BUILD_DATE=""
+LABEL org.opencontainers.image.title="SpectraMind V50" \
+      org.opencontainers.image.description="NeurIPS 2025 Ariel Data Challenge — physics-informed, neuro-symbolic pipeline" \
+      org.opencontainers.image.source="https://github.com/your-org/spectramind-v50" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 # ---------- env ----------
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -18,16 +27,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_COLOR=1 \
     PIP_DEFAULT_TIMEOUT=100 \
+    PIP_REQUIRE_VIRTUALENV=1 \
     UV_NO_TELEMETRY=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
-    # venv location; keep it stable for caching
+    # Virtualenv path; stable for layer caching
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH \
-    # Avoid matplotlib trying to write in HOME when read-only
-    MPLCONFIGDIR=/tmp/matplotlib
-
-# CUDA / NCCL reliability & perf
-ENV NVIDIA_VISIBLE_DEVICES=all \
+    # Avoid matplotlib writing to unwritable homedir
+    MPLCONFIGDIR=/tmp/matplotlib \
+    # CUDA / NCCL reliability & perf
+    NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CUDA_MODULE_LOADING=LAZY \
     NCCL_LAUNCH_MODE=GROUP \
@@ -38,7 +47,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # ---------- base OS ----------
-# Core OS deps + tiny init for signal handling; keep slim and deterministic
+# Keep OS minimal, deterministic; apt cache is mounted for speed.
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
  && apt-get install -y --no-install-recommends \
@@ -47,14 +56,14 @@ RUN --mount=type=cache,target=/var/cache/apt \
       git git-lfs curl ca-certificates \
       graphviz tini \
       libffi-dev libssl-dev \
-      # Useful for many Python wheels (opencv/scipy/numba/etc.)
+      # Shared libs for common wheels (opencv/scipy/numba/etc.)
       libgl1 libglib2.0-0 \
-      # optional: locale (avoid LC warnings)
+      # Optional: locale to avoid LC_* warnings
       locales \
- && rm -rf /var/lib/apt/lists/* \
  && git lfs install --skip-repo \
  && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
- && locale-gen en_US.UTF-8
+ && locale-gen en_US.UTF-8 \
+ && rm -rf /var/lib/apt/lists/*
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 # ---------- non-root user ----------
@@ -69,34 +78,76 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
 
 WORKDIR /app
 
-# ------------------------------------------------------------------------------
-# Dependency resolution layer
-# Copy *only* files that affect dependency graph to maximize cache hits.
-# If you keep constraints/locks (e.g., constraints.txt or requirements-*.txt), add them here.
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# (Optional) Builder stage to prebuild wheels for hermetic installs
+# Toggle with: --build-arg BUILD_WHEELS=1
+# ==============================================================================
+FROM runtime AS builder
+ARG INSTALL_EXTRAS=""
+ARG BUILD_WHEELS=0
+# Copy only files that affect dependency resolution to maximize cache hits
 COPY --chown=${APP_USER}:${APP_USER} pyproject.toml README.md ./
+# Optional: add constraints/locks here
 # COPY --chown=${APP_USER}:${APP_USER} constraints.txt ./
 
-# Allow optional extras at build time (e.g., INSTALL_EXTRAS=gpu,dev)
-ARG INSTALL_EXTRAS=""
-# You can pre-build wheels, then install, to make this more reproducible/offline-friendly.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ -z "${INSTALL_EXTRAS}" ]; then \
-      python -m pip install -e . ; \
+# Produce a local wheelhouse containing our project wheel + all dependencies.
+# This enables --no-index installs in the final stage (offline/CI friendly).
+RUN if [ "${BUILD_WHEELS}" = "1" ]; then \
+      echo ">> Building wheelhouse (extras='${INSTALL_EXTRAS}')"; \
+      mkdir -p /opt/wheels; \
+      # Cache pip downloads between builds
+      --mount=type=cache,target=/root/.cache/pip \
+      bash -lc ' \
+        set -euo pipefail; \
+        if [ -z "${INSTALL_EXTRAS}" ]; then \
+          python -m pip wheel --wheel-dir=/opt/wheels . ; \
+        else \
+          python -m pip wheel --wheel-dir=/opt/wheels ".[${INSTALL_EXTRAS}]" ; \
+        fi \
+      '; \
     else \
-      python -m pip install -e ".[${INSTALL_EXTRAS}]" ; \
+      echo ">> Skipping wheel build (BUILD_WHEELS=0)"; \
+    fi
+
+############################
+# Final runtime image
+############################
+FROM runtime AS final
+
+# Allow optional extras & wheel-based install
+ARG INSTALL_EXTRAS=""
+ARG BUILD_WHEELS=0
+
+# Copy dependency metadata for install step
+COPY --chown=${APP_USER}:${APP_USER} pyproject.toml README.md ./
+
+# If we built a wheelhouse, copy it and install hermetically; otherwise install online.
+COPY --from=builder /opt/wheels /opt/wheels
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -d /opt/wheels ] && [ "$(ls -A /opt/wheels || true)" ]; then \
+      echo ">> Installing from local wheelhouse (no network)"; \
+      python -m pip install --no-index --find-links=/opt/wheels /opt/wheels/*.whl || \
+      (echo ">> Fallback (extras) from wheelhouse" && \
+       python -m pip install --no-index --find-links=/opt/wheels "spectramind-v50[${INSTALL_EXTRAS}]" || true); \
+    else \
+      echo ">> Installing from index (cache-mounted)"; \
+      if [ -z "${INSTALL_EXTRAS}" ]; then \
+        python -m pip install -e . ; \
+      else \
+        python -m pip install -e ".[${INSTALL_EXTRAS}]" ; \
+      fi; \
     fi
 
 # ------------------------------------------------------------------------------
-# App code & configs
+# App code & configs (keep later to maximize build cache on code changes)
 # ------------------------------------------------------------------------------
 COPY --chown=${APP_USER}:${APP_USER} src ./src
 COPY --chown=${APP_USER}:${APP_USER} configs ./configs
 COPY --chown=${APP_USER}:${APP_USER} schemas ./schemas
-# optional diagrams/assets if packaged
+# Optional diagrams/assets if packaged
 # COPY --chown=${APP_USER}:${APP_USER} assets ./assets
 
-# Bytecode pre-compile (best-effort)
+# Pre-compile bytecode (best-effort)
 RUN python -m compileall -q /app/src || true
 
 # ---------- healthcheck ----------
@@ -107,25 +158,26 @@ HEALTHCHECK --interval=1m --timeout=10s --start-period=15s --retries=3 \
 # ---------- runtime user ----------
 USER ${APP_USER}
 
-# Tini as PID 1 for clean sigterm/child reaping
+# PID 1 reaping via Tini; default to CLI help
 ENTRYPOINT ["/usr/bin/tini", "--", "spectramind"]
 CMD ["--help"]
 
 ################################################################################
-# (Optional) CPU-only base for CI or dev shells (no CUDA required)
+# (Optional) CPU-only base for CI/dev (no CUDA required)
 ################################################################################
 # FROM ubuntu:${UBUNTU_VERSION} AS cpu
 # LABEL org.opencontainers.image.title="SpectraMind V50 (CPU)"
-# ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH \
-#     MPLCONFIGDIR=/tmp/matplotlib
+# ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+#     VIRTUAL_ENV=/opt/venv PATH=/opt/venv/bin:$PATH MPLCONFIGDIR=/tmp/matplotlib
 # SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # RUN --mount=type=cache,target=/var/cache/apt \
 #     apt-get update -y && apt-get install -y --no-install-recommends \
 #       python3 python3-venv python3-distutils python3-dev \
 #       build-essential pkg-config git git-lfs curl ca-certificates graphviz tini \
 #       libffi-dev libssl-dev libgl1 libglib2.0-0 locales \
-#     && rm -rf /var/lib/apt/lists/* && git lfs install --skip-repo \
-#     && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen en_US.UTF-8
+#   && git lfs install --skip-repo \
+#   && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen en_US.UTF-8 \
+#   && rm -rf /var/lib/apt/lists/*
 # ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # WORKDIR /app
 # RUN python3 -m venv "${VIRTUAL_ENV}" && python -m pip install -U pip setuptools wheel
