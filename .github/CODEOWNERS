@@ -2,7 +2,7 @@
 # Failsafe default: route everything to a valid user until teams are ready.
 # Replace @your-username with a real GitHub user who has write access.
 
-*                                   @your-username
+*                                   @bartytime4life
 
 # ─────────────────────────────────────────────────────────────────────────────
 # When you're ready to use teams, replace @your-username with org-scoped team
