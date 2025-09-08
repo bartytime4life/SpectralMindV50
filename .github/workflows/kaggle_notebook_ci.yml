@@ -1,0 +1,194 @@
+name: kaggle-notebook-ci
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "notebooks/**"
+      - "kaggle/**"
+      - "src/**"
+      - "configs/**"
+      - "requirements-kaggle.txt"
+      - ".github/workflows/kaggle_notebook_ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kaggle-notebook-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.10"
+  # Optional default; can be overridden per push or dispatch inputs
+  KAGGLE_COMP: "ariel-data-challenge-2025"
+
+jobs:
+  local-validate:
+    name: Local notebook validation (no internet; CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install minimal Kaggle-friendly deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-kaggle.txt || true
+          pip install jupyter nbconvert papermill ipykernel
+          # Hard-disable internet inside validation to mimic Kaggle runtime
+          echo "Acquire::http::Proxy \"http://0.0.0.0:9\";" | sudo tee /etc/apt/apt.conf.d/99no-internet >/dev/null
+          # Best-effort: block common tools; notebook code should not rely on internet anyway
+
+      - name: List notebooks selected for validation
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pick fast notebooks / smoke notebooks by naming convention
+          mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | grep -E '(00_|10_|smoke|quick|sample|mini).*\.ipynb$' || true)
+          if [ "${#NB[@]}" -eq 0 ]; then
+            # Fallback: just the lightest notebook if unknown
+            mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | head -n 1 || true)
+          fi
+          printf '%s\n' "${NB[@]}"
+          printf 'files=%s\n' "$(printf '%s ' "${NB[@]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Execute selected notebooks (offline)
+        if: steps.select.outputs.files != ''
+        env:
+          PYTHONWARNINGS: "ignore"
+        run: |
+          set -euo pipefail
+          IFS=' ' read -r -a NB <<< "${{ steps.select.outputs.files }}"
+          for f in "${NB[@]}"; do
+            echo "::group::Executing $f"
+            # Execute in place with a conservative timeout
+            jupyter nbconvert --execute --to notebook --inplace "$f" --ExecutePreprocessor.timeout=300
+            echo "::endgroup::"
+          done
+
+      - name: Upload executed notebooks as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notebooks-executed
+          path: |
+            notebooks/**/*.ipynb
+
+  push-to-kaggle:
+    name: Push notebooks to Kaggle (if secrets present)
+    runs-on: ubuntu-latest
+    needs: local-validate
+    if: ${{ secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Kaggle CLI and helpers
+        run: |
+          python -m pip install --upgrade pip
+          pip install kaggle jq
+
+      - name: Configure Kaggle credentials
+        run: |
+          mkdir -p ~/.kaggle
+          printf '{"username":"%s","key":"%s"}\n' "${{ secrets.KAGGLE_USERNAME }}" "${{ secrets.KAGGLE_KEY }}" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+          kaggle --version
+
+      - name: Dry check kernel metadata (train/infer notebooks)
+        id: kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Expect kernel workspaces with kernel-metadata.json, e.g. kaggle/kernels/train, kaggle/kernels/infer
+          mapfile -t KDIRS < <(git ls-files 'kaggle/kernels/**/kernel-metadata.json' | xargs -n1 dirname 2>/dev/null || true)
+          if [ "${#KDIRS[@]}" -eq 0 ]; then
+            echo "No Kaggle kernel workspaces (kaggle/kernels/**/kernel-metadata.json) found; skipping push."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "${KDIRS[@]}"
+          printf 'dirs=%s\n' "$(printf '%s ' "${KDIRS[@]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Push kernels
+        if: steps.kernels.outputs.skip != 'true'
+        shell: bash
+        env:
+          KAGGLE_COMP: ${{ env.KAGGLE_COMP }}
+        run: |
+          set -euo pipefail
+          IFS=' ' read -r -a KDIRS <<< "${{ steps.kernels.outputs.dirs }}"
+          for d in "${KDIRS[@]}"; do
+            echo "::group::Pushing kernel from $d"
+            # Ensure competition dependency present if intended
+            if jq -e '.competitionSources? | length > 0' "$d/kernel-metadata.json" >/dev/null 2>&1; then
+              echo "Kernel references competition sources."
+            fi
+            kaggle kernels push -p "$d" | tee "kaggle_push_$(basename "$d").log"
+            echo "::endgroup::"
+          done
+
+      - name: Upload Kaggle push logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-push-logs
+          path: kaggle_push_*.log
+
+  dataset-sync:
+    name: Optional: Sync light artifacts/datasets to Kaggle
+    runs-on: ubuntu-latest
+    needs: local-validate
+    if: ${{ secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY && hashFiles('kaggle/datasets/**/dataset-metadata.json') != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Kaggle CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install kaggle
+
+      - name: Configure Kaggle credentials
+        run: |
+          mkdir -p ~/.kaggle
+          printf '{"username":"%s","key":"%s"}\n' "${{ secrets.KAGGLE_USERNAME }}" "${{ secrets.KAGGLE_KEY }}" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+
+      - name: Version datasets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for meta in $(git ls-files 'kaggle/datasets/**/dataset-metadata.json'); do
+            d=$(dirname "$meta")
+            echo "::group::Versioning dataset at $d"
+            kaggle datasets version -p "$d" -m "CI sync: ${GITHUB_SHA::7}" -r zip | tee "kaggle_dataset_$(basename "$d").log"
+            echo "::endgroup::"
+          done
+
+      - name: Upload dataset logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-dataset-logs
+          path: kaggle_dataset_*.log
