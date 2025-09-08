@@ -11,7 +11,7 @@ permissions:
   packages: write           # push GHCR image
   id-token: write           # OIDC for keyless signing/attestations
   actions: read
-  pages: write
+  pages: write              # docs publish (gh-pages)
 
 concurrency:
   group: release-${{ github.ref }}
@@ -71,7 +71,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ver: ${{ steps.v.outputs.ver }}
-      image_ref: ${{ steps.meta.outputs.tags }}
+      image_tags: ${{ steps.meta.outputs.tags }}
+      image_labels: ${{ steps.meta.outputs.labels }}
+      image_digest: ${{ steps.buildx.outputs.digest }}
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v4
@@ -175,7 +177,7 @@ jobs:
             type=raw,value=${{ needs.validate.outputs.tag }}
             type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
           labels: |
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.validate.outputs.tag }}
             org.opencontainers.image.revision=${{ github.sha }}
 
@@ -183,6 +185,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build & Push (with SBOM + provenance)
+        id: buildx
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -199,9 +202,6 @@ jobs:
       - name: Extract version
         id: v
         run: echo "ver=$(tr -d ' \n' < "${VERSION_FILE}")" >> "$GITHUB_OUTPUT"
-
-      - name: Install Cosign (for OCI)
-        uses: sigstore/cosign-installer@v3.7.0
 
       - name: Sign images (keyless by default)
         if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
@@ -224,7 +224,7 @@ jobs:
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.meta.outputs.digest }}
+          subject-digest: ${{ steps.buildx.outputs.digest }}
           push-to-registry: true
 
   sbom:
