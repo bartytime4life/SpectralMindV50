@@ -1,40 +1,169 @@
-# configs/calib/method/adc.yaml
 # ======================================================================
 # ADC (Analog-to-Digital Conversion) Calibration — SpectraMind V50
 # ======================================================================
-# Converts raw detector counts (ADU) to physical flux units using
-# provided gain/offset calibration files. This is the first step in
-# the calibration chain and ensures physical scaling before dark,
-# flat, and trace corrections.
+# Converts raw detector counts (ADU) to physical flux units using gain
+# and offset maps. First stage in the calibration chain prior to dark,
+# flat, trace, phase, and photometry corrections.
 #
-# Usage:
-#   python -m spectramind.calibrate +calib.method=adc
+# CLI:
+#   spectramind calibrate +calib.method=adc
 #
-# Keys:
-#   _target_     : Python path to the ADC calibration implementation
-#   mode         : "linear" | "poly" | "lookup"
-#   gain_file    : path to gain coefficients
-#   offset_file  : path to bias/offset coefficients
-#   normalize    : whether to normalize outputs to mean flux
-#   clip_min/max : clamp ADC outputs for stability
-#   validate     : run sanity checks after conversion
-#   log_level    : logging verbosity
+# Implementation:
+#   spectramind.pipeline.calibrate.methods.ADCCalibration
+#
+# Notes:
+# - Supports CSV/NPY/NPZ for gain/offset/mask inputs (auto-detected).
+# - Handles NaNs/inf and bad-pixel masks safely (optionally inpaint).
+# - Works on CPU/GPU; chunked processing prevents OOM on Kaggle.
+# - Includes strict validation gates with configurable thresholds.
 # ======================================================================
 
+# ----------------------------------------------------------------------
+# Wiring
+# ----------------------------------------------------------------------
 _target_: spectramind.pipeline.calibrate.methods.ADCCalibration
+# Optional: strictarg conversion to coerce types at runtime
+_convert_: all
 
-# --- Conversion mode ---
-mode: "linear"                      # ["linear", "poly", "lookup"]
+# ----------------------------------------------------------------------
+# Mode & mathematics
+#   linear:   flux = (adu - offset) * gain
+#   poly:     flux = Σ_k c_k * (adu)^k  (coeffs in gain_file as columns c0..cK)
+#   lookup:   flux = LUT[adu] (table or piecewise-linear interpolation)
+# ----------------------------------------------------------------------
+mode: linear            # [linear | poly | lookup]
+poly:
+  degree: 2             # used when mode=poly; degree >= 1
+  # If true, centers ADU by offset before polynomial expansion
+  center_on_offset: true
 
-# --- Calibration inputs ---
-gain_file: ${paths.data}/calib/adc_gain.csv
+lookup:
+  # When mode=lookup: path to LUT; if 2-D, first column = x (ADU), second = y (flux)
+  table_file: ${paths.data}/calib/adc_lut.csv
+  interpolation: linear  # [nearest | linear]
+  extrapolate: false     # clamp to edges when false
+
+# ----------------------------------------------------------------------
+# Calibration inputs (maps / coefficients)
+# ----------------------------------------------------------------------
+gain_file:   ${paths.data}/calib/adc_gain.csv
 offset_file: ${paths.data}/calib/adc_offset.csv
 
-# --- Options ---
-normalize: true                     # scale to median baseline
-clip_min: 0.0                       # clamp lower bound
-clip_max: null                      # optional upper bound (null = disabled)
+# Optional per-pixel variance (propagated to flux variance if provided)
+variance_file: null      # e.g., ${paths.data}/calib/adc_variance.npy
 
-# --- Safety & logging ---
-validate: true                      # check for NaNs/inf after conversion
-log_level: INFO
+# Optional static bad-pixel mask (1=bad, 0=good)
+mask_file: null          # e.g., ${paths.data}/calib/bpm.npy
+
+# ----------------------------------------------------------------------
+# Backend & precision
+# ----------------------------------------------------------------------
+backend: auto            # [auto | numpy | torch]
+device: auto             # [auto | cpu | cuda] (used if backend=torch)
+dtype_out: float32       # [float32 | float64]
+time_axis: -3            # canonical time axis if frames[..., T, H, W]
+image_layout: "THW"      # advisory only; used in validators / logs
+
+# ----------------------------------------------------------------------
+# Normalization & clipping
+# ----------------------------------------------------------------------
+normalize:
+  enabled: true
+  # normalize to median over valid pixels per-frame (robust); alternatives: mean, none
+  strategy: median       # [median | mean]
+  eps: 1.0e-8            # avoid division by zero
+
+clip:
+  min: 0.0               # clamp lower bound in flux units (null to disable)
+  max: null              # clamp upper bound (null to disable)
+
+# ----------------------------------------------------------------------
+# Robustness: NaNs, masks, and (optional) inpainting
+# ----------------------------------------------------------------------
+nan_policy: "raise"      # [raise | warn | coerce] — how to handle NaN in inputs
+coerce_value: 0.0        # used when nan_policy=coerce
+
+masking:
+  use_mask: true         # apply mask_file if present
+  grow_radius: 0         # dilate mask by N pixels (0 disables)
+  inpaint:
+    enabled: false       # enable simple local median inpaint of masked pixels
+    window: 3            # odd kernel size for median filter
+
+# ----------------------------------------------------------------------
+# Chunked processing (memory safety on Kaggle/CI)
+# ----------------------------------------------------------------------
+chunking:
+  enabled: true
+  # process T in blocks to cap peak memory; set to null to auto-pick based on RAM
+  frames_per_chunk: 32
+  # fallback when RAM is tiny (e.g., CI)
+  min_frames_per_chunk: 8
+
+# ----------------------------------------------------------------------
+# Validation gates (fail fast if calibration is pathological)
+# ----------------------------------------------------------------------
+validate: true
+validation:
+  # Reject extreme gain or offset values (helps catch unit mistakes)
+  gain:
+    finite: true
+    min: 1.0e-8
+    max: 1.0e+3
+  offset:
+    finite: true
+    min: -1.0e+6
+    max:  1.0e+6
+  # After conversion, sanity-check flux
+  flux:
+    finite: true
+    # optional range check in flux units (set to null to disable)
+    min: null
+    max: null
+  # Fraction of pixels allowed to violate constraints before hard-fail
+  max_violation_fraction: 0.001
+
+# ----------------------------------------------------------------------
+# Temperature/exposure scaling (optional)
+# ----------------------------------------------------------------------
+environment:
+  apply_exposure_time: false
+  exposure_time_sec: null      # required if apply_exposure_time=true
+  # Optional linear temp compensation for gain/offset if telemetry available
+  temperature_c: null
+  temp_coeff:
+    gain_per_c: 0.0
+    offset_per_c: 0.0
+
+# ----------------------------------------------------------------------
+# I/O & caching
+# ----------------------------------------------------------------------
+io:
+  allow_memmap: true           # memmap large NPY/NPZ files when possible
+  eager_load: false            # force full load of CSVs to arrays at start
+  cache_dir: ${paths.runtime}/cache/adc
+  write_intermediate: false    # debug: write calibrated tiles to disk
+
+# ----------------------------------------------------------------------
+# Logging & diagnostics
+# ----------------------------------------------------------------------
+log_level: INFO                # [CRITICAL | ERROR | WARNING | INFO | DEBUG]
+diagnostics:
+  histograms: false            # emit small histograms (pre/post) to logs
+  sample_pixels: 32            # number of random pixels to trace end-to-end
+  save_qc_report: false
+  qc_report_dir: ${paths.runtime}/reports/adc
+
+# ----------------------------------------------------------------------
+# Determinism & threading (mostly relevant if backend=torch)
+# ----------------------------------------------------------------------
+deterministic: true
+num_threads: ${oc.env:SM_NUM_THREADS, 2}
+
+# ----------------------------------------------------------------------
+# Repro metadata (recorded into run JSONL)
+# ----------------------------------------------------------------------
+meta:
+  name: "ADC Calibration"
+  version: "v1"
+  checksum_inputs: true   # record sha256 of gain/offset/mask files in logs
