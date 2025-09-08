@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import inspect
 import numpy as np
 import pytest
 
@@ -34,6 +35,13 @@ def _manual_gaussian_nll(y, mu, sigma):
     return 0.5 * (np.log(2.0 * math.pi * var) + (y - mu) ** 2 / var)
 
 
+def _sig_accepts(fn, name: str) -> bool:
+    try:
+        return name in inspect.signature(fn).parameters
+    except Exception:
+        return False
+
+
 # ----------------------------------------------------------------------------- #
 # gaussian_nll — core correctness & reductions
 # ----------------------------------------------------------------------------- #
@@ -61,7 +69,6 @@ def test_gaussian_nll_batch_numpy_reductions():
     assert np.isfinite(nll_mean)
     assert np.isfinite(nll_sum)
     assert nll_none.shape == (N, D)
-    # mean ≈ sum / count
     assert np.isclose(nll_mean, np.nansum(nll_none) / (N * D), rtol=1e-6)
     assert np.isclose(nll_sum, np.nansum(nll_none), rtol=1e-6)
 
@@ -121,6 +128,18 @@ def test_gaussian_nll_zero_or_negative_sigma_handling():
         assert isinstance(e, (ValueError, AssertionError, FloatingPointError, ZeroDivisionError))
 
 
+def test_gaussian_nll_tiny_sigma_stability():
+    # Extremely small sigma should be handled (either via clamping or well-defined error)
+    y = np.array([0.0, 1.0])
+    mu = np.array([0.0, 1.1])
+    sigma = np.array([1e-12, 1e-12])
+    try:
+        v = gaussian_nll(y, mu, sigma, reduction="mean")
+        assert np.isfinite(v)
+    except Exception as e:
+        assert isinstance(e, (FloatingPointError, ValueError, AssertionError, ZeroDivisionError))
+
+
 # ----------------------------------------------------------------------------- #
 # challenge_gll — weighting behavior and reductions
 # ----------------------------------------------------------------------------- #
@@ -134,7 +153,7 @@ def test_challenge_gll_fgs1_weighting_effect_two_bin():
     w58 = challenge_gll(y, mu, sigma, fgs1_weight=58.0, reduction="mean")
     w10 = challenge_gll(y, mu, sigma, fgs1_weight=10.0, reduction="mean")
 
-    assert w58 > w10 > base
+    assert w58 > w10 > base  # higher weight → higher aggregated loss when only bin0 has error
 
     nll_elem = gaussian_nll(y, mu, sigma, reduction="none")
     nll0 = float(nll_elem[0, 0])
@@ -145,7 +164,7 @@ def test_challenge_gll_fgs1_weighting_effect_two_bin():
 def test_challenge_gll_multi_bin_exact_formula():
     """
     Validate exact formula on a 1xK example where only specific bins have error.
-    Weighting should be equivalent to replacing the first-bin weight.
+    Weighted mean = (w*nll0 + sum(nll1..))/(w + (K-1))
     """
     K = 5
     y = np.zeros((1, K))
@@ -177,6 +196,40 @@ def test_challenge_gll_reductions_shapes_and_types():
     assert np.isscalar(sm)
 
 
+def test_challenge_gll_weight_1_matches_plain_mean():
+    """
+    If fgs1_weight == 1, challenge_gll's mean reduction should equal the plain mean of per-bin NLLs.
+    """
+    rng = _rng(3)
+    B, K = 2, 5
+    y = rng.normal(size=(B, K))
+    mu = y + rng.normal(scale=0.05, size=(B, K))
+    sigma = np.full((B, K), 0.3)
+    # Mean of NLL across (B,K) equals reduction="mean"
+    plain = np.mean(gaussian_nll(y, mu, sigma, reduction="none"))
+    got = challenge_gll(y, mu, sigma, fgs1_weight=1.0, reduction="mean")
+    assert np.isclose(plain, got, rtol=1e-12)
+
+
+def test_challenge_gll_mask_if_supported():
+    """
+    If the implementation supports a `mask` parameter, ensure masked-out bins don't contribute.
+    """
+    supports_mask = _sig_accepts(challenge_gll, "mask")
+    if not supports_mask:
+        pytest.skip("challenge_gll mask not supported")
+    y = np.array([[0.0, 0.0, 0.0]])
+    mu = np.array([[2.0, 0.0, 3.0]])  # only bins 0 and 2 have error
+    sigma = np.ones_like(y)
+    mask = np.array([[True, False, True]])  # ignore middle
+    # With weight w on bin 0, expected weighted mean over only masked-in bins (K_eff = 2)
+    nll = gaussian_nll(y, mu, sigma, reduction="none")[0]
+    for w in (1.0, 58.0):
+        got = challenge_gll(y, mu, sigma, fgs1_weight=w, reduction="mean", mask=mask)
+        expected = (w * nll[0] + nll[2]) / (w + 1.0)
+        assert np.isclose(got, expected, rtol=1e-12)
+
+
 # ----------------------------------------------------------------------------- #
 # point metrics — mae/rmse and masks
 # ----------------------------------------------------------------------------- #
@@ -198,6 +251,17 @@ def test_mae_rmse_broadcast_and_1d():
     assert np.isscalar(m)
     assert np.isscalar(r)
     assert m >= 0 and r >= 0
+
+
+def test_mae_rmse_dtypes_float32_float64():
+    rng = _rng(5)
+    y = rng.normal(size=(3, 4))
+    mu = rng.normal(size=(3, 4))
+    for cast in (np.float32, np.float64):
+        m = mae(y.astype(cast), mu.astype(cast))
+        r = rmse(y.astype(cast), mu.astype(cast))
+        assert np.isscalar(m) and np.isscalar(r)
+        assert m >= 0 and r >= 0
 
 
 # ----------------------------------------------------------------------------- #
@@ -222,7 +286,6 @@ def test_coverage_exact_fraction_constructed():
     half are outside (deterministically), then assert coverage=0.5.
     """
     alpha = 0.90  # z ≈ 1.64485
-    z = 1.6448536269514722
     # y: two bins, inside/outside toggled
     N, D = 10, 2
     mu = np.zeros((N, D))
@@ -233,6 +296,21 @@ def test_coverage_exact_fraction_constructed():
     y[N // 2 :] = mu[N // 2 :] + 2.5 * sigma[N // 2 :]
     cov = coverage(y, mu, sigma, alpha=alpha)
     assert np.isclose(cov, 0.5, atol=1e-12)
+
+
+def test_coverage_monotonic_in_alpha():
+    """
+    Larger alpha => wider intervals => coverage should not decrease.
+    """
+    rng = _rng(11)
+    y = rng.normal(size=(40, 7))
+    mu = rng.normal(size=(40, 7))
+    sigma = np.full_like(mu, 0.6)
+    cov80 = coverage(y, mu, sigma, alpha=0.80)
+    cov90 = coverage(y, mu, sigma, alpha=0.90)
+    cov95 = coverage(y, mu, sigma, alpha=0.95)
+    assert cov90 >= cov80 - 1e-12
+    assert cov95 >= cov90 - 1e-12
 
 
 def test_sharpness_reductions_and_shapes():
