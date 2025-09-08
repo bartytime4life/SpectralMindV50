@@ -1,0 +1,30 @@
+# configs/data/debug.yaml
+# SpectraMind V50 — Debug dataset profile (tiny, deterministic)
+# Use:
+#   python -m spectramind train data=debug
+
+# Subsampling controls consumed by your datamodule
+subset:
+  enable: true
+  train_frac: 0.02      # 2% of train
+  val_frac: 0.02        # 2% of val
+  test_frac: 0.02       # optional
+  seed: 123
+
+# Data loader batch sizes kept small for speed/VRAM
+batch_size:
+  train: 8
+  val: 8
+  test: 8
+
+# Keep workers low to reduce boot time on CI/Kaggle
+dataloader:
+  num_workers: 0
+  persistent_workers: false
+  pin_memory: false
+
+# Optional: fixed indices (overrides fracs if provided)
+# subset_indices:
+#   train: [0, 1, 2, 3, 4, 5, 6, 7]
+#   val:   [0, 1, 2, 3]
+#   test:  [0, 1, 2, 3]
