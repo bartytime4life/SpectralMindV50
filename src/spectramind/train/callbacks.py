@@ -52,12 +52,12 @@ try:  # pragma: no cover
 
     try:
         from pytorch_lightning.utilities.rank_zero import rank_zero_only
-    except Exception:
-        # Fallback shim
+    except Exception:  # pragma: no cover
         def rank_zero_only(fn):  # type: ignore
             def _wrap(*args, **kwargs):
                 return fn(*args, **kwargs)
             return _wrap
+
     _PL_IMPORT_ERROR: Optional[BaseException] = None
 except Exception as _e:  # pragma: no cover
     pl = None  # type: ignore
@@ -66,10 +66,12 @@ except Exception as _e:  # pragma: no cover
     LearningRateMonitor = object  # type: ignore
     StochasticWeightAveraging = None  # type: ignore
     ModelSummary = None  # type: ignore
+
     def rank_zero_only(fn):  # type: ignore
         def _wrap(*args, **kwargs):
             return fn(*args, **kwargs)
         return _wrap
+
     _PL_IMPORT_ERROR = _e
 
 
