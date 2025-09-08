@@ -1,62 +1,68 @@
 # =====================================================================
-# 📦 SpectraMind V50 — Development Dependencies
+# 📦 SpectraMind V50 — Development Dependencies (dev-only)
 # ---------------------------------------------------------------------
-# Purpose:
-#   Extra dev/test/lint/type-checking dependencies beyond runtime.
-#   Used locally and in CI for code quality, reproducibility, and safety.
+# Scope:
+#   Dev/test/lint/type/docs/security dependencies. No runtime libs here,
+#   to avoid drift with requirements-kaggle.txt / pyproject.toml.
+#
+# Usage:
+#   pip install -r requirements-dev.txt
 #
 # Notes:
-#   • Versions pinned for stability (Kaggle/CI reproducibility).
-#   • Keep in sync with pyproject.toml / setup.cfg / pre-commit.
-#   • Runtime deps (e.g., torch, numpy, pandas, polars) live in runtime files.
+#   • Keep versions pinned for reproducible CI.
+#   • If tests touch runtime libs (pandas/polars/etc.), install runtime too:
+#       pip install -r requirements-kaggle.txt -r requirements-dev.txt
+#   • Aligns with .pre-commit-config.yaml and CI workflows.
 # =====================================================================
 
 # --- Testing ----------------------------------------------------------
-pytest==8.4.2              # unit/integration tests
-pytest-cov==6.3.0          # coverage reporting
-pytest-xdist==3.8.0        # parallel test execution
-pytest-timeout==2.4.0      # fail fast on hangs
-hypothesis==6.112.0        # property-based tests (optional but powerful)
+pytest==8.4.2                 # unit/integration tests
+pytest-cov==6.3.0             # coverage reporting
+pytest-xdist==3.8.0           # parallel tests
+pytest-timeout==2.4.0         # fail fast on hangs
+pytest-rerunfailures==14.0    # stabilize flaky external IO tests
+hypothesis==6.112.0           # property-based tests
+
+# Optional local coverage runner (pytest-cov bundles coverage, this helps CLIs)
+coverage==7.6.1
 
 # --- Linting & Style --------------------------------------------------
-ruff==0.12.12                # linter + formatter (supersedes flake8/isort/black)
-toml-sort==0.23.1          # keep pyproject.toml sorted/stable
-pre-commit==3.7.1          # run linters/formatters consistently
+ruff==0.12.12                 # one-tool: lint + format (kept per your pin)
+pre-commit==3.7.1             # consistent hooks runner
+toml-sort==0.23.1             # stable pyproject ordering
+
+# Markdown formatting & spell-check (matches your pre-commit comments)
+mdformat==0.7.17
+mdformat-gfm==0.3.6
+mdformat-frontmatter==2.0.8
+codespell==2.3.0
 
 # --- Type Checking ----------------------------------------------------
-mypy==1.17.1               # static typing
-typing-extensions==4.12.2  # stabilize typing features for mypy/py3.11+
+mypy==1.17.1
+typing-extensions==4.12.2
 types-PyYAML==6.0.12.20240808
 types-requests==2.32.0.20240907
 
 # --- JSON / Schema Validation ----------------------------------------
 check-jsonschema==0.33.3
-# Keep dev in lockstep with runtime to avoid resolver drift:
-jsonschema==4.22.0
+jsonschema==4.22.0            # keep in lockstep with runtime to avoid drift
 
-# --- Data Science Utils (dev convenience) -----------------------------
-# Mirror runtime pins to prevent test env skew.
-pandas==2.2.2
-polars==1.33.0
-
-# --- CLI / Rich Output ------------------------------------------------
-rich==14.1.0               # colored logs, improved CLI UX
+# --- Notebook Hygiene (pre-commit hooks) ------------------------------
+nbstripout==0.7.1             # strip outputs from notebooks
+nbqa==1.8.5                   # run ruff/mypy on notebooks (optional)
 
 # --- Docs / Diagrams --------------------------------------------------
 mkdocs==1.6.0
 mkdocs-material==9.5.39
 pymdown-extensions==10.8.1
-# Optional MkDocs plugins (uncomment if you use them)
-# mkdocs-mermaid2-plugin==1.1.1
-# mkdocs-gen-files==0.5.0
-# mkdocs-literate-nav==0.6.1
+mkdocs-mermaid2-plugin==1.1.1 # you use Mermaid in docs/README; enable rendering
 
 # --- Security / SBOM --------------------------------------------------
-pip-audit==2.7.3           # Python supply-chain vuln audit
-cyclonedx-bom==7.1.0      # SBOM generation (CycloneDX)
-# bandit==1.7.9             # (optional) static security analysis of Python code
+pip-audit==2.7.3              # Python supply-chain vuln audit
+cyclonedx-bom==7.1.0          # SBOM generation (CycloneDX)
+# bandit==1.7.9               # (optional) static security scan
 
-# --- Packaging / Release (optional but useful in CI) ------------------
+# --- Packaging / Release ----------------------------------------------
 packaging==24.1
 build==1.2.2.post1
 twine==5.1.1
