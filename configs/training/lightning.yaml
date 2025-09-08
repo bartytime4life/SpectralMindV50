@@ -1,39 +1,46 @@
 # configs/training/lightning.yaml
 # ======================================================================
-# SpectraMind V50 — PyTorch Lightning Trainer Config
+# SpectraMind V50 — PyTorch Lightning Trainer Config (Upgraded)
 # ======================================================================
-# Orchestrates the Trainer/runtime knobs: accelerator, devices, strategy,
-# logging cadence, validation cadence, checkpointing, early stopping, and
-# dataloader perf flags. Designed for Kaggle/CI (offline & deterministic).
-# Compose this alongside configs/training/precision.yaml so that
-# `${precision.*}` indirections resolve properly.
+# CI/Kaggle-safe trainer configuration with deterministic behavior,
+# sane callbacks, optional profiling/SWA, and runtime toggles via env.
+# Compose alongside configs/training/precision.yaml.
 # ======================================================================
 
 trainer:
-  # Hardware & precision
-  accelerator: ${oc.env:SM_ACCELERATOR, "auto"}   # "gpu"|"cpu"|"auto"
-  devices: ${oc.env:SM_DEVICES, 1}                # 1 by default on Kaggle
-  strategy: ${oc.env:SM_STRATEGY, "auto"}         # "auto"|"ddp"|"ddp_find_unused_parameters_false"|...
-  precision: ${precision.mode}                    # from configs/training/precision.yaml
+  # --------------------------- Hardware & precision ---------------------------
+  accelerator: ${oc.env:SM_ACCELERATOR, "auto"}     # "gpu"|"cpu"|"auto"
+  devices: ${oc.env:SM_DEVICES, 1}                  # Kaggle: 1 GPU typical
+  strategy: ${oc.env:SM_STRATEGY, "auto"}           # "auto"|"ddp"|"ddp_fork"|...
+  precision: ${precision.mode}                      # from precision.yaml
 
-  # Run length & scheduling
+  # ----------------------- Run length & scheduling ----------------------------
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 50}
-  max_steps: ${oc.env:SM_MAX_STEPS, null}         # set to int to cap steps regardless of epochs
+  max_steps: ${oc.env:SM_MAX_STEPS, null}           # int → cap steps regardless of epochs
   accumulate_grad_batches: ${oc.env:SM_ACCUM, 1}
 
-  # Numerical safety
+  # ---------------------------- Numerical safety ------------------------------
   gradient_clip_val: ${precision.clip_grad_norm}
-  deterministic: ${precision.deterministic.torch} # reproducible kernels (slower if True)
-  benchmark: false                                # avoid nondeterministic cudnn autotune in CI/Kaggle
+  gradient_clip_algorithm: ${oc.env:SM_CLIP_ALGO, "norm"}  # "norm"|"value"
+  deterministic: ${precision.deterministic.torch}  # reproducible kernels (slower if true)
+  benchmark: false                                  # avoid nondet cudnn autotune in CI/Kaggle
 
-  # Logging & validation cadence
+  # --------------------- Logging / validation cadence -------------------------
   log_every_n_steps: ${oc.env:SM_LOG_EVERY, 50}
-  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}  # fraction of epoch or integer steps
+  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}      # float→fraction of epoch; int→steps
   check_val_every_n_epoch: ${oc.env:SM_VAL_EVERY_EPOCH, null}
 
-  # Checkpointing / callbacks are declared below but enabled here
+  # ------------------- Fast-dev / debug batch limiting ------------------------
+  limit_train_batches: ${oc.env:SM_LIMIT_TRAIN, 1.0}       # 0<val<=1.0 or int
+  limit_val_batches:   ${oc.env:SM_LIMIT_VAL, 1.0}
+  limit_test_batches:  ${oc.env:SM_LIMIT_TEST, 1.0}
+  limit_predict_batches: ${oc.env:SM_LIMIT_PRED, 1.0}
   enable_checkpointing: true
   default_root_dir: ${paths.logs_dir}
+
+  # ------------------------------- Profiling ----------------------------------
+  # "simple"|"advanced"|"pytorch" or null
+  profiler: ${oc.env:SM_PROFILER, null}
 
 # ----------------------------------------------------------------------
 # Callbacks
@@ -43,31 +50,49 @@ callbacks:
     _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: ${paths.ckpt_dir}
     filename: "epoch{epoch:03d}-step{step}-valloss{val/loss:.5f}"
-    monitor: ${oc.env:SM_MONITOR, "val/loss"}  # or "val/gll" if you log the comp metric
-    mode: ${oc.env:SM_MONITOR_MODE, "min"}     # "min" for loss/GLL; "max" for score
+    monitor: ${oc.env:SM_MONITOR, "val/loss"}      # e.g., "val/gll" when logged
+    mode: ${oc.env:SM_MONITOR_MODE, "min"}         # "min" for loss/GLL; "max" for scores
     save_top_k: ${oc.env:SM_SAVE_TOP_K, 3}
     save_last: true
     auto_insert_metric_name: false
+
   early_stopping:
     _target_: pytorch_lightning.callbacks.EarlyStopping
     monitor: ${callbacks.model_checkpoint.monitor}
     mode: ${callbacks.model_checkpoint.mode}
     patience: ${oc.env:SM_ES_PATIENCE, 8}
     min_delta: ${oc.env:SM_ES_MIN_DELTA, 0.0}
+    verbose: false
+
   lr_monitor:
     _target_: pytorch_lightning.callbacks.LearningRateMonitor
     logging_interval: "epoch"
+
   rich_progress:
     _target_: pytorch_lightning.callbacks.RichProgressBar
     refresh_rate: ${oc.env:SM_PROGRESS_REFRESH, 1}
 
+  model_summary:
+    _target_: pytorch_lightning.callbacks.ModelSummary
+    max_depth: ${oc.env:SM_SUMMARY_DEPTH, -1}      # -1 → full tree
+
+  # Optional: Stochastic Weight Averaging (safe default off)
+  # Enable via SM_SWA=true (any non-empty string)
+  swa:
+    _target_: pytorch_lightning.callbacks.StochasticWeightAveraging
+    swa_lrs: ${oc.env:SM_SWA_LR, 0.0}
+    annealing_epochs: ${oc.env:SM_SWA_ANNEAL_EPOCHS, 10}
+    annealing_strategy: ${oc.env:SM_SWA_ANNEAL_STRAT, "cos"}
+    # Activate only when requested
+    _enabled: ${oc.env:SM_SWA, ""}
+
 # ----------------------------------------------------------------------
-# Dataloader performance (safe defaults for Kaggle/CI)
+# Dataloader performance (consumed by our DataModule/factories)
 # ----------------------------------------------------------------------
 data_loader:
-  num_workers: ${oc.env:SM_NUM_WORKERS, 2}
+  num_workers: ${oc.env:SM_NUM_WORKERS, 2}         # conservative for Kaggle
   pin_memory: true
-  persistent_workers: false       # keep false on Kaggle to avoid worker leaks
+  persistent_workers: false                         # avoid worker leaks on Kaggle
   prefetch_factor: ${oc.env:SM_PREFETCH, 2}
 
 # ----------------------------------------------------------------------
@@ -79,7 +104,7 @@ paths:
   run_name: ${oc.env:SM_RUN_NAME, ${now:%Y%m%d-%H%M%S}}
 
 # ----------------------------------------------------------------------
-# Reproducibility seed (Lightning will seed PyTorch/NumPy/PL)
+# Reproducibility seed (Lightning seeds PyTorch/NumPy/PL)
 # ----------------------------------------------------------------------
 seed: ${oc.env:SM_SEED, 1337}
 
@@ -89,6 +114,7 @@ seed: ${oc.env:SM_SEED, 1337}
 defaults:
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
+  - /logger: jsonl   # keep indirection to your logger selector
 
 hydra:
   run:
