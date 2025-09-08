@@ -2,50 +2,89 @@
 # ======================================================================
 # SpectraMind V50 — Diagnostics & Reporting Config
 # ======================================================================
-# Runs post-training analyses (metrics + signal/feature diagnostics) and
-# emits an HTML report with figures and JSONL metrics. Designed to be
-# CI/Kaggle-safe (no internet), fully reproducible, and configurable.
+# Post-training analyses (metrics + signal/feature diagnostics) with an
+# HTML report, JSONL metrics, CSV tables, and a provenance manifest.
+# CI/Kaggle-safe (no internet), deterministic, Hydra-composable.
 # ======================================================================
 
+# ----------------------------------------------------------------------
+# Hydra defaults
+# ----------------------------------------------------------------------
 defaults:
+  - env: local                 # override with +env=kaggle in Kaggle/CI
+  - data: kaggle               # used for datamodule paths/splits if needed
+  - model: v50                 # enables model-aware diagnostics (SHAP, heads)
+  - logger: jsonl              # consistent with train/predict
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
+
+# ----------------------------------------------------------------------
+# Experiment meta & canonical paths
+# ----------------------------------------------------------------------
+experiment:
+  name: "spectramind_v50_diagnose"
+  tags: ["v50", "diagnostics", "reports", "fft", "umap", "shap"]
+
+paths:
+  work_dir: ${hydra:runtime.cwd}
+  artifacts: ${paths.work_dir}/artifacts
+  logs: ${paths.artifacts}/logs
+  reports: ${paths.artifacts}/reports/diagnostics
+  models: ${paths.artifacts}/models
+  schema_dir: ${paths.work_dir}/schemas
+  cache: ${paths.artifacts}/.cache/diagnostics
 
 # ----------------------------------------------------------------------
 # Inputs
 # ----------------------------------------------------------------------
 inputs:
-  # Model checkpoint to evaluate; if null, use latest under artifacts/models/
-  model_ckpt: ${oc.env:SM_MODEL_CKPT, artifacts/models/latest.ckpt}
+  # Model checkpoint to evaluate; if null, auto-pick latest in models/
+  model_ckpt: ${oc.env:SM_MODEL_CKPT, ${paths.models}/latest.ckpt}
 
-  # Evaluation split; you can point to a prepared file or a named split
-  # consumed by the datamodule.
+  # Evaluation split; either a named split (val|test|custom) consumed by
+  # the datamodule, or point eval_file to a CSV/Parquet with ground truth.
   eval_split: ${oc.env:SM_EVAL_SPLIT, "val"}     # one of: val|test|custom
-  eval_file:  ${oc.env:SM_EVAL_FILE, null}       # optional explicit path
+  eval_file:  ${oc.env:SM_EVAL_FILE, null}       # explicit path if custom
 
-  # Optional precomputed predictions; if provided, metric/diagnostics will
-  # operate on this CSV instead of running inference.
+  # Optional precomputed predictions CSV; if provided, metrics/analyses run
+  # offline on this file (skip inference).
   predictions: ${oc.env:SM_PREDICTIONS, null}
 
-  # Random seed for any stochastic subsampling (e.g., SHAP/UMAP sampling)
+  # Determinism knobs for any stochastic subsampling
   seed: ${oc.env:SM_SEED, 1337}
+  torch_deterministic: true
+
+  # Expected spectral bin count (competition schema = 283)
+  bin_count: ${oc.env:SM_BIN_COUNT, 283}
 
 # ----------------------------------------------------------------------
-# Metrics (leaderboard-aligned + internal)
+# Metrics (leaderboard-aligned + internal sanity)
 # ----------------------------------------------------------------------
 metrics:
   # Gaussian log-likelihood (primary competition metric)
   gll:
     enabled: true
-    # Relative weighting for the FGS1 (broadband) channel in the loss/score.
-    # (Kept configurable; do NOT hardcode the competition’s internal weight.)
+    # Keep the FGS1 relative weight configurable; do NOT hardcode secret metric
     weight_fgs1: ${oc.env:SM_GLL_W_FGS1, 58.0}
     clamp_sigma_min: 1e-6       # numeric safety for σ
     clamp_sigma_max: 1e2
+    # Gate: fail the job if NaN/inf encountered
+    fail_on_nonfinite: true
 
   # Additional sanity metrics
-  mae: true
-  rmse: true
+  mae:
+    enabled: true
+  rmse:
+    enabled: true
+
+  # Distribution checks on σ to detect pathological collapse/overspread
+  sigma_stats:
+    enabled: true
+    ptiles: [5, 25, 50, 75, 95]
+    # Gate: alert/fail if med(σ) outside plausible range
+    median_min: ${oc.env:SM_SIGMA_MED_MIN, 1e-4}
+    median_max: ${oc.env:SM_SIGMA_MED_MAX, 1.0}
+    hard_fail: false
 
 # ----------------------------------------------------------------------
 # Analyses
@@ -59,6 +98,8 @@ analyses:
     window: "hann"
     n_fft: 2048
     save_power_spectra: true
+    # Optional notch list (Hz or bin index depending on implementation)
+    notch: []             # e.g., [50, 60]
 
   # Low-dim embedding of latent/features/residuals for cluster/OOD inspection
   umap:
@@ -66,17 +107,21 @@ analyses:
     n_neighbors: 15
     min_dist: 0.10
     metric: "euclidean"
-    sample_size: 5000        # cap for speed
+    sample_size: 5000         # cap for speed
     random_state: ${inputs.seed}
+    # If features are available from model: choose which space to embed
+    source: "residuals"       # residuals|mu|latent
 
   # Model explainability on μ predictions (optionally on σ)
   shap:
     enabled: true
-    method: "kernel"         # kernel|sampling|gradient (choose per model)
+    method: "kernel"          # kernel|sampling|gradient (choose per model)
     background_size: 256
     sample_size: 512
-    max_eval: 5000           # compute budget cap
+    max_eval: 5000            # compute budget cap
     explain_sigma: false
+    # Gate: cap per-sample runtime to keep CI within time limits
+    per_sample_timeout_s: 2.5
 
   # Physics/symbolic plausibility checks on spectra
   symbolic_checks:
@@ -91,48 +136,84 @@ analyses:
       enabled: true
       window_bins: 5
       max_zscore: 5.0
+    # Optional hard gate that can fail CI on violation rate
+    gating:
+      hard_fail: false
+      max_violation_rate: 0.05
+
+  # Pairwise agreement between μ and σ (heteroscedastic sanity)
+  mu_sigma_consistency:
+    enabled: true
+    corr_min: -0.25           # weakly negative/neutral allowed
+    corr_max: 0.75
+    hard_fail: false
 
 # ----------------------------------------------------------------------
 # Reporting & Artifacts
 # ----------------------------------------------------------------------
 report:
-  out_dir: ${oc.env:SM_DIAG_OUT, artifacts/reports/diagnostics}
+  out_dir: ${oc.env:SM_DIAG_OUT, ${paths.reports}}
   html:
     enabled: true
     filename: index.html
+    title: "SpectraMind V50 — Diagnostics"
+    # Optional: embed small PNGs as data URIs to produce a single-file report
+    inline_small_images: true
+    inline_image_threshold_kb: 256
   save_plots: true
   fig:
     dpi: 160
     style: "default"         # matplotlib style (CI/Kaggle-safe)
     format: "png"            # png for wide compatibility
+    tight_layout: true
+    grid: true
   jsonl_metrics:
     enabled: true
     path: ${report.out_dir}/metrics.jsonl
   tables_csv:
     enabled: true
     dir: ${report.out_dir}/tables
+  artifacts:
+    save_raw_predictions: true
+    raw_predictions_path: ${report.out_dir}/predictions.raw.csv
+    save_residuals: true
+    residuals_path: ${report.out_dir}/residuals.csv
+  # CI failure gates to enforce data integrity
+  integrity_gates:
+    enabled: true
+    require_bin_count: ${inputs.bin_count}
+    require_no_missing_ids: true
+    require_finite_values: true
 
 # ----------------------------------------------------------------------
 # Provenance & Schema Validation
 # ----------------------------------------------------------------------
 provenance:
-  # Manifest capturing config snapshot, hashes, and environment
-  manifest: ${oc.env:SM_DIAG_MANIFEST, artifacts/manifest_diagnostics.json}
+  manifest: ${oc.env:SM_DIAG_MANIFEST, ${paths.artifacts}/manifest_diagnostics.json}
   include_git: true
   include_env: true
+  include_config_snapshot: true
+  include_checksums: true
 
 validate:
-  # Optional schema to validate structured events/metrics
-  events_schema: schemas/events.schema.json
+  # Schema to validate structured events/metrics (optional but recommended)
+  events_schema: ${oc.env:SM_EVENTS_SCHEMA, ${paths.schema_dir}/events.schema.json}
   strict: true
   quiet: false
 
 # ----------------------------------------------------------------------
-# Runtime toggles
+# Runtime & caching
 # ----------------------------------------------------------------------
 runtime:
-  offline: true     # enforce no-internet behavior (Kaggle/CI safe)
-  num_workers: 2    # CPU workers for I/O-bound ops
+  offline: true           # enforce no-internet behavior (Kaggle/CI safe)
+  num_workers: 2          # CPU workers for I/O-bound ops
+  disable_cuda: ${oc.env:SM_DISABLE_CUDA, false}
+  progress: true          # CLI progress bars unless CI disables TTY
+  cache:
+    enabled: true
+    dir: ${paths.cache}
+    reuse_shap_background: true
+    reuse_umap_embedding: true
 
 # ----------------------------------------------------------------------
 # Hydra runtime
