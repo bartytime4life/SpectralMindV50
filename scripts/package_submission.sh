@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # -----------------------------------------------------------------------------
-# SpectraMind V50 — Submission Packager
+# SpectraMind V50 — Submission Packager (Upgraded)
 # -----------------------------------------------------------------------------
 # Builds a Kaggle-ready submission bundle by:
 #   1) Running the submit stage (unless a CSV is provided)
 #   2) Performing robust validation:
-#        - header shape & exact column names
-#        - row arity checks (every row has the same #fields as header)
-#        - numeric checks (no NaN/Inf/blank for mu_*/sigma_*)
-#   3) Emitting a manifest.json with provenance details (git, VERSION, sha256, env)
+#        - header shape & exact column names (id + 283 mu + 283 sigma = 567)
+#        - full-file row arity checks (every row has same #fields as header)
+#        - numeric checks (no NaN/Inf/blank for mu_*/sigma_*, scientific ok)
+#   3) Emitting manifest.json with provenance (git, VERSION, sha256, env) and
+#      validation stats (rows, header hash, first/last IDs, sample checksums)
 #   4) Packaging into a versioned zip under artifacts/
-#   5) (Optional) Uploading via Kaggle CLI
+#   5) (Optional) Uploading via Kaggle CLI with retries/backoff
 #
 # Usage:
 #   ./scripts/package_submission.sh [options]
@@ -24,18 +25,24 @@
 #   -S, --skip-validate      Skip CSV validation checks
 #   -q, --quiet              Less verbose logging
 #       --auto-upload        Upload bundle via Kaggle CLI (requires -C)
-#   -C, --competition SLUG   Kaggle competition slug (e.g. ariel-data-challenge-2025)
+#   -C, --competition SLUG   Kaggle competition slug (e.g. neurips-2025-ariel-data-challenge)
 #   -m, --message MSG        Submission message (Kaggle upload)
+#       --retries N          Retries for Kaggle upload (default: 3)
+#       --backoff SEC        Initial backoff seconds (default: 2, doubles each retry)
+#       --allow-missing-cols Allow missing trailing columns (rare; for schema changes)
+#       --id-col NAME        Override id column name (default: sample_id)
+#       --bins N             Number of spectral bins (default: 283)
 #   -h, --help               Show help and exit
 #
 # Notes:
-# - Fails fast on any error (set -euo pipefail).
+# - Fails fast on any error (set -Eeuo pipefail).
 # - Detects Kaggle vs local; defaults outdir accordingly.
-# - Expected header: 1 id + 283 mu_* + 283 sigma_* = 567 total columns.
-# - Exact column names enforced: mu_000..mu_282 and sigma_000..sigma_282 by default.
+# - Expected header: 1 id + N mu_* + N sigma_* → 2N+1 total columns.
+# - Exact column names enforced: mu_000..mu_(N-1) and sigma_000..sigma_(N-1).
 # -----------------------------------------------------------------------------
 
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
 
 # --- Defaults ----------------------------------------------------------------
 CFG_NAME="submit"
@@ -47,11 +54,10 @@ QUIET="0"
 AUTO_UPLOAD="0"
 KAGGLE_COMPETITION=""
 KAGGLE_MSG="SpectraMind V50 submission"
-
-EXPECTED_COLS=567
+RETRIES=3
+BACKOFF=2
+ALLOW_MISSING_COLS=0
 ID_COL="sample_id"
-MU_PREFIX="mu_"
-SIGMA_PREFIX="sigma_"
 N_BINS=283
 
 DEFAULT_OUTDIR_LOCAL="artifacts"
@@ -59,18 +65,40 @@ DEFAULT_OUTDIR_KAGGLE="/kaggle/working/artifacts"
 
 # --- Helpers -----------------------------------------------------------------
 timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
-log() { [ "$QUIET" = "1" ] || echo -e "[ $(timestamp) ] [package_submission] $*"; }
-warn() { echo -e "[ $(timestamp) ] [package_submission][WARN] $*" >&2; }
-die() { echo -e "[ $(timestamp) ] [package_submission][ERROR] $*" >&2; exit 1; }
+log() { [[ "$QUIET" = "1" ]] || printf "[ %s ] [package_submission] %s\n" "$(timestamp)" "$*"; }
+warn() { printf "[ %s ] [package_submission][WARN] %s\n"  "$(timestamp)" "$*" >&2; }
+die() {  printf "[ %s ] [package_submission][ERROR] %s\n" "$(timestamp)" "$*" >&2; exit 1; }
 
-detect_env() { if [[ -d "/kaggle/input" ]]; then echo "kaggle"; else echo "local"; fi; }
+detect_env() { [[ -d "/kaggle/input" ]] && echo "kaggle" || echo "local"; }
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
-realpath_f() { python - <<'PY' "$1"
+realpath_f() { python - "$1" <<'PY'
 import os,sys; p=sys.argv[1]; print(os.path.realpath(p) if os.path.exists(p) else p)
 PY
 }
 
-usage() { sed -n '1,120p' "$0" | sed 's/^# \{0,1\}//'; }
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else echo "unavailable"; fi
+}
+
+stat_size() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1"; }
+
+usage() { sed -n '1,160p' "$0" | sed 's/^# \{0,1\}//'; }
+
+run_with_retries() {
+  local tries="$1"; shift
+  local backoff="$1"; shift
+  local attempt=1
+  until "$@"; do
+    local rc=$?
+    if (( attempt >= tries )); then return "$rc"; fi
+    warn "Command failed (rc=$rc). Retry $attempt/$tries in ${backoff}s: $*"
+    sleep "$backoff"
+    attempt=$((attempt+1))
+    backoff=$((backoff*2))
+  done
+}
 
 # --- Args --------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -79,11 +107,16 @@ while [[ $# -gt 0 ]]; do
     -f|--file)          SUBMISSION_FILE="${2:-}"; shift 2 ;;
     -o|--outdir)        OUTDIR="${2:-}"; shift 2 ;;
     -n|--name)          BASENAME="${2:-}"; shift 2 ;;
-    -S|--skip-validate) SKIP_VALIDATE="1"; shift 1 ;;
-    -q|--quiet)         QUIET="1"; shift 1 ;;
-        --auto-upload)  AUTO_UPLOAD="1"; shift 1 ;;
+    -S|--skip-validate) SKIP_VALIDATE="1"; shift ;;
+    -q|--quiet)         QUIET="1"; shift ;;
+        --auto-upload)  AUTO_UPLOAD="1"; shift ;;
     -C|--competition)   KAGGLE_COMPETITION="${2:-}"; shift 2 ;;
     -m|--message)       KAGGLE_MSG="${2:-}"; shift 2 ;;
+        --retries)      RETRIES="${2:-3}"; shift 2 ;;
+        --backoff)      BACKOFF="${2:-2}"; shift 2 ;;
+        --allow-missing-cols) ALLOW_MISSING_COLS=1; shift ;;
+        --id-col)       ID_COL="${2:-sample_id}"; shift 2 ;;
+        --bins)         N_BINS="${2:-283}"; shift 2 ;;
     -h|--help)          usage; exit 0 ;;
     *) warn "Unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -109,11 +142,15 @@ fi
 
 # --- Locate / Produce submission.csv ----------------------------------------
 if [[ -z "$SUBMISSION_FILE" ]]; then
-  has_cmd spectramind || die "spectramind CLI not found on PATH."
-  log "Running submit stage with config: $CFG_NAME"
-  spectramind submit --config-name "$CFG_NAME"
+  if has_cmd spectramind; then
+    log "Running submit stage with config: $CFG_NAME"
+    spectramind submit --config-name "$CFG_NAME"
+  else
+    # fallback to python -m for environments without CLI entrypoint
+    log "spectramind CLI not found; trying python -m spectramind submit"
+    python -m spectramind submit --config-name "$CFG_NAME"
+  fi
 
-  # Candidates to locate the CSV
   CANDIDATES=(
     "$OUTDIR/submission.csv"
     "outputs/submission.csv"
@@ -134,7 +171,9 @@ fi
 log "Using submission CSV: $SUBMISSION_FILE"
 
 # --- Validation --------------------------------------------------------------
-# Build expected header exactly: sample_id, mu_000..mu_282, sigma_000..sigma_282
+EXPECTED_COLS=$((2 * N_BINS + 1))
+
+# Build exact expected header string
 build_expected_header() {
   python - "$ID_COL" "$N_BINS" <<'PY'
 import sys
@@ -145,88 +184,109 @@ print(",".join([id_col] + mu + sg))
 PY
 }
 
-validate_csv() {
+validate_csv_streaming() {
   local path="$1"
-  [[ -s "$path" ]] || die "Submission CSV is empty: $path"
+  python - "$path" "$ID_COL" "$N_BINS" "$EXPECTED_COLS" "$ALLOW_MISSING_COLS" <<'PY'
+import csv, math, sys, hashlib, re
+from itertools import islice
 
-  local header; header="$(head -n1 "$path")"
-  [[ -n "$header" ]] || die "Cannot read header from CSV."
+path, id_col = sys.argv[1], sys.argv[2]
+n_bins = int(sys.argv[3]); expected_cols = int(sys.argv[4])
+allow_missing = int(sys.argv[5]) == 1
 
-  local cols; cols="$(awk -F',' 'NR==1{print NF}' "$path")"
-  [[ "$cols" -eq "$EXPECTED_COLS" ]] || die "Unexpected column count: got $cols, expected $EXPECTED_COLS"
+def is_number(x:str)->bool:
+    if x == "" or x.lower() in {"nan", "+nan", "-nan", "inf", "+inf", "-inf"}:
+        return False
+    # simple numeric pattern (int/float/scientific)
+    return bool(re.match(r'^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$', x))
 
-  local first_col; first_col="$(awk -F',' 'NR==1{print $1}' "$path")"
-  [[ "$first_col" == "$ID_COL" ]] || warn "First column '$first_col' != expected '$ID_COL'"
+with open(path, newline='') as f:
+    r = csv.reader(f)
+    header = next(r, None)
+    if not header:
+        print("ERR: CSV has no header", file=sys.stderr); sys.exit(2)
+    cols = len(header)
 
-  # Exact name check
-  local expected; expected="$(build_expected_header)"
-  if [[ "$header" != "$expected" ]]; then
-    warn "Header does not exactly match expected schema."
-    # Show a short diff preview (requires python3)
-    if has_cmd python; then
-      python - <<'PY' "$header" "$expected"
-import sys, difflib
-a=sys.argv[1].split(",")
-b=sys.argv[2].split(",")
-for i,(x,y) in enumerate(zip(a,b)):
-    if x!=y:
-        print(f"  col {i+1}: got '{x}' expected '{y}'")
-        if i>10 and i< len(a)-10: break
+    # exact header check
+    exp = [id_col] + [f"mu_{i:03d}" for i in range(n_bins)] + [f"sigma_{i:03d}" for i in range(n_bins)]
+    if header != exp:
+        # if allowing missing, permit cases where trailing columns are absent, but order/prefix must match
+        if allow_missing and header == exp[:len(header)]:
+            pass
+        else:
+            print("ERR: Header mismatch", file=sys.stderr)
+            for i,(a,b) in enumerate(zip(header,exp), start=1):
+                if a!=b:
+                    print(f"  col {i}: got '{a}' expected '{b}'", file=sys.stderr)
+                    break
+            sys.exit(3)
+
+    if cols != expected_cols and not (allow_missing and cols <= expected_cols):
+        print(f"ERR: Unexpected column count: got {cols}, expected {expected_cols}", file=sys.stderr)
+        sys.exit(4)
+
+    # Validate rows
+    total = 0
+    bad = None
+    id_first = None
+    id_last = None
+
+    # Cheap rolling checksum for sampling integrity
+    sample_hash = hashlib.sha256()
+    for row in r:
+        total += 1
+        if len(row) != cols:
+            bad = f"Row {total+1} fields={len(row)} expected={cols}"; break
+        if id_first is None: id_first = row[0]
+        id_last = row[0]
+        # numeric checks for mu/sigma columns
+        for v in row[1:cols]:
+            if not is_number(v):
+                bad = f"Row {total+1} has non-numeric/invalid value '{v}'"; break
+        if bad: break
+        # sample checksum (first 10 rows)
+        if total <= 10:
+            sample_hash.update(",".join(row).encode())
+
+    if bad:
+        print("ERR:", bad, file=sys.stderr); sys.exit(5)
+
+    # stats out
+    print("OK")
+    print(f"COLS:{cols}")
+    print(f"ROWS:{total}")
+    print(f"ID_FIRST:{id_first}")
+    print(f"ID_LAST:{id_last}")
+    print(f"SAMPLE_SHA256:{sample_hash.hexdigest()}")
 PY
-    fi
-  fi
-
-  # Per-row arity check (first 100 rows + all rows if small)
-  awk -F',' -v n="$cols" 'NR>1 { if (NF!=n) { printf("Row %d has %d fields (expected %d)\n", NR, NF, n); exit 42 } }' "$path" \
-    || die "Row arity check failed (see message above)."
-
-  # Numeric checks for mu_*/sigma_* (first 1000 rows)
-  # Allow scientific notation; disallow empty/NaN/Inf.
-  awk -F',' -v n="$cols" '
-    BEGIN{ ok=1; }
-    NR==1 { next }
-    NR>1001 { exit }  # sample first 1000 lines
-    {
-      for(i=2;i<=n;i++){
-        x=$i
-        if (x=="" || x=="NaN" || x=="nan" || x=="INF" || x=="inf" || x=="+inf" || x=="-inf") { printf("Bad numeric at row %d col %d: '%s'\n", NR, i, x); ok=0; exit }
-        # regex numeric: optional sign, digits, optional decimal, optional exponent
-        if (x !~ /^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/) { printf("Non-numeric at row %d col %d: '%s'\n", NR, i, x); ok=0; exit }
-      }
-    }
-    END{ if (!ok) exit 43 }
-  ' "$path" || die "Numeric validation failed."
-
-  # At least one data row
-  local nrows; nrows="$(wc -l < "$path" | tr -d ' ')"
-  [[ "$nrows" -ge 2 ]] || die "CSV has header but no data rows."
-
-  # Soft size sanity
-  local bytes; bytes="$(wc -c < "$path" | tr -d ' ')"
-  [[ "$bytes" -ge 100 ]] || warn "CSV file size is very small ($bytes bytes); verify contents."
-
-  log "Validation passed: columns=$cols, rows=$nrows, size=${bytes}B"
 }
 
 if [[ "$SKIP_VALIDATE" = "0" ]]; then
-  log "Validating CSV structure and numerics"
-  validate_csv "$SUBMISSION_FILE"
+  log "Validating CSV (streaming full-file checks)…"
+  OUT="$(validate_csv_streaming "$SUBMISSION_FILE" 2>&1 || true)"
+  if ! grep -q "^OK$" <<<"$OUT"; then
+    printf "%s\n" "$OUT" >&2
+    die "CSV validation failed."
+  fi
+  # capture stats
+  COLS="$(awk -F: '/^COLS:/{print $2}' <<<"$OUT")"
+  ROWS="$(awk -F: '/^ROWS:/{print $2}' <<<"$OUT")"
+  ID_FIRST="$(awk -F: '/^ID_FIRST:/{print $2}' <<<"$OUT")"
+  ID_LAST="$(awk -F: '/^ID_LAST:/{print $2}' <<<"$OUT")"
+  SAMPLE_SHA256="$(awk -F: '/^SAMPLE_SHA256:/{print $2}' <<<"$OUT")"
+  log "Validation passed: cols=$COLS rows=$ROWS first_id=$ID_FIRST last_id=$ID_LAST"
 else
   log "Skipping CSV validation as requested"
+  COLS="$EXPECTED_COLS"; ROWS="-1"; ID_FIRST=""; ID_LAST=""; SAMPLE_SHA256=""
 fi
 
 # --- Manifest ----------------------------------------------------------------
 manifest_path="$OUTDIR/${BASENAME}_manifest.json"
-sha_tool="$(command -v sha256sum || command -v shasum || true)"
-if [[ -n "$sha_tool" ]]; then
-  if [[ "$sha_tool" =~ shasum$ ]]; then
-    csv_sha256="$("$sha_tool" -a 256 "$SUBMISSION_FILE" | awk '{print $1}')"
-  else
-    csv_sha256="$("$sha_tool" "$SUBMISSION_FILE" | awk '{print $1}')"
-  fi
-else
-  csv_sha256="unavailable"; warn "sha256 tool not found; manifest sha256 set to 'unavailable'."
-fi
+csv_sha256="$(sha256_file "$SUBMISSION_FILE")"
+csv_size="$(stat_size "$SUBMISSION_FILE" || echo 0)"
+
+# header hash (exact bytes of first line)
+HEADER_SHA256="$(head -n1 "$SUBMISSION_FILE" | { sha256_file /dev/stdin || cat; } 2>/dev/null || echo "unavailable")"
 
 log "Writing manifest → $manifest_path"
 cat > "$manifest_path" <<EOF
@@ -234,13 +294,24 @@ cat > "$manifest_path" <<EOF
   "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "environment": "$ENV_TYPE",
   "submit_config": "$CFG_NAME",
-  "csv_path": "$(realpath_f "$SUBMISSION_FILE")",
-  "csv_sha256": "$csv_sha256",
-  "expected_columns": $EXPECTED_COLS,
-  "id_column": "$ID_COL",
-  "mu_prefix": "$MU_PREFIX",
-  "sigma_prefix": "$SIGMA_PREFIX",
-  "n_bins": $N_BINS,
+  "schema": {
+    "id_column": "$ID_COL",
+    "n_bins": $N_BINS,
+    "expected_columns": $EXPECTED_COLS,
+    "allow_missing_cols": $ALLOW_MISSING_COLS
+  },
+  "csv": {
+    "path": "$(realpath_f "$SUBMISSION_FILE")",
+    "sha256": "$csv_sha256",
+    "size_bytes": $csv_size,
+    "header_sha256": "$HEADER_SHA256",
+    "validated": $(( SKIP_VALIDATE == 0 ? 1 : 0 )),
+    "cols": $COLS,
+    "rows": $ROWS,
+    "id_first": "$(printf "%s" "$ID_FIRST")",
+    "id_last": "$(printf "%s" "$ID_LAST")",
+    "sample_sha256": "$(printf "%s" "$SAMPLE_SHA256")"
+  },
   "git": {
     "root": "$(realpath_f "$git_root")",
     "revision": "$git_rev",
@@ -272,20 +343,41 @@ print("Wrote", zip_path)
 PYZ
 fi
 
+ZIP_SHA256="$(sha256_file "$zip_path")"
+ZIP_SIZE="$(stat_size "$zip_path" || echo 0)"
 log "Submission bundle ready ✅"
 log "ZIP: $zip_path"
+log "ZIP sha256: $ZIP_SHA256  size: ${ZIP_SIZE} bytes"
 
 # --- Optional Kaggle Upload --------------------------------------------------
 if [[ "$AUTO_UPLOAD" = "1" ]]; then
   [[ -n "$KAGGLE_COMPETITION" ]] || die "--auto-upload requires --competition <slug>"
   has_cmd kaggle || die "Kaggle CLI not found."
-  # Ensure credentials exist (env or ~/.kaggle/kaggle.json)
   if [[ -z "${KAGGLE_USERNAME:-}" || -z "${KAGGLE_KEY:-}" ]]; then
-    if [[ ! -f "${HOME}/.kaggle/kaggle.json" ]]; then
-      die "Kaggle credentials not found (env KAGGLE_USERNAME/KAGGLE_KEY or ~/.kaggle/kaggle.json)."
-    fi
+    [[ -f "${HOME}/.kaggle/kaggle.json" ]] || die "Kaggle credentials not found (env KAGGLE_USERNAME/KAGGLE_KEY or ~/.kaggle/kaggle.json)."
   fi
+  CMD=(kaggle competitions submit -c "$KAGGLE_COMPETITION" -f "$zip_path" -m "$KAGGLE_MSG")
   log "Uploading to Kaggle competition: $KAGGLE_COMPETITION"
-  kaggle competitions submit -c "$KAGGLE_COMPETITION" -f "$zip_path" -m "$KAGGLE_MSG"
-  log "Upload submitted to Kaggle."
+  if run_with_retries "$RETRIES" "$BACKOFF" "${CMD[@]}"; then
+    log "Upload submitted to Kaggle."
+  else
+    die "Kaggle submit failed after $RETRIES attempt(s)."
+  fi
 fi
+
+# --- Summary ------------------------------------------------------------------
+echo
+echo "──────────────────────────────────────────────────────────────────────────────"
+echo " Submission packaging summary"
+echo "  • CSV         : $SUBMISSION_FILE"
+echo "  • CSV SHA256  : $csv_sha256"
+echo "  • CSV Size    : ${csv_size} bytes"
+echo "  • ZIP         : $zip_path"
+echo "  • ZIP SHA256  : $ZIP_SHA256"
+echo "  • ZIP Size    : ${ZIP_SIZE} bytes"
+if [[ "$AUTO_UPLOAD" = "1" ]]; then
+  echo "  • Upload      : DONE (see Kaggle for result)"
+else
+  echo "  • Upload      : SKIPPED (use --auto-upload)"
+fi
+echo "──────────────────────────────────────────────────────────────────────────────"
