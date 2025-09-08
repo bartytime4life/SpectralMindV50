@@ -64,7 +64,7 @@ def _mk_large_bytes(n_bytes: int = 5_000_000) -> bytes:
 
 
 # ----------------------------------------------------------------------------- #
-# Tests
+# Tests — bytes/hex primitives
 # ----------------------------------------------------------------------------- #
 def test_sha256_known_vectors() -> None:
     """
@@ -74,23 +74,49 @@ def test_sha256_known_vectors() -> None:
     sha_bytes = _get_fn(H, "hash_bytes", "sha256_bytes", "sha256")  # returns bytes digest
     sha_hex = _get_fn(H, "sha256_hex", "hash_hex", "hash_str")      # returns hex digest for str/bytes
 
+    # SHA-256("")
+    empty_expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     # SHA-256("abc")
-    expected_hex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    abc_expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
     if sha_hex is not None:
-        assert sha_hex("abc") == expected_hex
+        assert sha_hex("") == empty_expected
+        assert sha_hex("abc") == abc_expected
         # Accept bytes input, too, if supported
         try:
-            assert sha_hex(b"abc") == expected_hex  # type: ignore[arg-type]
+            assert sha_hex(b"") == empty_expected  # type: ignore[arg-type]
+            assert sha_hex(b"abc") == abc_expected  # type: ignore[arg-type]
         except TypeError:
+            # Function may be str-only
             pass
 
     if sha_bytes is not None:
-        digest = sha_bytes(b"abc")
-        assert isinstance(digest, (bytes, bytearray)) and len(digest) == 32
-        assert digest.hex() == expected_hex
+        d0 = sha_bytes(b"")
+        d1 = sha_bytes(b"abc")
+        assert isinstance(d0, (bytes, bytearray)) and len(d0) == 32
+        assert isinstance(d1, (bytes, bytearray)) and len(d1) == 32
+        assert d0.hex() == empty_expected
+        assert d1.hex() == abc_expected
 
 
+def test_sha256_large_bytes_if_supported() -> None:
+    """
+    If a bytes hashing function exists, verify it handles large inputs deterministically.
+    """
+    H = _try_import_hashing()
+    sha_bytes = _get_fn(H, "hash_bytes", "sha256_bytes", "sha256")
+    if sha_bytes is None:
+        pytest.skip("bytes hashing not implemented")
+
+    big = _mk_large_bytes(5_000_000)
+    h1 = sha_bytes(big)
+    h2 = sha_bytes(big)
+    assert h1 == h2
+
+
+# ----------------------------------------------------------------------------- #
+# Tests — files
+# ----------------------------------------------------------------------------- #
 def test_hash_file_deterministic(tmp_path: Path) -> None:
     """
     hash_file should produce a stable digest for the same content and change when content changes.
@@ -107,11 +133,16 @@ def test_hash_file_deterministic(tmp_path: Path) -> None:
     h1 = hash_file(p)
     assert isinstance(h1, (str, bytes))
 
-    # Compute via bytes function if available (sanity)
+    # Compute via bytes/hex function if available (sanity)
     if sha_hex is not None:
         with p.open("rb") as f:
             b = f.read()
-        hx = sha_hex(b) if isinstance(sha_hex(b"abc"), str) else sha_hex(b).hex()  # type: ignore[call-arg]
+        # Determine whether sha_hex returns str or bytes for bytes input
+        probe = sha_hex(b"abc")
+        if isinstance(probe, str):
+            hx = sha_hex(b)  # type: ignore[arg-type]
+        else:
+            hx = sha_hex(b).hex()  # type: ignore[call-arg, union-attr]
         if isinstance(h1, bytes):
             assert h1.hex() == hx
         else:
@@ -140,6 +171,9 @@ def test_hash_file_large(tmp_path: Path) -> None:
     assert h1 == h2
 
 
+# ----------------------------------------------------------------------------- #
+# Tests — directories/trees
+# ----------------------------------------------------------------------------- #
 def test_hash_dir_same_tree_same_hash(tmp_path: Path) -> None:
     """
     Two *identical* directory trees should produce the same directory hash.
@@ -183,6 +217,43 @@ def test_hash_dir_detects_changes(tmp_path: Path) -> None:
     assert mod2 != mod1
 
 
+def test_hash_dir_empty_and_unicode_names(tmp_path: Path) -> None:
+    """
+    If directory hashing exists, it should be stable for:
+      - empty directories
+      - unicode filenames (path normalization-safe)
+    """
+    H = _try_import_hashing()
+    hash_dir = _get_fn(H, "hash_dir", "sha256_dir", "hash_tree")
+    if hash_dir is None:
+        pytest.skip("hash_dir not implemented")
+
+    # Empty directory
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+    h_empty_1 = hash_dir(empty_dir)
+    h_empty_2 = hash_dir(empty_dir)
+    assert h_empty_1 == h_empty_2
+
+    # Unicode filenames (identical bytes, different creation order)
+    u1 = tmp_path / "unic1"
+    u2 = tmp_path / "unic2"
+    (u1 / "ä").mkdir(parents=True, exist_ok=True)
+    (u2 / "ä").mkdir(parents=True, exist_ok=True)
+    _write_bytes(u1 / "ä" / "π.txt", "mu\n".encode("utf-8"))
+    _write_bytes(u1 / "ß.bin", b"\x10\x20\x30")
+    # variant creation order
+    _write_bytes(u2 / "ß.bin", b"\x10\x20\x30")
+    _write_bytes(u2 / "ä" / "π.txt", "mu\n".encode("utf-8"))
+
+    h_u1 = hash_dir(u1)
+    h_u2 = hash_dir(u2)
+    assert h_u1 == h_u2
+
+
+# ----------------------------------------------------------------------------- #
+# Tests — dict/JSON-style hashing
+# ----------------------------------------------------------------------------- #
 def test_hash_dict_order_independent_if_supported() -> None:
     """
     If an order-independent dict/JSON hashing function exists, verify that
@@ -199,6 +270,9 @@ def test_hash_dict_order_independent_if_supported() -> None:
     assert hash_dict(a) == hash_dict(b)
 
 
+# ----------------------------------------------------------------------------- #
+# Tests — PathLike vs str ergonomics
+# ----------------------------------------------------------------------------- #
 def test_pathlike_and_str_inputs_supported(tmp_path: Path) -> None:
     """
     If your API supports path-like & str, verify both work.
