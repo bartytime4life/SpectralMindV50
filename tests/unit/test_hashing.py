@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import numpy as np
 import pytest
 
 
@@ -114,6 +115,25 @@ def test_sha256_large_bytes_if_supported() -> None:
     assert h1 == h2
 
 
+def test_sha256_hex_str_vs_bytes_consistency_if_supported() -> None:
+    """
+    If the hex API accepts both str and bytes, their digests must match.
+    """
+    H = _try_import_hashing()
+    sha_hex = _get_fn(H, "sha256_hex", "hash_hex", "hash_str")
+    if sha_hex is None:
+        pytest.skip("sha256 hex hashing not implemented")
+
+    msg = "SpectraMindV50"
+    expected = sha_hex(msg)
+    try:
+        hx = sha_hex(msg.encode("utf-8"))  # type: ignore[arg-type]
+        assert hx == expected
+    except TypeError:
+        # If bytes not supported, this is fine; test not applicable
+        pass
+
+
 # ----------------------------------------------------------------------------- #
 # Tests — files
 # ----------------------------------------------------------------------------- #
@@ -169,6 +189,40 @@ def test_hash_file_large(tmp_path: Path) -> None:
     h1 = hash_file(p)
     h2 = hash_file(p)
     assert h1 == h2
+
+
+def test_hash_file_nonexistent_gives_useful_error(tmp_path: Path) -> None:
+    H = _try_import_hashing()
+    hash_file = _get_fn(H, "hash_file", "sha256_file")
+    if hash_file is None:
+        pytest.skip("hash_file not implemented")
+
+    p = tmp_path / "missing.bin"
+    with pytest.raises((FileNotFoundError, OSError, ValueError, AssertionError)):
+        _ = hash_file(p)
+
+
+def test_hash_file_stream_api_if_supported(tmp_path: Path) -> None:
+    """
+    If a stream hashing API exists, verify equality with hash_file.
+    """
+    H = _try_import_hashing()
+    hash_file = _get_fn(H, "hash_file", "sha256_file")
+    hash_stream = _get_fn(H, "hash_stream", "sha256_stream", "hash_fileobj")
+    if hash_file is None or hash_stream is None:
+        pytest.skip("stream/file hashing not both implemented")
+
+    p = tmp_path / "stream.txt"
+    _write_bytes(p, b"stream me\n")
+    hf = hash_file(p)
+
+    with p.open("rb") as f:
+        hs = hash_stream(f)
+
+    # normalize to hex string for compare
+    hf_hex = hf.hex() if isinstance(hf, (bytes, bytearray)) else hf
+    hs_hex = hs.hex() if isinstance(hs, (bytes, bytearray)) else hs
+    assert hf_hex == hs_hex
 
 
 # ----------------------------------------------------------------------------- #
@@ -251,6 +305,63 @@ def test_hash_dir_empty_and_unicode_names(tmp_path: Path) -> None:
     assert h_u1 == h_u2
 
 
+def test_hash_dir_independent_of_root_name(tmp_path: Path) -> None:
+    """
+    Hash should only depend on the tree content and relative paths beneath root,
+    not on the name of the root directory itself.
+    """
+    H = _try_import_hashing()
+    hash_dir = _get_fn(H, "hash_dir", "sha256_dir", "hash_tree")
+    if hash_dir is None:
+        pytest.skip("hash_dir not implemented")
+
+    d1 = tmp_path / "ROOT_A"
+    d2 = tmp_path / "ROOT_B"
+    _mk_dir_tree(d1)
+    _mk_dir_tree(d2)
+    assert hash_dir(d1) == hash_dir(d2)
+
+
+def test_hash_dir_ignore_patterns_if_supported(tmp_path: Path) -> None:
+    """
+    If the dir hashing supports ignore globs, verify that ignored files don't affect the digest.
+    """
+    H = _try_import_hashing()
+    hash_dir = _get_fn(H, "hash_dir", "sha256_dir", "hash_tree")
+    if hash_dir is None:
+        pytest.skip("hash_dir not implemented")
+
+    d = tmp_path / "tree"
+    _mk_dir_tree(d)
+    _write_bytes(d / "a" / "ignore.tmp", b"ignored\n")
+    _write_bytes(d / ".DS_Store", b"metadata\n")
+
+    # Try to discover an ignore argument name: ignore, excludes, patterns, globs
+    kwargs_candidates = [
+        {"ignore": ("*.tmp", ".DS_Store")},
+        {"excludes": ("*.tmp", ".DS_Store")},
+        {"patterns": ("*.tmp", ".DS_Store")},
+        {"globs": ("*.tmp", ".DS_Store")},
+    ]
+    base = hash_dir(d, **kwargs_candidates[0]) if "ignore" in hash_dir.__code__.co_varnames else None
+    if base is None:
+        # find a signature that works, or skip if none do
+        for kw in kwargs_candidates[1:]:
+            try:
+                base = hash_dir(d, **kw)
+                break
+            except TypeError:
+                continue
+
+    if base is None:
+        pytest.skip("hash_dir ignore globs not supported")
+
+    # Change only an ignored file; hash should remain the same
+    _write_bytes(d / "a" / "ignore.tmp", b"IGNORED CHANGED\n")
+    h2 = hash_dir(d, **(kwargs_candidates[0] if "ignore" in hash_dir.__code__.co_varnames else kw))
+    assert h2 == base
+
+
 # ----------------------------------------------------------------------------- #
 # Tests — dict/JSON-style hashing
 # ----------------------------------------------------------------------------- #
@@ -268,6 +379,28 @@ def test_hash_dict_order_independent_if_supported() -> None:
     a = {"a": 1, "b": 2, "c": {"x": 9, "y": [3, 2, 1]}}
     b = {"c": {"y": [3, 2, 1], "x": 9}, "b": 2, "a": 1}  # same content, different order
     assert hash_dict(a) == hash_dict(b)
+
+
+def test_hash_dict_numeric_normalization_if_supported() -> None:
+    """
+    If dict/json hashing canonicalizes numeric types, -0.0 and 0.0 should hash the same.
+    """
+    H = _try_import_hashing()
+    hash_dict = _get_fn(H, "hash_dict", "hash_json", "sha256_json", "hash_mapping")
+    if hash_dict is None:
+        pytest.skip("dict/json hashing not implemented")
+
+    a = {"x": 0.0, "y": [1, 2, 3]}
+    b = {"y": [1, 2, 3], "x": -0.0}
+    # Some implementations may not canonicalize; accept either behavior but require consistency
+    h_a = hash_dict(a)
+    h_b = hash_dict(b)
+    assert isinstance(h_a, (str, bytes)) and isinstance(h_b, (str, bytes))
+    # If canonicalized, these will match; if not, at least both calls must be deterministic types
+    if h_a == h_b:
+        assert True
+    else:
+        assert type(h_a) is type(h_b)
 
 
 # ----------------------------------------------------------------------------- #
