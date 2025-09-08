@@ -52,7 +52,7 @@ dependencies = [
 
   # Logging / progress / viz
   "tqdm==4.66.4",
-  "rich==13.7.1",
+  "rich==14.1.0",
   "matplotlib==3.8.4",
   "seaborn==0.13.2",
   "umap-learn==0.5.9.post2",
