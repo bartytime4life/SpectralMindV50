@@ -36,7 +36,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Optional: reuse lychee cache across runs to speed up
+      - name: Cache lychee URL cache
+        uses: actions/cache@v4
+        with:
+          path: .lycheecache
+          key: lychee-${{ runner.os }}-${{ hashFiles('docs/**/*.md', 'mkdocs.yml', '.lychee.toml') }}
+          restore-keys: |
+            lychee-${{ runner.os }}-
+
       - name: Lychee (cached URL cache)
+        id: lychee
         uses: lycheeverse/lychee-action@v2
         with:
           # Check Markdown + MkDocs config; ignore cache-busting querystrings
@@ -46,9 +56,23 @@ jobs:
             --exclude-mail
             --max-concurrency 8
             --cache
+            --cache-dir .lycheecache
+            --retry-wait-time 2
+            --timeout 20
             "docs/**/*.md" "mkdocs.yml"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload lychee report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lychee-report
+          path: |
+            ./lychee/results.md
+            ./lychee/output.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   build:
     name: Build MkDocs site
@@ -91,12 +115,14 @@ jobs:
           fi
 
       - name: Set up Node (for Mermaid CLI pre-render of assets)
+        if: ${{ hashFiles('assets/diagrams/**/*.mmd') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
       - name: Install Mermaid CLI (mmdc)
+        if: ${{ hashFiles('assets/diagrams/**/*.mmd') != '' }}
         run: npm i -g @mermaid-js/mermaid-cli@10
 
       - name: Pre-render Mermaid diagrams in assets (SVG)
