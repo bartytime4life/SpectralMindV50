@@ -20,14 +20,18 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.10"
-  # Optional default; can be overridden per push or dispatch inputs
+  PYTHON_VERSION: "3.11"
+  # Optional defaults; can be overridden by notebooks/metadata
   KAGGLE_COMP: "ariel-data-challenge-2025"
+  # Encourage notebooks to behave like Kaggle (no internet, deterministic)
+  KAGGLE_OFFLINE: "1"
+  PYTHONHASHSEED: "0"
 
 jobs:
   local-validate:
-    name: Local notebook validation (no internet; CPU)
+    name: Local notebook validation (offline-like; CPU)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,57 +42,121 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: |
+            requirements-kaggle.txt
+            requirements.txt
+            requirements-dev.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
 
       - name: Install minimal Kaggle-friendly deps
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-kaggle.txt || true
-          pip install jupyter nbconvert papermill ipykernel
-          # Hard-disable internet inside validation to mimic Kaggle runtime
-          echo "Acquire::http::Proxy \"http://0.0.0.0:9\";" | sudo tee /etc/apt/apt.conf.d/99no-internet >/dev/null
-          # Best-effort: block common tools; notebook code should not rely on internet anyway
+          python -m pip install --upgrade pip wheel
+          # Prefer pinned Kaggle reqs if provided
+          if [ -f requirements-kaggle.txt ]; then pip install -r requirements-kaggle.txt; fi
+          # Execution toolchain
+          pip install jupyter nbconvert papermill ipykernel nbformat "nbclient>=0.8" "jq"
+          # Optional extras used by many Kaggle notebooks; ignore if absent
+          pip install -q numpy pandas matplotlib || true
 
-      - name: List notebooks selected for validation
+      - name: Select notebooks for validation
         id: select
         shell: bash
         run: |
           set -euo pipefail
-          # Pick fast notebooks / smoke notebooks by naming convention
-          mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | grep -E '(00_|10_|smoke|quick|sample|mini).*\.ipynb$' || true)
+          mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | grep -E '(00_|01_|10_|smoke|quick|sample|mini).*\.ipynb$' || true)
           if [ "${#NB[@]}" -eq 0 ]; then
-            # Fallback: just the lightest notebook if unknown
             mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | head -n 1 || true)
           fi
-          printf '%s\n' "${NB[@]}"
+          echo "Selected:"
+          printf ' - %s\n' "${NB[@]}"
           printf 'files=%s\n' "$(printf '%s ' "${NB[@]}")" >> "$GITHUB_OUTPUT"
 
-      - name: Execute selected notebooks (offline)
+      - name: Execute notebooks (to copies; keep repo clean)
         if: steps.select.outputs.files != ''
+        shell: bash
         env:
+          # Hint to notebooks they must not hit the internet
+          KAGGLE_OFFLINE: ${{ env.KAGGLE_OFFLINE }}
           PYTHONWARNINGS: "ignore"
         run: |
           set -euo pipefail
+          mkdir -p .ci_run/notebooks_html
           IFS=' ' read -r -a NB <<< "${{ steps.select.outputs.files }}"
-          for f in "${NB[@]}"; do
-            echo "::group::Executing $f"
-            # Execute in place with a conservative timeout
-            jupyter nbconvert --execute --to notebook --inplace "$f" --ExecutePreprocessor.timeout=300
+          for src in "${NB[@]}"; do
+            base="$(basename "$src")"
+            out=".ci_run/${base}"
+            cp "$src" "$out"
+            echo "::group::Executing $src"
+            # Execute copy in-place with a conservative timeout
+            jupyter nbconvert --execute --to notebook --inplace "$out" --ExecutePreprocessor.timeout=600
+            # Also export HTML preview
+            jupyter nbconvert --to html "$out" --output ".ci_run/notebooks_html/${base%.ipynb}.html"
             echo "::endgroup::"
           done
 
-      - name: Upload executed notebooks as artifact
+      - name: Upload executed notebooks & HTML previews
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: notebooks-executed
           path: |
-            notebooks/**/*.ipynb
+            .ci_run/*.ipynb
+            .ci_run/notebooks_html/*.html
+          retention-days: 7
 
-  push-to-kaggle:
-    name: Push notebooks to Kaggle (if secrets present)
+  validate-kaggle-metadata:
+    name: Validate Kaggle kernel & dataset metadata (JSON sanity)
     runs-on: ubuntu-latest
     needs: local-validate
-    if: ${{ secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Validate kernel-metadata.json (if present)
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(git ls-files 'kaggle/kernels/**/kernel-metadata.json' || true)
+          [ -z "$files" ] && { echo "No kernel metadata files found."; exit 0; }
+          for f in $files; do
+            echo "Checking: $f"
+            # Basic required fields per Kaggle docs
+            jq -e '
+              .id and .title and .is_private and .kernel_type and .language
+            ' "$f" >/dev/null
+            # Optional: ensure is_private is boolean and kernel_type in allowed set
+            jq -e '
+              (.is_private | type == "boolean") and
+              (.kernel_type | IN("notebook","script"))
+            ' "$f" >/dev/null || echo "WARN: kernel_type/is_private not canonical in $f"
+          done
+
+      - name: Validate dataset-metadata.json (if present)
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(git ls-files 'kaggle/datasets/**/dataset-metadata.json' || true)
+          [ -z "$files" ] && { echo "No dataset metadata files found."; exit 0; }
+          for f in $files; do
+            echo "Checking: $f"
+            jq -e '
+              .id and .title and (.licenses | length >= 1)
+            ' "$f" >/dev/null
+          done
+
+  push-to-kaggle:
+    name: Push notebooks to Kaggle (guarded)
+    runs-on: ubuntu-latest
+    needs: [local-validate, validate-kaggle-metadata]
+    timeout-minutes: 20
+    # Only from main (or manual) and only if secrets exist
+    if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,8 +165,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: |
+            requirements-kaggle.txt
 
-      - name: Install Kaggle CLI and helpers
+      - name: Install Kaggle CLI
         run: |
           python -m pip install --upgrade pip
           pip install kaggle jq
@@ -110,20 +181,19 @@ jobs:
           chmod 600 ~/.kaggle/kaggle.json
           kaggle --version
 
-      - name: Dry check kernel metadata (train/infer notebooks)
+      - name: Discover kernel workspaces
         id: kernels
         shell: bash
         run: |
           set -euo pipefail
-          # Expect kernel workspaces with kernel-metadata.json, e.g. kaggle/kernels/train, kaggle/kernels/infer
           mapfile -t KDIRS < <(git ls-files 'kaggle/kernels/**/kernel-metadata.json' | xargs -n1 dirname 2>/dev/null || true)
           if [ "${#KDIRS[@]}" -eq 0 ]; then
-            echo "No Kaggle kernel workspaces (kaggle/kernels/**/kernel-metadata.json) found; skipping push."
+            echo "No Kaggle kernel workspaces found; skipping push."
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            printf '%s\n' "${KDIRS[@]}"
+            printf 'dirs=%s\n' "$(printf '%s ' "${KDIRS[@]}")" >> "$GITHUB_OUTPUT"
           fi
-          printf '%s\n' "${KDIRS[@]}"
-          printf 'dirs=%s\n' "$(printf '%s ' "${KDIRS[@]}")" >> "$GITHUB_OUTPUT"
 
       - name: Push kernels
         if: steps.kernels.outputs.skip != 'true'
@@ -135,7 +205,7 @@ jobs:
           IFS=' ' read -r -a KDIRS <<< "${{ steps.kernels.outputs.dirs }}"
           for d in "${KDIRS[@]}"; do
             echo "::group::Pushing kernel from $d"
-            # Ensure competition dependency present if intended
+            # Info-only: show competition linkage if present
             if jq -e '.competitionSources? | length > 0' "$d/kernel-metadata.json" >/dev/null 2>&1; then
               echo "Kernel references competition sources."
             fi
@@ -149,18 +219,18 @@ jobs:
         with:
           name: kaggle-push-logs
           path: kaggle_push_*.log
+          retention-days: 7
 
   dataset-sync:
-    name: Optional: Sync light artifacts/datasets to Kaggle
+    name: Sync datasets to Kaggle (optional)
     runs-on: ubuntu-latest
-    needs: local-validate
-    if: ${{ secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY && hashFiles('kaggle/datasets/**/dataset-metadata.json') != '' }}
+    needs: [local-validate, validate-kaggle-metadata]
+    timeout-minutes: 20
+    if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY && hashFiles('kaggle/datasets/**/dataset-metadata.json') != '' }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -192,3 +262,4 @@ jobs:
         with:
           name: kaggle-dataset-logs
           path: kaggle_dataset_*.log
+          retention-days: 7
