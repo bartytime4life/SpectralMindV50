@@ -454,18 +454,14 @@ def build_phase_model(
     # Compute wrapped phase in [0,2pi)
     phi = _compute_phase(T_raw, params.period, params.t0, wrap=True)  # [T]
 
-    # Optional smoothing of a future template (only affects bins template)
     # Build design matrix for harmonics
     X = _design_matrix(phi, params.harmonics, params.include_dc)  # [T,C] or None
     coeffs = None
     if X is not None:
-        # NaN-safe fit: we cannot directly handle NaNs in y[T,H,W] with single solve,
-        # so we replace NaNs by column-wise means per pixel? Better: mask rows with NaNs.
-        # Simple robust approach: fill NaNs with temporal nanmean (per pixel).
+        # NaN-safe fit: fill NaNs with temporal nanmean (per pixel).
         if _is_torch(Fm):
             torch = _torch()
             y = Fm
-            # compute per-pixel nanmean and fill
             mu = _nanmean(y, axis=-3, keepdims=True)
             y_filled = torch.where(torch.isnan(y), mu, y)
         else:
@@ -488,23 +484,19 @@ def build_phase_model(
     bins = None
     if params.template == "bins":
         bins = _build_phase_bins(phi, T, H, W, params.n_bins, Fm)  # [B,H,W]
-        # Optional smoothing of per-bin template along phase (across bins order)
+        # Optional smoothing along phase (bins index)
         if params.smooth_window and params.smooth_window > 1:
-            # Smooth by cycling through each (h,w) bin series
             if _is_torch(bins):
                 torch = _torch(); np = _np()
                 b_np = bins.detach().cpu().numpy()
-                B = b_np.shape[0]
                 for h in range(H):
                     for w in range(W):
-                        b_np[:, h, w] = _smooth_template(
-                            _torch().from_numpy(b_np[:, h, w]).to(dtype=torch.float32),  # temporary torch use
-                            params.smooth_window, params.smooth_poly
-                        ).detach().cpu().numpy()
+                        # smooth 1D series across bins
+                        series = _torch().from_numpy(b_np[:, h, w]).to(dtype=torch.float32)
+                        b_np[:, h, w] = _smooth_template(series, params.smooth_window, params.smooth_poly).cpu().numpy()
                 bins = torch.from_numpy(b_np).to(device=bins.device, dtype=bins.dtype)
             else:
                 np = _np()
-                B = bins.shape[0]
                 for h in range(H):
                     for w in range(W):
                         bins[:, h, w] = _smooth_template(bins[:, h, w], params.smooth_window, params.smooth_poly)
@@ -553,7 +545,6 @@ def apply_phase_correction(
     """
     F = _to_float(frames, dtype=params_apply.dtype)
     F, _ = _move_time_axis(F, params_build.time_axis)  # -> [..., T, H, W]
-    T = F.shape[-3]; H, W = F.shape[-2], F.shape[-1]
 
     # Compute phase & basis
     phi = _compute_phase(times, params_build.period, params_build.t0, wrap=True)
@@ -563,9 +554,7 @@ def apply_phase_correction(
     model_contrib = None
     if params_apply.subtract_model and (X is not None) and (model.coeffs is not None):
         m = _predict_from_beta(X, model.coeffs)  # [T,H,W]
-        # broadcast to batch prefix
-        # frames shape [..., T,H,W]; m is [T,H,W]; rely on broadcasting below
-        model_contrib = m
+        model_contrib = m  # broadcast across batch/time prefix automatically
 
     # Template contribution
     template_contrib = None
@@ -575,7 +564,6 @@ def apply_phase_correction(
     # Subtract contributions
     corrected = F
     if model_contrib is not None:
-        # expand model_contrib across batch prefix if needed via broadcasting
         corrected = corrected - model_contrib
     if template_contrib is not None:
         corrected = corrected - template_contrib
