@@ -2,75 +2,91 @@
 # SpectraMind V50 — Training Config
 # Top-level composed Hydra configuration for model training
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Composition: swap any group at CLI, e.g.
+#   python -m spectramind train env=kaggle data=kaggle loss=composite \
+#     training/callbacks@training.callbacks=callbacks
+# ──────────────────────────────────────────────────────────────────────────────
 defaults:
-  - env: local           # or kaggle / debug
-  - data: nominal        # dataset profile (nominal/kaggle/splits)
-  - calib: nominal       # calibration pipeline settings
-  - model: v50           # model architecture (dual encoders + decoder)
-  - training: lightning  # training loop params (PL Trainer)
-  - loss: composite      # physics-informed composite loss
-  - logger: jsonl        # logging backend (jsonl/csv/wandb)
+  - env: local              # or kaggle / debug
+  - data: nominal           # dataset profile (nominal/kaggle/splits)
+  - calib: nominal          # calibration pipeline settings
+  - model: v50              # model architecture (dual encoders + decoder)
+  - training: lightning     # base PL Trainer params
+  - training/callbacks@training.callbacks: callbacks  # <-- bundle of callbacks
+  - loss: composite         # physics-informed composite loss
+  - logger: jsonl           # logging backend (jsonl/csv/wandb)
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
 
+# High-level experiment metadata
 experiment:
   name: "spectramind_v50_train"
   tags: ["v50", "train", "fgs1", "airs"]
 
+# Paths (all run-scoped under hydra.run.dir)
 paths:
-  work_dir: ${hydra:runtime.cwd}
-  artifacts: ${paths.work_dir}/artifacts
-  logs: ${paths.artifacts}/logs
-  ckpt: ${paths.artifacts}/checkpoints
+  project_root: ${hydra:runtime.cwd}
+  artifacts_root: ${paths.project_root}/artifacts
+  runs: ${paths.artifacts_root}/runs
+  # hydra.run.dir expands below; all per-run outputs live there:
+  logs: ${hydra:run.dir}/logs
+  checkpoints: ${hydra:run.dir}/checkpoints
+  reports: ${hydra:run.dir}/reports
 
+# Reproducibility knobs
 seed: 42
-deterministic: true
-precision: 32  # set to 16-mixed for AMP on GPU if stable
+reproducibility:
+  torch_deterministic_algorithms: true
+  cudnn_benchmark: false
+  allow_tf32: false   # set true if you validate numerical impact and want speed
 
+# Precision (override in env configs if needed, e.g. bf16 on A100)
+precision: "16-mixed"  # or "32-true" for CPU-only determinism
+
+# PyTorch Lightning Trainer settings (PL 2.x+ API)
 trainer:
   max_epochs: 50
-  gpus: 1
+  accelerator: auto         # auto: cpu/cuda/mps
+  devices: 1                # or "auto", or a list for multi-GPU
+  strategy: auto            # ddp/auto; override if multi-GPU
+  precision: ${precision}
   accumulate_grad_batches: 2
   gradient_clip_val: 1.0
   log_every_n_steps: 50
-  val_check_interval: 0.25
+  val_check_interval: 0.25  # validate 4× per epoch; keep <=1.0
   deterministic: true
   enable_checkpointing: true
+  enable_model_summary: true
+  detect_anomaly: false
+  benchmark: false
+  callbacks: ${training.callbacks.callbacks}  # from callbacks bundle
 
+# Optimizer / Scheduler
 optimizer:
-  name: adamw
+  _target_: torch.optim.AdamW
   lr: 3e-4
   weight_decay: 1e-2
   betas: [0.9, 0.999]
 
 scheduler:
-  name: cosine_annealing
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
   T_max: ${trainer.max_epochs}
   eta_min: 1e-6
 
-early_stopping:
-  monitor: val/loss
-  patience: 8
-  mode: min
-  min_delta: 1e-4
-
-checkpoint:
-  monitor: val/loss
-  mode: min
-  save_top_k: 3
-  filename: "epoch{epoch:02d}-valloss{val/loss:.4f}"
-  save_last: true
-
+# Loggers — choose one via defaults (jsonl|csv|wandb)
 logger:
   jsonl:
     log_dir: ${paths.logs}/jsonl
+    append: true
   csv:
     save_dir: ${paths.logs}/csv
   wandb:
     project: "spectramind-v50"
     entity: null
-    mode: disabled   # enable when WANDB_API_KEY is set
+    mode: disabled   # enable when WANDB_API_KEY is available
 
+# Composite loss weights (physics-informed)
 loss:
   composite:
     weights:
@@ -80,17 +96,10 @@ loss:
       band_coherence: 0.3
       calibration: 0.5
 
-callbacks:
-  - jsonl_metrics_logger
-  - epoch_time
-  - lr_monitor
-  - checkpoint
-  - early_stopping
-
-# Hydra runtime options
+# Hydra runtime options — each run gets its own timestamped directory
 hydra:
   run:
-    dir: ${paths.artifacts}/runs/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
-    dir: ${paths.artifacts}/sweeps
+    dir: ${paths.artifacts_root}/sweeps
     subdir: ${hydra.job.num}
