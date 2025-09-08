@@ -1,20 +1,64 @@
+#!/usr/bin/env python3
+# =============================================================================
+# SpectraMind V50 — Tiny AIRS Test Spectrum Generator
+# -----------------------------------------------------------------------------
+# Generates a small, deterministic synthetic AIRS spectrum for use in unit/integration tests.
+# Characteristics:
+#   • 283 bins (default) matching Ariel Challenge spectral dimension
+#   • Smooth baseline (~1% transit depth) with faint sinusoidal features
+#   • Gaussian noise (small amplitude, reproducible via RNG seed)
+#   • Clipped to [0, 1] for physical plausibility (transit depths cannot be negative)
+#
+# Output:
+#   tests/data/tiny/airs.npy  (NumPy float32 array of shape (283,))
+#
+# Usage:
+#   python scripts/gen_tiny_airs.py
+# =============================================================================
+
+from __future__ import annotations
 import numpy as np
 from pathlib import Path
+import sys
 
-# Deterministic seed for reproducibility
-rng = np.random.default_rng(seed=42)
+# ----------------------------------------------------------------------------- #
+# Config
+# ----------------------------------------------------------------------------- #
+N_BINS = int(np.environ.get("SM_SUBMISSION_BINS", 283))
+SEED = 42
+OUT_PATH = Path("tests/data/tiny/airs.npy")
 
-# Simulated smooth baseline spectrum with faint sinusoidal features
-x = np.linspace(0, 1, 283)
-baseline = 0.01 + 0.001 * np.sin(2 * np.pi * 3 * x)  # ~1% transit depth
-noise = 1e-4 * rng.standard_normal(size=283)         # small Gaussian noise
-spectrum = baseline + noise
+# ----------------------------------------------------------------------------- #
+# Main
+# ----------------------------------------------------------------------------- #
+def main() -> None:
+    rng = np.random.default_rng(seed=SEED)
 
-# Clip to [0, 1] (physically valid transit depth)
-spectrum = np.clip(spectrum, 0.0, 1.0)
+    # Normalized wavelength axis (0 → 1 across bins)
+    x = np.linspace(0, 1, N_BINS, dtype=np.float32)
 
-out_path = Path("tests/data/tiny/airs.npy")
-out_path.parent.mkdir(parents=True, exist_ok=True)
-np.save(out_path, spectrum)
+    # Smooth baseline with faint sinusoidal modulation
+    baseline = 0.01 + 0.001 * np.sin(2 * np.pi * 3 * x)
 
-print(f"Saved AIRS tiny test spectrum → {out_path.resolve()} shape={spectrum.shape}")
+    # Small Gaussian noise (SNR >> 1)
+    noise = 1e-4 * rng.standard_normal(size=N_BINS).astype(np.float32)
+
+    spectrum = baseline + noise
+    spectrum = np.clip(spectrum, 0.0, 1.0).astype(np.float32)
+
+    # Ensure deterministic reproducibility
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    np.save(OUT_PATH, spectrum)
+
+    # Minimal validation
+    assert spectrum.shape == (N_BINS,)
+    assert np.all(np.isfinite(spectrum)), "Non-finite values in spectrum"
+
+    print(f"[OK] Saved AIRS tiny test spectrum → {OUT_PATH.resolve()} shape={spectrum.shape}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        sys.stderr.write(f"[ERR] Failed to generate tiny AIRS spectrum: {e}\n")
+        sys.exit(1)
