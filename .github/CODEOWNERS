@@ -1,1 +1,39 @@
+# .github/CODEOWNERS
+# SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge
+# Defines default reviewers for paths. CODEOWNERS is enforced via branch protection.
 
+# Global default
+*            @spectramind/core
+
+# ───── Pipeline stages ────────────────────────────────
+src/spectramind/pipeline/    @spectramind/ml @spectramind/infra
+
+# ───── Models (FGS1, AIRS, Fusion, Decoder) ───────────
+src/spectramind/models/      @spectramind/ml
+
+# ───── Losses (smoothness, calibration, etc.) ─────────
+src/spectramind/losses/      @spectramind/ml
+
+# ───── Configurations (Hydra YAMLs) ───────────────────
+configs/                     @spectramind/ml @spectramind/dataops
+
+# ───── Data & Calibration ─────────────────────────────
+src/spectramind/data/        @spectramind/dataops
+configs/calib/               @spectramind/dataops
+
+# ───── CLI & Utilities ────────────────────────────────
+src/spectramind/cli.py       @spectramind/infra
+src/spectramind/utils/       @spectramind/infra
+
+# ───── CI/CD Workflows & Security ─────────────────────
+.github/workflows/           @spectramind/infra @spectramind/secops
+.github/dependabot.yml       @spectramind/secops
+.github/CODEOWNERS           @spectramind/secops
+
+# ───── Documentation & Diagrams ──────────────────────
+docs/                        @spectramind/docs
+assets/diagrams/             @spectramind/docs
+assets/logos/                @spectramind/docs
+
+# ───── Tests ─────────────────────────────────────────
+tests/                       @spectramind/ml @spectramind/infra
