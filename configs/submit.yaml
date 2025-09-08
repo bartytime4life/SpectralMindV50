@@ -2,9 +2,9 @@
 # ======================================================================
 # SpectraMind V50 — Submission Packaging Config
 # ======================================================================
-# This Hydra config defines parameters for the final submission stage.
-# It controls how predictions are validated, zipped, and prepared for
-# Kaggle upload. Safe for local, CI, and Kaggle runtime environments.
+# Hydra config for the final submission stage.
+# Validates predictions, builds a deterministic ZIP, and (optionally) uploads
+# to Kaggle. Safe for local, CI, and Kaggle runtimes.
 # ======================================================================
 
 defaults:
@@ -12,38 +12,137 @@ defaults:
   - override hydra/hydra_logging: disabled
 
 # ----------------------------------------------------------------------
-# Input / Output
+# I/O
 # ----------------------------------------------------------------------
-predictions: ${oc.env:SM_PREDICTIONS, artifacts/predictions.csv}   # CSV of model predictions
-out_zip:    ${oc.env:SM_SUBMISSION_ZIP, artifacts/submission.zip} # final Kaggle bundle
-manifest:   ${oc.env:SM_MANIFEST, artifacts/manifest.json}        # provenance manifest
+inputs:
+  predictions: ${oc.env:SM_PREDICTIONS, artifacts/predictions.csv}     # CSV with columns: id, mu[0..282], sigma[0..282] OR long format
+  schema:      ${oc.env:SM_SUBMISSION_SCHEMA, schemas/submission.schema.json}
+
+outputs:
+  out_zip:   ${oc.env:SM_SUBMISSION_ZIP, artifacts/submission.zip}     # final Kaggle bundle
+  manifest:  ${oc.env:SM_MANIFEST, artifacts/manifest.json}            # provenance manifest (JSON)
+  readme_md: ${oc.env:SM_README, artifacts/SUBMISSION_README.md}       # optional README included in zip
+  # If provided, include extra files alongside predictions (e.g., license)
+  extra_files:
+    - path: LICENSE
+      required: false
+    - path: ${outputs.readme_md}
+      required: false
+
+# ----------------------------------------------------------------------
+# Packaging
+# ----------------------------------------------------------------------
+package:
+  # root directory inside the ZIP (null → place files at top-level)
+  zip_root: null
+  compression: "ZIP_DEFLATED"    # ZIP_STORED | ZIP_DEFLATED
+  compresslevel: 6               # 0..9 when supported
+  deterministic: true            # stable file order & timestamps (UTC epoch)
+  include:
+    - ${inputs.predictions}
+    - ${outputs.manifest}
+  exclude_glob:
+    - "**/__pycache__/**"
+    - "**/*.tmp"
+    - "**/*.log"
+  max_zip_bytes: 157286400       # 150 MiB safety cap (override as needed)
+  zip_comment: "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge"
 
 # ----------------------------------------------------------------------
 # Kaggle parameters
 # ----------------------------------------------------------------------
 kaggle:
+  enabled: true                       # if false → build only, no CLI interaction
   competition: ${oc.env:KAGGLE_COMP, neurips-2025-ariel-data-challenge}
   title: ${oc.env:KAGGLE_TITLE, "SpectraMind V50 submission"}
   message: ${oc.env:KAGGLE_MSG, "Automated submission from SpectraMind V50 pipeline"}
-  dry_run: false        # set true to skip actual upload
-  no_upload: false      # set true to only build ZIP but not push to Kaggle
+  # CLI flags / behavior
+  dry_run: ${oc.env:KAGGLE_DRY_RUN, false}
+  no_upload: ${oc.env:KAGGLE_NO_UPLOAD, false}
+  retries: 3
+  backoff_seconds: 10
+  timeout_seconds: 600
+  visibility: "private"               # private | public (if allowed)
+  verify_ssl: true
 
 # ----------------------------------------------------------------------
 # Validation
 # ----------------------------------------------------------------------
 validate:
-  schema: schemas/submission.schema.json   # enforce 283-bin μ/σ spec
-  strict: true                             # hard fail on schema errors
-  quiet: false                             # suppress warnings if true
+  strict: true
+  quiet: false
+
+  # JSON Schema for structural checks (e.g., 283 μ/σ elements, nonneg σ)
+  schema:
+    path: ${inputs.schema}
+    enabled: true
+
+  # Tabular sanity checks (applied before schema for fast fail)
+  csv:
+    header_required: true
+    # Expected columns: either wide (id, mu_0..mu_282, sigma_0..sigma_282) OR long (id, mu[283], sigma[283])
+    allowed_layouts:
+      - "wide"
+      - "long"
+    id:
+      required: true
+      unique: true
+      nonempty: true
+      # optional prefix guard to catch wrong competition files
+      prefix: null                   # e.g., "sample_" or null to disable
+    mu:
+      bins: 283
+      finite: true
+    sigma:
+      bins: 283
+      finite: true
+      nonnegative: true
+      allow_zero: true
+    # Optional target row count (null disables)
+    expected_rows: null
+    allow_nan: false
+    allow_inf: false
+
+  # File existence / size checks
+  files:
+    require_inputs: true
+    max_csv_bytes: 104857600         # 100 MiB cap (override if needed)
 
 # ----------------------------------------------------------------------
-# Provenance metadata (auto-filled at runtime)
+# Provenance metadata (auto-filled at runtime by submit.py)
 # ----------------------------------------------------------------------
 meta:
-  git_hash: null          # filled by submit.py
-  run_id: null            # UUID
-  created_at: null        # timestamp
-  env: ${oc.env:SM_ENV, "local"}  # execution environment (local|ci|kaggle)
+  project: "spectramind-v50"
+  version: ${oc.env:SM_VERSION, "0.1.0"}
+  run_id: null                        # uuid4
+  created_at: null                    # ISO8601 UTC
+  env: ${oc.env:SM_ENV, "local"}      # local|ci|kaggle
+  user: ${oc.env:USER, "unknown"}
+  git:
+    hash: null
+    branch: null
+    dirty: null
+    tag: null
+  artifacts:
+    predictions_sha256: null
+    manifest_sha256: null
+    zip_sha256: null
+  config_snapshot:
+    train: null                       # path or dict snapshot (if captured)
+    data: null
+    model: null
+
+# ----------------------------------------------------------------------
+# Diagnostics (optional emit of quick plots & summaries)
+# ----------------------------------------------------------------------
+diagnostics:
+  enabled: true
+  out_dir: ${hydra:run.dir}/diagnostics
+  plots:
+    per_bin_mu_hist: true
+    per_bin_sigma_hist: true
+    mu_vs_sigma_scatter: true
+  save_csv_summary: true
 
 # ----------------------------------------------------------------------
 # Hydra runtime
