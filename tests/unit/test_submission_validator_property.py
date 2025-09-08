@@ -171,7 +171,6 @@ def st_valid_df() -> st.SearchStrategy[pd.DataFrame]:
         # μ and σ arrays (finite; σ strictly positive)
         mus = np.zeros((n, N_BINS), dtype=float)
         sigmas = np.zeros((n, N_BINS), dtype=float)
-        # Use local RNG for speed but ensure finite constraints via hypothesis too
         for j in range(n):
             row_mus = draw(st.lists(_finite_float(), min_size=N_BINS, max_size=N_BINS))
             row_sgs = draw(st.lists(_pos_float(),    min_size=N_BINS, max_size=N_BINS))
