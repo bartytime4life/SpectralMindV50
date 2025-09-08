@@ -1,0 +1,203 @@
+name: artifact-sweeper
+
+on:
+  schedule:
+    - cron: '30 5 * * 1'   # Every Monday 05:30 UTC
+  workflow_dispatch:
+    inputs:
+      days_to_keep:
+        description: 'Delete artifacts older than this many days'
+        required: false
+        default: '14'
+      dry_run:
+        description: 'Show what would be deleted without deleting (true/false)'
+        required: false
+        default: 'true'
+      protect_patterns:
+        description: 'Comma-separated glob patterns to preserve (e.g. "release-*,sbom*")'
+        required: false
+        default: 'release-*,sbom*'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: artifact-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep-artifacts:
+    name: Sweep old artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve inputs
+        id: cfg
+        run: |
+          DAYS_TO_KEEP="${{ github.event.inputs.days_to_keep || '14' }}"
+          DRY_RUN="${{ github.event.inputs.dry_run || 'true' }}"
+          PROTECT_PATTERNS="${{ github.event.inputs.protect_patterns || 'release-*,sbom*' }}"
+          echo "days=${DAYS_TO_KEEP}" >> "$GITHUB_OUTPUT"
+          echo "dry=${DRY_RUN}" >> "$GITHUB_OUTPUT"
+          echo "protect=${PROTECT_PATTERNS}" >> "$GITHUB_OUTPUT"
+
+      - name: Prune artifacts (older than N days; keep protected)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const daysToKeep = parseInt(core.getInput('days_to_keep')) || parseInt('${{ steps.cfg.outputs.days }}');
+            const dryRun = (core.getInput('dry_run') || '${{ steps.cfg.outputs.dry }}').toLowerCase() === 'true';
+            const protectList = (core.getInput('protect_patterns') || '${{ steps.cfg.outputs.protect }}')
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean);
+
+            core.info(`Days to keep: ${daysToKeep}`);
+            core.info(`Dry-run: ${dryRun}`);
+            core.info(`Protect patterns: ${protectList.join(', ') || '(none)'}`);
+
+            // Simple glob-like matcher (supports * anywhere)
+            const toRegex = (glob) => new RegExp('^' + glob.split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 'i');
+            const protectRegexes = protectList.map(toRegex);
+
+            const cutoff = Date.now() - daysToKeep * 24 * 60 * 60 * 1000;
+
+            let page = 1;
+            let deleted = 0, protectedCount = 0, skipped = 0, total = 0;
+
+            while (true) {
+              const { data } = await github.rest.actions.listArtifactsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+                page
+              });
+              if (!data.artifacts || data.artifacts.length === 0) break;
+
+              for (const art of data.artifacts) {
+                total += 1;
+
+                // Skip active/incomplete artifacts just in case
+                if (!art.expired && !art.archive_download_url) {
+                  core.info(`SKIP (not finalized): ${art.name} (#${art.id})`);
+                  skipped += 1;
+                  continue;
+                }
+
+                const createdAt = new Date(art.created_at || art.updated_at).getTime();
+                const ageDays = Math.floor((Date.now() - createdAt) / (24*60*60*1000));
+
+                // Protect by name pattern
+                const isProtected = protectRegexes.some(rx => rx.test(art.name));
+                if (isProtected) {
+                  core.info(`KEEP (protected): ${art.name} (#${art.id}) [age=${ageDays}d]`);
+                  protectedCount += 1;
+                  continue;
+                }
+
+                // Too new?
+                if (createdAt > cutoff) {
+                  core.info(`KEEP (recent): ${art.name} (#${art.id}) [age=${ageDays}d]`);
+                  skipped += 1;
+                  continue;
+                }
+
+                if (dryRun) {
+                  core.warning(`WOULD DELETE: ${art.name} (#${art.id}) [age=${ageDays}d]`);
+                } else {
+                  await github.rest.actions.deleteArtifact({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    artifact_id: art.id
+                  });
+                  core.warning(`DELETED: ${art.name} (#${art.id}) [age=${ageDays}d]`);
+                  deleted += 1;
+                }
+              }
+
+              if (data.artifacts.length < 100) break;
+              page += 1;
+            }
+
+            core.summary
+              .addHeading('Artifact Sweeper Report')
+              .addRaw(`**Dry run:** ${dryRun}\n\n`)
+              .addList([
+                `Total scanned: ${total}`,
+                `Deleted: ${deleted}`,
+                `Protected kept: ${protectedCount}`,
+                `Recent/other kept: ${skipped}`
+              ])
+              .write();
+
+          result-encoding: string
+        with:
+          days_to_keep: ${{ steps.cfg.outputs.days }}
+          dry_run: ${{ steps.cfg.outputs.dry }}
+          protect_patterns: ${{ steps.cfg.outputs.protect }}
+
+      - name: Upload run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-sweeper-summary
+          path: ${{ github.step_summary }}
+
+  # Optional: prune old workflow runs (safe defaults)
+  sweep-runs:
+    name: Sweep old workflow runs (optional)
+    runs-on: ubuntu-latest
+    needs: sweep-artifacts
+    if: ${{ false }}   # flip to `true` to enable after validating behavior
+    steps:
+      - name: Delete completed runs older than 30 days (keep latest 20)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const daysToKeep = 30;
+            const keepLatest = 20;
+            const cutoff = Date.now() - daysToKeep * 24 * 60 * 60 * 1000;
+
+            let page = 1, pruned = 0, total = 0;
+            while (true) {
+              const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+                page,
+                status: 'completed'
+              });
+              if (!data.workflow_runs?.length) break;
+
+              total += data.workflow_runs.length;
+
+              // Keep the N most recent runs overall
+              const sorted = [...data.workflow_runs].sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+              const survivors = new Set(sorted.slice(0, keepLatest).map(r => r.id));
+
+              for (const run of data.workflow_runs) {
+                const createdAt = new Date(run.created_at).getTime();
+                if (survivors.has(run.id)) continue;              // keep newest N
+                if (createdAt > cutoff) continue;                 // too recent
+
+                await github.rest.actions.deleteWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id
+                });
+                core.warning(`DELETED run ${run.id} (${run.name}) ${run.head_branch} @ ${run.created_at}`);
+                pruned += 1;
+              }
+
+              if (data.workflow_runs.length < 100) break;
+              page += 1;
+            }
+            core.summary
+              .addHeading('Workflow Run Sweeper')
+              .addList([
+                `Completed runs scanned: ${total}`,
+                `Deleted: ${pruned}`,
+                `Kept newest per repo: ${20}`,
+                `Age cutoff: ${daysToKeep} days`
+              ])
+              .write();
