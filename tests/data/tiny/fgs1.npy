@@ -1,0 +1,20 @@
+# scripts/make_tiny_fgs1.py
+"""
+Generate a tiny synthetic FGS1 time-series and save as .npy
+for use in tests/data/tiny/fgs1.npy.
+"""
+
+import numpy as np
+from pathlib import Path
+
+def tiny_fgs1(T: int = 64, seed: int = 0) -> np.ndarray:
+    """Synthetic FGS1: sinusoid + small Gaussian noise."""
+    rng = np.random.RandomState(seed)
+    return np.sin(np.linspace(0, 2*np.pi, T)) + 0.01 * rng.randn(T)
+
+if __name__ == "__main__":
+    outdir = Path("tests/data/tiny")
+    outdir.mkdir(parents=True, exist_ok=True)
+    arr = tiny_fgs1()
+    np.save(outdir / "fgs1.npy", arr)
+    print(f"[OK] Saved {arr.shape} array to {outdir/'fgs1.npy'}")
