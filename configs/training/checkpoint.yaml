@@ -1,15 +1,27 @@
-# configs/training/checkpoint.yaml
-# SpectraMind V50 — ModelCheckpoint (swapable)
+# ======================================================================
+# SpectraMind V50 — ModelCheckpoint Config (Upgraded)
+# ======================================================================
+# Swapable Hydra config for PyTorch Lightning ModelCheckpoint callback.
+# Provides env-driven overrides for monitoring, modes, retention, and
+# filenames. Safe defaults tuned for Kaggle/CI reproducibility.
+# ======================================================================
 
 _target_: pytorch_lightning.callbacks.ModelCheckpoint
 
-monitor: "val/loss"     # change to "val/gll" if you optimize GLL (then set mode: "max")
-mode: "min"
+# ------------------------------ Monitoring ------------------------------
+monitor: ${oc.env:SM_CKPT_MONITOR, "val/loss"}
+mode: ${oc.env:SM_CKPT_MODE, "min"}    # "min" for loss/GLL; "max" for scores
 
-save_top_k: 3           # keep best 3
-save_last: true
-every_n_epochs: 1
+# ------------------------------ Retention -------------------------------
+save_top_k: ${oc.env:SM_CKPT_TOPK, 3}  # keep best N checkpoints
+save_last: ${oc.env:SM_CKPT_LAST, true}
+every_n_epochs: ${oc.env:SM_CKPT_EVERY_EPOCH, 1}
+every_n_train_steps: ${oc.env:SM_CKPT_EVERY_STEPS, null}
 
-dirpath: "${paths.checkpoints}"
-filename: "epoch{epoch:03d}-valloss{val/loss:.4f}"
-auto_insert_metric_name: false
+# ------------------------------- Paths ----------------------------------
+dirpath: ${oc.env:SM_CKPT_DIR, ${paths.ckpt_dir}}
+filename: ${oc.env:SM_CKPT_FILENAME, "epoch{epoch:03d}-step{step}-valloss{val/loss:.4f}"}
+
+# ------------------------------- Options --------------------------------
+auto_insert_metric_name: ${oc.env:SM_CKPT_AUTO_NAME, false}
+save_on_train_epoch_end: ${oc.env:SM_CKPT_ON_TRAIN_END, true}
