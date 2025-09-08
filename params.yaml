@@ -1,0 +1,15 @@
+hydra:
+  env: local
+  data: default
+  calib: default
+  preprocess: default
+  model: v50
+  training: default
+  loss: composite
+  logger: jsonl
+  config_name_calibrate: calibrate
+  config_name_preprocess: preprocess
+  config_name_train: train
+  config_name_predict: predict
+  config_name_diagnose: diagnose
+  config_name_submit: submit
