@@ -3,7 +3,7 @@ flowchart TB
   %% ===========================
   %% Inputs
   %% ===========================
-  subgraph inputs["Inputs"]
+  subgraph inputs["📥 Inputs"]
     i1["FGS1 time-series<br/>Δt-aligned, binned"]
     i2["AIRS spectra<br/>283 λ-bins"]
   end
@@ -13,7 +13,7 @@ flowchart TB
   %% ===========================
   subgraph fgs1Enc["FGS1 Encoder"]
     fe1["Preprocess<br/>denoise • detrend • bin"]
-    fe2["Sequence model<br/>state-space (Mamba)"]
+    fe2["Sequence model<br/>state-space (Mamba SSM)"]
     fe3["Temporal pooling<br/>projection"]
   end
 
@@ -38,7 +38,7 @@ flowchart TB
   %% ===========================
   %% Constraints (loss)
   %% ===========================
-  subgraph constraints["Symbolic / Physics Constraints (loss)"]
+  subgraph constraints["⚖️ Symbolic / Physics Constraints (loss)"]
     c1["Non-negativity<br/>(μ ≥ 0)"]
     c2["Smoothness<br/>(Δ²μ small)"]
     c3["Band coherence<br/>molecular regions"]
@@ -47,7 +47,7 @@ flowchart TB
   %% ===========================
   %% Uncertainty Calibration & Diagnostics
   %% ===========================
-  subgraph calibDiag["Uncertainty Calibration & Diagnostics"]
+  subgraph calibDiag["🔍 Uncertainty Calibration & Diagnostics"]
     t1["Temperature scaling<br/>σ ← σ / T (val split)"]
     d1["Inject-&-recover tests<br/>CO₂ bands, photometric drift"]
     d2["HTML dashboard<br/>metrics & plots"]
