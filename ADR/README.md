@@ -19,6 +19,15 @@ Each ADR captures the **context, decision, consequences, and compliance gates** 
 * **ADR-0004 — Dual Encoder Fusion (FGS1 + AIRS)**  
   * Adopt dual-encoder architecture: FGS1 via Mamba SSM, AIRS via CNN/GNN, fused with cross-attention, heteroscedastic decoder.  
 
+* **ADR-0005 — CLI-First Orchestration**  
+  * Typer-based CLI as the single entrypoint (`spectramind`) binding Hydra configs, enforcing determinism, and standardizing UX across local, CI, and Kaggle.  
+
+* **ADR-0006 — Reproducibility Standards**  
+  * Mandate run manifests, config snapshots, DVC artifact lineage, SBOM generation, and determinism guardrails to ensure mission-grade reproducibility.  
+
+* **ADR-0007 — Submission Schema & Validation**  
+  * Define strict JSON schema for submission CSVs (id, 283 μ, 283 σ ≥ 0) and enforce validation via CLI, CI, and Kaggle bootstrap.  
+
 ---
 
 ## Conventions
@@ -31,8 +40,7 @@ Each ADR captures the **context, decision, consequences, and compliance gates** 
 
 ## Next Planned ADRs
 
-* ADR-0005 — CLI-First Orchestration (Typer + Hydra overrides)  
-* ADR-0006 — Reproducibility Standards (run manifests, SBOM, JSONL lineage)  
-* ADR-0007 — Submission Schema & Validation (JSON schema, CI gates)  
+* ADR-0008 — [TBD: Model Explainability & Diagnostics (FFT/UMAP, SHAP, lineage reports)]  
+* ADR-0009 — [TBD: Artifact Retention & Governance (cleanup, archive, provenance policy)]  
 
 ---
