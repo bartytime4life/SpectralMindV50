@@ -2,38 +2,61 @@
   "$id": "https://spectramind-v50.org/schemas/metrics.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Experiment Metrics Snapshot",
+  "description": "Structured record of metrics and timings from a pipeline stage (train, predict, diagnose, submit). Ensures reproducibility, comparability, and lineage tracking across runs.",
   "type": "object",
   "additionalProperties": false,
+
   "required": ["run_id", "stage", "metrics", "timings"],
+
   "properties": {
-    "run_id": { "type": "string" },
+    "run_id": {
+      "type": "string",
+      "description": "Unique identifier for the run/session (UUID or hash)."
+    },
+
     "stage": {
       "type": "string",
-      "enum": ["train", "predict", "diagnose", "submit"]
+      "enum": ["train", "predict", "diagnose", "submit"],
+      "description": "Pipeline stage this snapshot corresponds to."
     },
+
     "metrics": {
       "type": "object",
-      "description": "Key numeric metrics; include GLL if available.",
-      "additionalProperties": { "type": "number" },
+      "description": "Key numeric metrics. Includes competition score (GLL) and training diagnostics if available.",
       "properties": {
-        "gll": { "type": "number" },
-        "loss": { "type": "number" },
-        "val_loss": { "type": "number" }
-      }
+        "gll": { "type": "number", "description": "Gaussian Log-Likelihood (competition metric)." },
+        "loss": { "type": "number", "description": "Training loss (if applicable)." },
+        "val_loss": { "type": "number", "description": "Validation loss (if applicable)." }
+      },
+      "additionalProperties": { "type": "number" }
     },
+
     "timings": {
       "type": "object",
       "required": ["wall_ms"],
       "additionalProperties": false,
       "properties": {
-        "wall_ms": { "type": "integer", "minimum": 0 },
-        "cpu_ms": { "type": "integer", "minimum": 0 },
-        "gpu_ms": { "type": "integer", "minimum": 0 }
+        "wall_ms": { "type": "integer", "minimum": 0, "description": "Elapsed wall-clock time (ms)." },
+        "cpu_ms": { "type": "integer", "minimum": 0, "description": "CPU time (ms)." },
+        "gpu_ms": { "type": "integer", "minimum": 0, "description": "GPU time (ms)." }
       }
     },
+
     "tags": {
       "type": "array",
+      "description": "Optional user-defined labels for experiment management.",
       "items": { "type": "string" }
+    },
+
+    "config_hash": {
+      "type": "string",
+      "description": "Hash of Hydra/DVC config snapshot used for this run."
+    },
+
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when metrics snapshot was generated."
     }
   }
 }
