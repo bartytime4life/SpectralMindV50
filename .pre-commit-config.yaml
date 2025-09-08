@@ -1,18 +1,20 @@
-# .pre-commit-config.yaml
 # ======================================================================
-# SpectraMind V50 — mission-grade pre-commit stack
-# - Fast: ruff + black + isort
-# - Safe: mypy + bandit + secrets scan
+# SpectraMind V50 — mission-grade pre-commit stack (upgraded)
+# - Fast: ruff + black + isort + pyupgrade
+# - Safe: mypy + bandit + detect-secrets + extra core sanity hooks
 # - Repro: DVC guard + large-file protections
-# - Docs: mdformat + spelling
-# - Notebooks: strip outputs; optional nbqa lint/format
+# - Docs: mdformat + codespell
+# - Notebooks: strip outputs (optional nbqa commented)
 # - JSON/YAML/TOML sanity + pretty JSON
-# - Optional: Conventional Commits (commit-msg)
+# - CI-friendly: conservative versions, narrow file globs, global excludes
+# - Conventional Commits (commit-msg) via Commitizen
 # ======================================================================
 
 ci:
   autofix_prs: true
   autoupdate_branch: true
+  # keep monthly autoupdates reasonable
+  autoupdate_schedule: monthly
 
 default_stages: [commit, push]
 default_language_version:
@@ -43,20 +45,32 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=500]  # keep repo lean; use DVC for artifacts
       - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: check-executables-have-shebangs
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: mixed-line-ending
         args: [--fix=lf]
+      - id: check-ast
+      - id: detect-private-key
       - id: check-json
       - id: check-yaml
         args: [--allow-multiple-documents]
       - id: check-toml
-      - id: detect-private-key
       - id: pretty-format-json
         name: pretty-format-json (2-space, sorted)
         args: [--autofix, --indent, "2", --no-ensure-ascii, --top-keys, name,version]
         files: ^(.*\.json|.*\.ipynb)$
         exclude: ^(poetry\.lock|package-lock\.json)$
+
+  # Upgrade syntax where safe (pre-lint quick win)
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.19.1
+    hooks:
+      - id: pyupgrade
+        args: [--py311-plus]
+        files: ^(src/|tests/|scripts/|tools/|spectramind\.py)
 
   # --------------------------------------------------------------------
   # Python formatting & linting
@@ -83,8 +97,7 @@ repos:
         # Fast flake8 replacement; see pyproject.toml/ruff.toml for config
         args: [--fix]
         files: ^(src/|tests/|scripts/|tools/|configs/|spectramind\.py)
-      # Optional: ruff formatter (kept off by default—Black is canonical here)
-      # - id: ruff-format
+      # - id: ruff-format  # keep Black canonical; enable if you switch later
 
   # --------------------------------------------------------------------
   # Static typing (fast path)
@@ -113,15 +126,17 @@ repos:
         args: [-ll, -x, tests,docs,notebooks]
         exclude: ^(tests/|docs/|notebooks/)
 
-  - repo: https://github.com/yelp/detect-secrets
+  - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
       - id: detect-secrets
         name: detect-secrets (baseline)
-        args: [--baseline, .secrets.baseline]
-        # To (re)generate:
-        #   detect-secrets scan > .secrets.baseline
-        #   pre-commit run detect-secrets --all-files
+        args:
+          - "--baseline"
+          - ".secrets.baseline"
+          - "--all-files"
+        exclude: >
+          (^|/)(\.git|\.hg|\.svn|\.tox|\.venv|venv|env|node_modules|dist|build|site|htmlcov|coverage|reports|logs|artifacts|__pycache__|\.mypy_cache|\.pytest_cache|\.dvc/cache|data/raw|data/interim|data/external|notebooks/.+\.ipynb_checkpoints|\.idea|\.vscode|.*\.egg-info)(/|$)
 
   # --------------------------------------------------------------------
   # DVC: keep data/models out of Git by mistake
@@ -199,7 +214,21 @@ repos:
       - id: validate-pyproject
 
   # --------------------------------------------------------------------
-  # Conventional commits (optional but recommended)
+  # Shell / Docker lint (optional; enable if scripts/Dockerfiles present)
+  # --------------------------------------------------------------------
+  # - repo: https://github.com/koalaman/shellcheck-py
+  #   rev: v0.10.0.1
+  #   hooks:
+  #     - id: shellcheck
+  #       files: ^(scripts/|tools/).*\.sh$
+  # - repo: https://github.com/hadolint/hadolint
+  #   rev: v2.12.0-beta
+  #   hooks:
+  #     - id: hadolint
+  #       files: ^Dockerfile(\..*)?$
+
+  # --------------------------------------------------------------------
+  # Conventional commits (commit-msg)
   # --------------------------------------------------------------------
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v3.27.0
