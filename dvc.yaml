@@ -1,20 +1,19 @@
 # ==============================================================================
-# dvc.yaml — SpectraMind V50 (Reproducible Pipeline)
+# dvc.yaml — SpectraMind V50 (Reproducible Pipeline, Refactored)
 # ------------------------------------------------------------------------------
-# Stages:
-#   calibrate → train → predict → (diagnose) → (submit)
+# Stages (expanded granularity):
+#   calibrate → preprocess → train → predict → diagnose → submit
 #
 # Conventions
-# - All Hydra selectors live in params.yaml under `hydra.*`.
-# - Use `dvc exp run -S hydra.env=kaggle -S hydra.model=v50 ...` for quick forks.
-# - Calibrated tensors (`data/processed`) are `persist: true` to enable reuse.
-# - Metrics are lightweight JSON; heavy logs go to outs_no_cache.
-# - dvclive block is included (commented). Enable when you want live curves.
+# - Hydra selectors live in params.yaml under `hydra.*`.
+# - Use dvc exp run -S hydra.env=kaggle -S hydra.model=v50 ...
+# - data/calibrated and data/processed are persisted for reuse & Kaggle packaging.
+# - Keep metrics lightweight JSON; heavy logs → outs_no_cache.
 # ==============================================================================
 
 stages:
   calibrate:
-    desc: "Raw → calibrated tensors (FGS1 + AIRS) with physics-informed preprocessing"
+    desc: "Raw → CALIBRATED tensors (FGS1 + AIRS); physics-based calibration only"
     cmd: >
       spectramind calibrate
       --config-name ${params.hydra.config_name_calibrate}
@@ -22,16 +21,37 @@ stages:
       data=${params.hydra.data}
       calib=${params.hydra.calib}
     deps:
-      - configs/                # Hydra configs
-      - src/                    # calibration code
-      - data/raw                # raw telescope inputs (DVC-tracked)
+      - configs/
+      - src/
+      - data/raw
     params:
       - hydra.config_name_calibrate
       - hydra.env
       - hydra.data
       - hydra.calib
     outs:
-      - path: data/processed    # calibrated + preprocessed tensors
+      - path: data/calibrated
+        persist: true
+
+  preprocess:
+    desc: "CALIBRATED → PROCESSED; detrend/normalize/bin/features"
+    cmd: >
+      spectramind preprocess
+      --config-name ${params.hydra.config_name_preprocess}
+      env=${params.hydra.env}
+      data=${params.hydra.data}
+      preprocess=${params.hydra.preprocess}
+    deps:
+      - data/calibrated
+      - configs/
+      - src/
+    params:
+      - hydra.config_name_preprocess
+      - hydra.env
+      - hydra.data
+      - hydra.preprocess
+    outs:
+      - path: data/processed
         persist: true
 
   train:
@@ -58,22 +78,17 @@ stages:
       - hydra.loss
       - hydra.logger
     outs:
-      - path: artifacts/ckpt.pt         # checkpointed for `dvc exp run --rev` resumes
+      - path: artifacts/ckpt.pt
         checkpoint: true
-      - path: artifacts/metrics.json    # final metrics snapshot for dashboards
+      - path: artifacts/metrics.json
         cache: true
     outs_no_cache:
-      - logs/train/                     # structured JSONL logs (not cached)
+      - logs/train/
     metrics:
       - artifacts/metrics.json:
           cache: false
           type: json
           xpath: .
-    # Enable dvclive for live curves in CI (optional):
-    # live:
-    #   path: dvclive
-    #   summary: true
-    #   html: true
 
   predict:
     desc: "Run inference on processed data → predictions CSV"
@@ -117,7 +132,7 @@ stages:
       - path: artifacts/diagnostics/plots/
         cache: true
     plots:
-      - artifacts/diagnostics/plots/     # images/tsv rendered by diagnostics
+      - artifacts/diagnostics/plots/
     metrics:
       - artifacts/diagnostics/summary.json:
           cache: false
@@ -138,6 +153,14 @@ stages:
     outs:
       - path: outputs/submission.csv
         cache: true
-      # Optionally produce a zip alongside the CSV:
-      # - path: outputs/submission.zip
-      #   cache: true
+
+  package-precalibrated:
+    desc: "Zip CALIBRATED tensors for Kaggle dataset attachment (runtime saver)"
+    cmd: >
+      bash scripts/package_precalibrated.sh data/calibrated artifacts/kaggle/precalibrated.zip
+    deps:
+      - data/calibrated
+      - scripts/package_precalibrated.sh
+    outs:
+      - path: artifacts/kaggle/precalibrated.zip
+        cache: true
