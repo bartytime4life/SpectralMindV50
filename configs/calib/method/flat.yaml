@@ -1,66 +1,158 @@
-# configs/calib/method/flat.yaml
-# ----------------------------------------------------------------------
-# AIRS Flat-Field Correction — pixel/wavelength sensitivity normalization
-# ----------------------------------------------------------------------
-# Corrects fixed-pattern sensitivity variations by dividing science frames
-# by a normalized flat map. Supports static per-pixel maps and wavelength-
-# dependent flats (via axis_info/wavelength grid).
-# ----------------------------------------------------------------------
+# ======================================================================
+# AIRS Flat-Field Correction — SpectraMind V50
+# ======================================================================
+# Corrects fixed-pattern sensitivity by dividing science frames by a
+# normalized flat map (static pixel map or wavelength-dependent map).
+#
+# Apply after ADC/CDS/DARK, before TRACE/PHASE/PHOTOMETRY.
+#
+# CLI:
+#   spectramind calibrate +calib.method=flat
+#
+# Implementation:
+#   spectramind.calib.method.flat.FlatField
+# ======================================================================
 
+# ----------------------------------------------------------------------
+# Wiring
+# ----------------------------------------------------------------------
 _target_: spectramind.calib.method.flat.FlatField
+_convert_: all
+
 enable: true
 apply_to: ["airs"]
 
-# --- Inputs / references ---
-flat_reference: ${data.root}/flat_reference.parquet   # or .npy/.csv
-axis_info: ${data.root}/axis_info.parquet            # wavelength-axis mapping (optional)
-image_key: "airs_frame"                              # raw 2D science frame
-mask_key: null                                       # optional boolean mask for bad pixels
+# ----------------------------------------------------------------------
+# Inputs / references
+# ----------------------------------------------------------------------
+# Prefer ${paths.data}; if your repo uses ${data.root}, adjust below.
+flat_reference: ${paths.data}/calib/airs/flat_reference.parquet   # .parquet | .npy | .npz | .csv
+axis_info:     ${paths.data}/calib/airs/axis_info.parquet         # wavelength axis (optional)
+image_key:     "airs_frame"              # raw 2D science frame
+mask_key:      null                      # optional upstream mask (1=bad, 0=good)
 
-# --- Flat strategy ---
+# For tabular flats: column names (used when flat_reference is a table)
+table_schema:
+  # Static per-pixel map: (row, col, flat)
+  pixel_map:
+    row: "row"
+    col: "col"
+    flat: "flat"
+  # Lambda-dependent: (lambda_nm, row|col|bin, flat)
+  lambda_map:
+    lambda: "lambda_nm"
+    coord:  "col"                        # column-wise dispersion by default
+    flat:   "flat"
+
+# ----------------------------------------------------------------------
+# Strategy
+#   pixel_map     : use a static HxW flat
+#   wavelength_map: per-slice/per-column/per-bin flats from axis_info
+#   auto          : prefer wavelength_map if axis_info exists else pixel_map
+# ----------------------------------------------------------------------
 strategy:
-  mode: "wavelength_map"    # ["pixel_map", "wavelength_map", "auto"]
-  # pixel_map:     use a static per-pixel flat (H x W)
-  # wavelength_map:use wavelength-indexed flats or per-column scaling
-  # auto:          prefer wavelength_map if axis_info is available, else pixel_map
+  mode: "auto"                           # ["pixel_map", "wavelength_map", "auto"]
+  # When wavelength_map:
+  per_slice_axis: "x"                    # ["x"|"y"] dispersion axis (columns="x")
+  enforce_monotonic_lambda: true         # validate lambda is strictly increasing
+  nearest_if_outside: true               # clamp out-of-range wavelengths
 
-# --- Normalization of flat map(s) ---
+# ----------------------------------------------------------------------
+# Normalization of flat map(s)
+# ----------------------------------------------------------------------
 normalization:
-  method: "median"           # ["median", "mean", "percentile"]
-  percentile: 50             # used if method == "percentile"
-  per_slice: true            # normalize per wavelength slice/column if wavelength_map
-  eps: 1.0e-9                # jitter to avoid divide-by-zero
+  method: "median"                       # ["median","mean","percentile","none"]
+  percentile: 50                         # when method="percentile"
+  per_slice: true                        # per-lambda slice normalization
+  global_ref_value: 1.0                  # target mean/median after normalization
+  eps: 1.0e-9                            # avoid division by (near) zero
 
-# --- Interpolation for wavelength-dependent flats ---
+# ----------------------------------------------------------------------
+# Interpolation for wavelength-dependent flats
+# ----------------------------------------------------------------------
 interpolation:
-  kind: "linear"             # ["nearest", "linear", "cubic", "spline"]
-  fill_value: "extrapolate"  # or a float
-  smooth: 0.0                # optional smoothing factor (0 = none)
+  kind: "linear"                         # ["nearest","linear","cubic","spline"]
+  fill_value: "extrapolate"              # or a float
+  smooth: 0.0                            # optional smoothing factor (0 = none)
 
-# --- Robust handling of flat map outliers / NaNs ---
+# ----------------------------------------------------------------------
+# Robust handling of flat outliers / NaNs
+# ----------------------------------------------------------------------
 robust:
   sigma_clip:
     enable: true
     sigma: 5.0
     iters: 1
   replace_nans: true
-  nan_fill: "local_median"   # ["zero", "local_mean", "local_median"]
+  nan_fill: "local_median"               # ["zero","local_mean","local_median"]
+  # Guard against tiny/huge flats (post-normalization)
+  min_flat: 1.0e-3                       # mask when flat < min_flat
+  max_flat: 1.0e+3                       # clamp absurd values (safety)
 
-# --- Application order & masking ---
+# ----------------------------------------------------------------------
+# Application & masking
+# ----------------------------------------------------------------------
 apply:
-  pre_clip_science: false      # optional pre-clip science pixels before division
-  preserve_dtype: false        # cast back to original dtype after correction
-  update_mask_on_divzero: true # flag pixels where flat ~ 0 using mask_key
+  pre_clip_science: false                # optional pre-clip science before division
+  update_mask_on_divzero: true           # mark flat≈0 pixels into mask_key
+  divzero_mask_value: 1                  # value to set for flagged pixels
+  preserve_dtype: false                  # cast back to original dtype after correction
 
-# --- Output keys ---
+# ----------------------------------------------------------------------
+# Backend, precision & performance
+# ----------------------------------------------------------------------
+backend: auto                            # [auto | numpy | torch]
+device:  auto                            # [auto | cpu | cuda] (torch only)
+dtype_out: float32
+numeric:
+  eps: 1.0e-9
+  deterministic: true
+  num_threads: ${oc.env:SM_NUM_THREADS, 2}
+
+# Chunked processing (OOM safety on Kaggle/CI)
+chunking:
+  enabled: true
+  frames_per_chunk: 64                   # split T into blocks; null → auto
+  min_frames_per_chunk: 8
+
+# I/O & caching
+io:
+  allow_memmap: true                     # memmap large NPY/NPZ when possible
+  eager_load: false                      # force full load of flat at start
+  cache_dir: ${paths.runtime}/cache/flat
+
+# ----------------------------------------------------------------------
+# Validation gates (fail fast if pathological)
+# ----------------------------------------------------------------------
+validate: true
+validation:
+  finite_input:  true
+  finite_output: true
+  # Flat stats after normalization
+  flat_stats:
+    mean_target: 1.0
+    mean_tol: 0.05                       # ±5% tolerance
+    max_zero_fraction: 0.005             # ≤0.5% zeros allowed
+  # Division health
+  max_divzero_fraction: 0.01             # ≤1% of pixels flagged as div-zero
+  # Enforce output finite & not all-zeros
+  min_output_std: 1.0e-10
+
+# ----------------------------------------------------------------------
+# Outputs
+# ----------------------------------------------------------------------
 outputs:
   corrected_key: "airs_frame_flatcorr"
-  meta_prefix: "airs_flat"
+  norm_flat_key: "airs_norm_flat"        # write normalized flat used (optional)
+  meta_prefix:   "airs_flat"
 
-# --- Diagnostics (optional; can be heavy) ---
+# ----------------------------------------------------------------------
+# Diagnostics (optional; may be heavy)
+# ----------------------------------------------------------------------
 diagnostics:
   enable: false
   save_norm_flat: true
   histogram_before_after: false
-  preview_slices: 0           # number of wavelength slices to dump as PNGs (0 disables)
-  out_dir: "./outputs/calib_diagnostics/airs_flat"
+  preview_slices: 0                      # N wavelength slices to dump as PNGs
+  sample_pixels: 16                      # log a few pixel traces
+  out_dir: ${paths.runtime}/reports/airs_flat
