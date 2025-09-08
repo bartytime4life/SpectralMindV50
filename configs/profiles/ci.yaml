@@ -1,0 +1,24 @@
+# configs/profiles/ci.yaml
+# SpectraMind V50 — CI profile (debug data + fast trainer)
+# Use:
+#   python -m spectramind train +defaults='[/profiles/ci]'
+
+defaults:
+  - /data: debug                 # tiny deterministic dataset slice
+  - /training/fast_ci: fast_ci   # short, deterministic trainer loop
+  - /logger: jsonl               # quiet, local logging
+  - override /training/callbacks@training.callbacks: callbacks
+
+# CI-friendly overrides
+seed: 123
+precision: "32-true"             # avoid AMP flakiness in shared CI runners
+
+# Keep runs small, clean, and deterministic
+trainer:
+  detect_anomaly: false
+  enable_model_summary: false
+  log_every_n_steps: 10
+
+# Paths (honor hydra.run.dir from base train.yaml)
+paths:
+  # no changes; CI keeps run-scoped outputs under hydra.run.dir
