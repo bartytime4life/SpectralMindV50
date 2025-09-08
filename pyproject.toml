@@ -107,7 +107,7 @@ docs = [
 
 security = [
   "pip-audit==2.7.3",
-  "cyclonedx-bom==4.3.12",
+  "cyclonedx-bom==7.1.0",
   # "bandit==1.7.9",
 ]
 
