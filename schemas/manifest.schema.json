@@ -1,0 +1,43 @@
+{
+  "$id": "https://spectramind-v50.org/schemas/manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Submission Bundle Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "created_at", "tool", "files"],
+  "properties": {
+    "manifest_version": { "type": "string", "const": "1.0" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "const": "spectramind-cli" },
+        "version": { "type": "string" }
+      }
+    },
+    "run_id": { "type": "string" },
+    "input_refs": {
+      "type": "array",
+      "description": "Logical inputs used to produce outputs (DVC paths, dataset versions).",
+      "items": { "type": "string" }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "content_type": { "type": "string" },
+          "schema": { "type": "string", "format": "uri" }
+        }
+      }
+    }
+  }
+}
