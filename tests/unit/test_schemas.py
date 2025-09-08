@@ -5,7 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, Iterable, Set, Tuple, Optional
+from typing import Dict, Iterable, Set, Tuple, Optional, Any, List
 
 import pytest
 
@@ -57,29 +57,58 @@ def _flatten_keys(obj) -> Set[str]:
     return keys
 
 
-def _collect_properties_bags(d: Dict) -> Iterable[Dict[str, Dict]]:
+def _iter_dicts(obj: Any) -> Iterable[Dict[str, Any]]:
+    """Yield all dict nodes in a nested structure."""
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _iter_dicts(v)
+    elif isinstance(obj, list):
+        for it in obj:
+            yield from _iter_dicts(it)
+
+
+def _collect_properties_bags(d: Dict) -> Iterable[Tuple[Dict[str, Dict], Dict]]:
     """
-    Yield all 'properties' bags (dicts) reachable anywhere in the schema,
-    including under items (arrays) and inside combinators (allOf/anyOf/oneOf).
+    Yield (properties_dict, parent_node) for all 'properties' bags reachable anywhere in the schema,
+    including under items (arrays) and inside combinators (allOf/anyOf/oneOf),
+    as well as in definitions/$defs.
     """
     if not isinstance(d, dict):
         return
-    stack = [d]
+    stack: List[Dict[str, Any]] = [d]
     while stack:
         cur = stack.pop()
         if not isinstance(cur, (dict, list)):
             continue
         if isinstance(cur, dict):
             if "properties" in cur and isinstance(cur["properties"], dict):
-                yield cur["properties"]
+                yield cur["properties"], cur
             # Recurse into common structural keywords
             for key, v in cur.items():
-                if key in ("items", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "definitions"):
+                if key in (
+                    "items",
+                    "allOf", "anyOf", "oneOf", "not",
+                    "if", "then", "else",
+                    "definitions", "$defs",
+                    "patternProperties",
+                    "additionalProperties",
+                ):
                     stack.append(v)
                 elif isinstance(v, (dict, list)):
                     stack.append(v)
         else:  # list
             stack.extend(cur)
+
+
+def _collect_pattern_properties(d: Dict) -> Iterable[Tuple[Dict[str, Dict], Dict]]:
+    """
+    Yield (patternProperties_dict, parent_node) tuples found anywhere.
+    """
+    for node in _iter_dicts(d):
+        pp = node.get("patternProperties")
+        if isinstance(pp, dict):
+            yield pp, node
 
 
 def _discover_bins_from_props(props: Iterable[str]) -> Optional[int]:
@@ -95,12 +124,8 @@ def _discover_bins_from_props(props: Iterable[str]) -> Optional[int]:
             mu_idxs.add(int(m.group(1)))
     if not mu_idxs:
         return None
-    # Require contiguity if possible
     max_idx = max(mu_idxs)
-    expected = set(range(max_idx + 1))
-    if mu_idxs >= expected:  # allow supersets (e.g., sigma keys mixed in the same bag)
-        return max_idx + 1
-    # Non-contiguous: still return a safe guess; subsequent tests will report gap details.
+    # non-negative contiguous set expected (0..max)
     return max_idx + 1
 
 
@@ -128,6 +153,55 @@ def _safe_bins_default() -> int:
         return int(os.environ.get("SM_SUBMISSION_BINS", "283"))
     except Exception:
         return 283
+
+
+# ---------- schema-type helpers ---------- #
+def _collect_types(schema_fragment: Any) -> Set[str]:
+    """
+    Collect 'type' values reachable in a fragment, walking through anyOf/oneOf/allOf/not/then/else/$ref.
+    This is a conservative extraction; we only assert existence of 'number' for mu/sigma and 'string' for sample_id.
+    """
+    types: Set[str] = set()
+    stack: List[Any] = [schema_fragment]
+    visited: Set[int] = set()
+    while stack:
+        cur = stack.pop()
+        if not isinstance(cur, (dict, list)):
+            continue
+        cur_id = id(cur)
+        if cur_id in visited:
+            continue
+        visited.add(cur_id)
+
+        if isinstance(cur, dict):
+            t = cur.get("type")
+            if isinstance(t, str):
+                types.add(t)
+            elif isinstance(t, list):
+                for e in t:
+                    if isinstance(e, str):
+                        types.add(e)
+            # descend into composites and referenced places
+            for key in ("anyOf", "oneOf", "allOf", "not", "if", "then", "else", "items"):
+                if key in cur:
+                    stack.append(cur[key])
+            # follow common ref-like structures loosely (we don't resolve external refs)
+            if "$ref" in cur:
+                # treat presence as unknown type; we won't be strict if we find no explicit 'type'
+                pass
+        else:
+            stack.extend(cur)
+    return types
+
+
+def _find_property_schema(bag_parent: Dict, prop_name: str) -> Optional[Dict]:
+    """
+    Try to find the schema for a given property name within its parent node (where the 'properties' was found).
+    """
+    props = bag_parent.get("properties", {})
+    if isinstance(props, dict) and prop_name in props and isinstance(props[prop_name], dict):
+        return props[prop_name]
+    return None
 
 
 # ----------------------------------------------------------------------------- #
@@ -201,34 +275,47 @@ def test_each_schema_is_valid_jsonschema(request, fixture_name: str) -> None:
 # ----------------------------------------------------------------------------- #
 def test_submission_schema_has_meta_fields(submission_schema: Dict) -> None:
     keys = set(submission_schema.keys())
-    # Don’t overfit; basic hygiene only.
+    # Basic hygiene only.
     assert "$schema" in keys or "$id" in keys or "title" in keys
 
 
 # ----------------------------------------------------------------------------- #
-# Tests: submission schema column logic (contiguity, symmetry)
+# Tests: submission schema column logic (contiguity, symmetry, types)
 # ----------------------------------------------------------------------------- #
 def test_submission_schema_includes_expected_fields_and_contiguity(submission_schema: Dict) -> None:
     """
     We don't assume a specific schema shape; we just ensure keys for sample_id and
-    mu_### / sigma_### appear somewhere (often under properties).
+    mu_### / sigma_### appear somewhere (often under properties or patternProperties).
     If a properties bag is found, enforce contiguity/symmetry of mu/sigma indices.
     """
     keys = _flatten_keys(submission_schema)
 
-    # Cheap sentinels must exist somewhere in the schema
+    # Cheap sentinels must exist somewhere in the schema (or via patterns)
     sentinels = {"sample_id", "mu_000", "sigma_000"}
     missing_sentinels = sentinels - keys
-    assert not missing_sentinels, f"Missing sentinel fields in schema keys: {missing_sentinels}"
+
+    # If using patternProperties only, we may not see concrete 'mu_000'/'sigma_000' keys in flatten_keys;
+    # tolerate this but make sure patterns are present below.
+    patterns_present = False
+    for pp, _parent in _collect_pattern_properties(submission_schema):
+        for patt in pp.keys():
+            if re.search(r"mu_\\d{3}", patt) or re.search(r"^mu_\(\?\:\d\)\{3\}", patt):
+                patterns_present = True
+            if re.search(r"sigma_\\d{3}", patt) or re.search(r"^sigma_\(\?\:\d\)\{3\}", patt):
+                patterns_present = True
+
+    if missing_sentinels and not patterns_present:
+        assert not missing_sentinels, f"Missing sentinel fields in schema keys: {missing_sentinels}"
 
     # Collect all property names from any nested 'properties' bag
     all_props: Set[str] = set()
-    for bag in _collect_properties_bags(submission_schema):
+    prop_bags: List[Tuple[Dict[str, Dict], Dict]] = list(_collect_properties_bags(submission_schema))
+    for bag, _parent in prop_bags:
         all_props |= set(bag.keys())
 
     if not all_props:
-        # If schema does not expose a direct properties bag (e.g., array-of-objects wrapper),
-        # we can still consider sentinel presence sufficient.
+        # If schema does not expose a direct properties bag (e.g., array-of-objects or patternProperties only),
+        # sentinel presence or pattern presence is sufficient.
         return
 
     # Infer bins from mu_* keys if possible
@@ -254,6 +341,43 @@ def test_submission_schema_includes_expected_fields_and_contiguity(submission_sc
     assert "sample_id" in all_props or "sample_id" in keys, "'sample_id' property not found"
 
 
+def _check_property_types_if_available(submission_schema: Dict) -> None:
+    """
+    If concrete per-field property schemas are available, ensure types are sensible:
+      - mu_### / sigma_### should include 'number' (or 'integer')
+      - sample_id should include 'string'
+    If only patternProperties exist (no concrete props), this is skipped.
+    """
+    # Aggregate all properties bags with their parents to reach field subschemas
+    prop_bags = list(_collect_properties_bags(submission_schema))
+    if not prop_bags:
+        return  # nothing concrete to validate; likely patternProperties only
+
+    # Find any bag that appears to define mu/sigma/sample_id concretely
+    for bag, parent in prop_bags:
+        if not isinstance(bag, dict):
+            continue
+        for name in bag.keys():
+            if re.match(r"^mu_\d{3}$", name) or re.match(r"^sigma_\d{3}$", name) or name == "sample_id":
+                sub = _find_property_schema(parent, name)
+                if not isinstance(sub, dict):
+                    continue
+                typs = _collect_types(sub)
+                if name == "sample_id":
+                    # be tolerant: allow absence (e.g., via $ref) or explicit inclusion of 'string'
+                    if typs:
+                        assert "string" in typs or "null" in typs, f"'sample_id' type should include 'string' (got {typs})"
+                else:
+                    # mu/sigma ideally numeric
+                    if typs:
+                        assert ("number" in typs or "integer" in typs or "null" in typs), \
+                            f"'{name}' should include numeric type (got {typs})"
+
+
+def test_submission_schema_value_types_if_available(submission_schema: Dict) -> None:
+    _check_property_types_if_available(submission_schema)
+
+
 # ----------------------------------------------------------------------------- #
 # Optional instance validation (enable with STRICT_SCHEMA_INSTANCE=1)
 # ----------------------------------------------------------------------------- #
@@ -269,7 +393,7 @@ def test_submission_schema_accepts_plausible_instance(submission_schema: Dict) -
 
     # If we can infer bin count from properties, do that; otherwise default.
     all_props: Set[str] = set()
-    for bag in _collect_properties_bags(submission_schema):
+    for bag, _ in _collect_properties_bags(submission_schema):
         all_props |= set(bag.keys())
     inferred = _discover_bins_from_props(all_props)
     n_bins = inferred if inferred is not None else _safe_bins_default()
