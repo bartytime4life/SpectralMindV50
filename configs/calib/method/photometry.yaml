@@ -1,99 +1,223 @@
-# configs/calib/method/photometry.yaml
-# ----------------------------------------------------------------------
-# FGS1 Photometry — aperture extraction + background + detrending
-# ----------------------------------------------------------------------
-# Extracts the FGS1 white-light lightcurve from 2D frames, removes
-# background, clips outliers (e.g., jitter spikes), and applies a
-# mild trend removal prior to phase alignment.
+# ======================================================================
+# FGS1 Photometry — SpectraMind V50
+# ======================================================================
+# Extracts a white-light lightcurve from 2D FGS1 frames:
+#   • centroid → aperture sum → background removal → outlier repair
+#   • optional PLD/jitter regression → gentle detrend → normalization
 #
-# References:
-#   - Ariel challenge calibration & detrending guidance:contentReference[oaicite:2]{index=2}
-#   - SpectraMind V50 physics-informed pipeline design:contentReference[oaicite:3]{index=3}
-# ----------------------------------------------------------------------
+# Apply after FLAT (and TRACE if applicable), before PHASE.
+#
+# CLI:
+#   spectramind calibrate +calib.method=photometry
+#
+# Impl:
+#   spectramind.calib.method.photometry.FGS1Photometry
+# ======================================================================
 
+# ----------------------------------------------------------------------
+# Wiring
+# ----------------------------------------------------------------------
 _target_: spectramind.calib.method.photometry.FGS1Photometry
+_convert_: all
+
 enable: true
 apply_to: ["fgs1"]
 
-# --- Source image geometry ---
-# FGS1 frames are 2D; if a subset/window is used upstream, ensure consistency.
-image_key: "fgs1_frame"        # key in sample dict for the raw 2D frame
-time_key: "time"               # per-frame timestamp (e.g., MJD or seconds)
-mask_key: null                 # optional boolean mask for bad pixels (same shape as frame)
+# ----------------------------------------------------------------------
+# Source image geometry / keys
+# ----------------------------------------------------------------------
+image_key: "fgs1_frame"              # 2D frame (H x W)
+time_key: "time"                     # per-frame timestamp
+mask_key: null                       # optional boolean mask (1=bad)
+variance_key: null                   # optional per-pixel variance (for flux σ)
 
-# --- Centroiding (per-frame source localization) ---
+# Optional meta keys
+meta:
+  exposure_key: "exptime"            # exposure time (sec)
+  saturation_level: null             # ADU level considered saturated (null=disabled)
+
+# ----------------------------------------------------------------------
+# Centroiding
+# ----------------------------------------------------------------------
 centroid:
-  method: "gaussian"           # ["gaussian", "moments", "brightest"]
-  search_box: 15               # odd int; window (pixels) around previous centroid
-  max_shift: 8                 # max pixel drift allowed between frames
-  smooth_traj: true            # smooth centroid trajectory across time
-  smooth_window: 11            # Savitzky-Golay window length (odd)
+  method: "gaussian"                 # ["gaussian","moments","brightest"]
+  search_box: 15                     # odd int; window around last centroid
+  max_shift: 8                       # px/frame guard
+  smooth_traj: true                  # Savitzky–Golay smoothing
+  smooth_window: 11                  # odd
   smooth_polyorder: 2
+  fallback:
+    enable: true
+    method: "moments"                # fallback when gaussian fails
+  reject_saturated: true             # ignore saturated pixels when estimating centroid
 
-# --- Aperture photometry ---
+# ----------------------------------------------------------------------
+# Aperture photometry
+# ----------------------------------------------------------------------
 aperture:
-  radius: 5                    # pixel radius for circular aperture
-  subpixel: true               # fractional pixel weighting at boundary
-  normalize_by_exptime: true   # divide flux by exposure time if available
-  exposure_key: "exptime"      # metadata key for exposure time (optional)
+  shape: "circular"                  # ["circular","elliptical","square"]
+  radius: 5                          # px (semi-major for elliptical)
+  axis_ratio: 1.0                    # elliptical only
+  angle_deg: 0.0                     # elliptical only (CCW from +x)
+  subpixel: true                     # fractional edge weights
+  normalize_by_exptime: true
+  exposure_key: ${meta.exposure_key}
+  # Optional annular background as additive term removed after aperture sum
+  background_coupled: false          # if true, uses the 'background' block annulus directly
 
-# --- Background estimation ---
+# ----------------------------------------------------------------------
+# Background estimation
+# ----------------------------------------------------------------------
 background:
-  method: "annulus"            # ["annulus", "local-median", "tile-median", "constant"]
-  inner_radius: 8              # annulus inner radius (pixels)
-  outer_radius: 12             # annulus outer radius (pixels)
-  robust: true                 # use robust estimator (median / biweight)
+  method: "annulus"                  # ["annulus","local-median","tile-median","constant"]
+  inner_radius: 8
+  outer_radius: 12
+  robust: true                       # median / biweight
+  constant_value: 0.0
+  tile:
+    size: 32                         # px tile size for "tile-median"
+    overlap: 8
   sigma_clip:
     enable: true
     sigma: 4.0
     iters: 2
+  exclude_aperture: true             # ensure on-source region excluded
+  exclude_mask: true                 # exclude masked/saturated pixels
 
-# --- Outlier handling (per time point) ---
+# ----------------------------------------------------------------------
+# Quality guards (per-frame, pre-sum)
+# ----------------------------------------------------------------------
+quality:
+  cosmic_rays:
+    enable: true
+    method: "sigma"                  # ["sigma","median3","none"]
+    sigma: 7.0
+  saturation:
+    level: ${meta.saturation_level}  # null disables
+    mask_saturated: true
+  bad_fraction_drop:
+    enable: true
+    max_bad_frac: 0.5                # drop frame if >50% pixels masked (within aperture)
+
+# ----------------------------------------------------------------------
+# Outlier handling (time-domain)
+# ----------------------------------------------------------------------
 outliers:
-  # Clip flux outliers to mitigate jitter spikes/cosmic rays before detrending.
-  method: "sigma"              # ["sigma", "mad", "none"]
+  method: "sigma"                    # ["sigma","mad","none"]
   sigma: 5.0
   iters: 1
-  interpolate: true            # replace clipped samples by linear interp
+  interpolate: true                  # replace by linear interp in time
   min_run: 1
 
-# --- Temporal binning (optional; improves SNR at cost of cadence) ---
+# ----------------------------------------------------------------------
+# Temporal binning (optional)
+# ----------------------------------------------------------------------
 binning:
   enable: false
-  size: 1                      # integer bin size (frames per bin)
-  reduce: "mean"               # ["mean", "median"]
+  size: 1                            # frames per bin
+  reduce: "mean"                     # ["mean","median","weighted_mean"]
+  use_flux_variance: true            # weights=1/σ² when available and reduce=weighted_mean
 
-# --- Detrending (remove low-frequency drift; preserve transit shape) ---
+# ----------------------------------------------------------------------
+# Systematics regression (optional, lightweight)
+# ----------------------------------------------------------------------
+regression:
+  enable: true
+  # Jitter / centroid regressors (linear)
+  jitter:
+    enable: true
+    features: ["dx","dy","dx2","dy2","dxdy"]   # centered polynomial terms
+  # Simple first-order PLD (pixel level decorrelation) around aperture core
+  pld:
+    enable: false
+    box: 7                                     # odd; NxN patch around centroid
+    l2: 1.0e-3                                 # ridge penalty (0 disables)
+    max_pixels: 200                            # cap to avoid overfit
+  # Execution order: (background) → outlier clip → regression → detrend → normalize
+
+# ----------------------------------------------------------------------
+# Detrending (low-frequency; preserve transit)
+# ----------------------------------------------------------------------
 detrend:
   enable: true
-  mode: "savgol"               # ["savgol", "poly", "none"]
+  mode: "savgol"                     # ["savgol","poly","none"]
   savgol:
-    window: 101                # odd; adapt to sequence length
+    window: 101                      # odd; adapt to sequence length if needed
     polyorder: 2
   poly:
-    degree: 2                  # used if mode == "poly"
-  # Optionally include common-mode removal using centroid motion
-  regress_centroid: true       # linear reg on (dx, dy) to remove motion-correlated systematics
-  center_features: true
+    degree: 2
+  center_features: true              # zero-center regressors prior to fit
 
-# --- Normalization (white-light baseline) ---
+# ----------------------------------------------------------------------
+# Normalization (white-light baseline)
+# ----------------------------------------------------------------------
 normalize:
   enable: true
-  method: "oot_median"         # ["oot_median", "robust_mean", "percentile"]
-  percentile: 10               # used if method == "percentile"
-  ref_mask_key: null           # optional mask for out-of-transit region
+  method: "oot_median"               # ["oot_median","robust_mean","percentile","none"]
+  percentile: 10
+  ref_mask_key: null                 # provide OOT mask if known
 
-# --- Numerical stability & bookkeeping ---
-eps: 1.0e-9
+# ----------------------------------------------------------------------
+# Uncertainty propagation
+# ----------------------------------------------------------------------
+uncertainty:
+  propagate: true                    # compute σ_flux if variance_key or Poisson model present
+  poisson_when_missing: true         # σ ≈ sqrt(max(flux_raw, 1)) scaled by gain/exptime if variance missing
+  output_key: "fgs1_flux_sigma"
+
+# ----------------------------------------------------------------------
+# Backend, precision & performance
+# ----------------------------------------------------------------------
+backend: auto                        # ["auto","numpy","torch"]
+device: auto                         # ["auto","cpu","cuda"] when backend=torch
+dtype_out: float32
+numeric:
+  eps: 1.0e-9
+  deterministic: true
+  num_threads: ${oc.env:SM_NUM_THREADS, 2}
+
+chunking:
+  enabled: true
+  frames_per_chunk: 256              # OOM safety (Kaggle/CI)
+  min_frames_per_chunk: 64
+
+io:
+  cache_dir: ${paths.runtime}/cache/fgs1_phot
+  write_intermediate: false
+
+# ----------------------------------------------------------------------
+# Validation gates
+# ----------------------------------------------------------------------
+validate: true
+validation:
+  finite_input: true
+  finite_output: true
+  min_snr: 3.0                       # require SNR≥3 on median binned point (best-effort)
+  max_outlier_fraction: 0.05         # ≤5% time points clipped
+  centroid_jump_max_px: 5.0          # fail if instantaneous centroid jump > 5 px
+  aperture_edge_guard_px: 2          # centroid must remain ≥2 px from image edge
+  # If normalized, enforce baseline around 1.0 ± tol outside transit (when ref mask present)
+  baseline_mean_target: 1.0
+  baseline_tol: 0.1                   # ±10%
+
+# ----------------------------------------------------------------------
+# Outputs
+# ----------------------------------------------------------------------
 outputs:
-  flux_key: "fgs1_flux"        # extracted (detrended, normalized) lightcurve
-  meta_prefix: "fgs1_phot"     # prefix for saved diagnostics in sample
+  flux_key: "fgs1_flux"              # final (detrended, normalized) lightcurve
+  raw_flux_key: "fgs1_flux_raw"      # pre-regression/detrend, post-background
+  bg_series_key: "fgs1_background"   # per-frame background estimate
+  centroid_key: "fgs1_centroid"      # (x,y) per frame
+  meta_prefix: "fgs1_phot"
 
-# --- Diagnostics (optional; heavy) ---
+# ----------------------------------------------------------------------
+# Diagnostics (optional; can be heavy)
+# ----------------------------------------------------------------------
 diagnostics:
   enable: false
   save_centroid_traj: true
   save_background_series: false
   save_prepost_flux: false
-  fft_check: false             # run FFT of flux to verify low-frequency removal
-  out_dir: "./outputs/calib_diagnostics/fgs1_photometry"
+  fft_check: false                   # FFT of flux to verify low-freq removal
+  preview_frames: 0                  # dump small PNGs around centroid (0 disables)
+  out_dir: ${paths.runtime}/reports/fgs1_photometry
