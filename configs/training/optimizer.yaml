@@ -1,43 +1,122 @@
 # configs/training/optimizer.yaml
-# SpectraMind V50 — Training Optimizer Configuration
-# --------------------------------------------------
-# Defines optimizer type and hyperparameters.
-# Can be overridden via CLI:
-#   spectramind train +training/optimizer=adamw
-# Safe for Hydra/DVC/Kaggle usage.
+# ======================================================================
+# SpectraMind V50 — Optimizer Configuration (Hydra sub-config)
+# ======================================================================
+# Default: AdamW with decoupled weight decay and safe numerics.
+# Includes param-group rules (no_decay for biases/Norms), AMP-friendly
+# epsilon, optional fused/foreach, and gradient clipping knobs.
+# ======================================================================
 
-_target_: torch.optim.AdamW   # default optimizer
+# -------------------------
+# Selection
+# -------------------------
+name: adamw                    # one of: adamw | adam | sgd | rmsprop | lamb | lion | adafactor | adamax | adagrad | adamw_8bit
 
-# Base learning rate (before scheduler scaling)
-lr: 3.0e-4
-
-# Weight decay for regularization
-weight_decay: 0.01
-
-# Beta coefficients for Adam family optimizers
-betas:
-  - 0.9
-  - 0.999
-
-# Epsilon term for numerical stability
+# -------------------------
+# Base hyperparameters
+# -------------------------
+lr: 3.0e-4                     # base LR (before scheduler scaling)
+weight_decay: 0.01             # global default (overridden by param_groups)
+betas: [0.9, 0.999]
 eps: 1.0e-8
+amsgrad: false                 # safe-off for speed unless training is choppy
 
-# AMSGrad variant toggle
-amsgrad: false
+# Mixed precision stability (helps fp16/bf16)
+numerics:
+  adamw_eps_floor: 1.0e-8      # minimum eps for Adam-family
+  clamp_grad_inf: true         # zero-out NaN/Inf grads if they occur
 
-# Gradient clipping (applied in Lightning callbacks)
-grad_clip_norm: 1.0
+# -------------------------
+# PyTorch Lightning integration
+# -------------------------
+pl:
+  grad_clip:
+    enabled: true
+    algorithm: norm            # "norm" | "value"
+    value: 1.0                 # clip_norm or clip_value
+  detect_anomaly: false
 
-# Optional overrides for alternate optimizers
+# -------------------------
+# Implementation hints (Torch features; safely ignored if unsupported)
+# -------------------------
+impl:
+  fused: auto                  # true | false | auto (torch>=2.x on CUDA)
+  foreach: auto                # use foreach kernels when beneficial
+  capturable: false            # set true for CUDA graph capture
+  maximize: false              # gradient ascent (rare)
+
+# -------------------------
+# Param-group rules (regex matched against parameter names)
+# Ensures decoupled weight decay is NOT applied to biases/Norm gains.
+# -------------------------
+param_groups:
+  - name: decay
+    weight_decay: ${weight_decay}
+    params_regex:
+      - ".*weight$"
+      - ".*kernel$"
+  - name: no_decay
+    weight_decay: 0.0
+    params_regex:
+      - ".*bias$"
+      - ".*norm(\\.|_)?(weight|bias)$"     # LayerNorm/GroupNorm/BatchNorm
+      - ".*bn(\\.|_)?(weight|bias)$"
+      - ".*embedding(\\.|_)?(weight|bias)$"
+
+# If true, any params not matching rules above fall back to "decay" group.
+param_fallback_to_decay: true
+
+# -------------------------
+# Linear LR scaling helper (optional; your trainer can read/apply)
+# -------------------------
+lr_scaling:
+  enabled: false
+  reference_batch_size: 256
+  actual_batch_size: ${trainer.effective_batch_size}   # define in trainer cfg
+  mode: linear                                         # "linear" | "sqrt"
+
+# -------------------------
+# Optimizer menus (variants)
+# Switch via: +training/optimizer.name=sgd (or set name: sgd)
+# -------------------------
 variants:
+
+  adamw:
+    _target_: torch.optim.AdamW
+    lr: ${lr}
+    betas: ${betas}
+    eps: ${eps}
+    weight_decay: ${weight_decay}
+    amsgrad: ${amsgrad}
+    foreach: ${impl.foreach}
+    fused: ${impl.fused}
+    capturable: ${impl.capturable}
+    maximize: ${impl.maximize}
 
   adam:
     _target_: torch.optim.Adam
     lr: 1.0e-3
-    betas: [0.9, 0.999]
-    eps: 1.0e-8
+    betas: ${betas}
+    eps: ${eps}
     weight_decay: 0.0
     amsgrad: false
+    foreach: ${impl.foreach}
+    capturable: ${impl.capturable}
+    maximize: ${impl.maximize}
+
+  adamax:
+    _target_: torch.optim.Adamax
+    lr: 2.0e-3
+    betas: ${betas}
+    eps: ${eps}
+    weight_decay: 0.0
+
+  adagrad:
+    _target_: torch.optim.Adagrad
+    lr: 1.0e-2
+    lr_decay: 0.0
+    weight_decay: 0.0
+    eps: ${eps}
 
   sgd:
     _target_: torch.optim.SGD
@@ -50,12 +129,51 @@ variants:
     _target_: torch.optim.RMSprop
     lr: 1.0e-3
     alpha: 0.99
-    eps: 1.0e-8
+    eps: ${eps}
     momentum: 0.9
     centered: false
     weight_decay: 0.0
 
-# Notes:
-# - Default is AdamW (best for transformers/SSMs).
-# - Use +training/optimizer=sgd for large-batch baselines.
-# - All hyperparams are explicit for reproducibility.
+  # Requires torch-optimizer if you enable it; keep default as AdamW
+  lamb:
+    _target_: torch_optimizer.Lamb
+    lr: 3.0e-4
+    betas: ${betas}
+    eps: ${eps}
+    weight_decay: ${weight_decay}
+    clamp_value: 10.0
+    debias: true
+
+  # Optional: https://github.com/google-research/google-research/tree/master/adafactor
+  adafactor:
+    _target_: transformers.optimization.Adafactor
+    lr: 1.0e-3
+    scale_parameter: true
+    relative_step: false
+    warmup_init: false
+    weight_decay: 0.0
+    eps: [1.0e-30, 1.0e-3]
+
+  # Lion (if available; torch-optimizer or timm.optim)
+  lion:
+    _target_: timm.optim.lion.Lion
+    lr: 3.0e-4
+    betas: [0.9, 0.99]
+    weight_decay: ${weight_decay}
+    use_triton: false
+
+  # BitsAndBytes 8-bit AdamW (only if bnb installed; Kaggle offline-safe to ignore)
+  adamw_8bit:
+    _target_: bitsandbytes.optim.AdamW8bit
+    lr: ${lr}
+    betas: ${betas}
+    eps: ${eps}
+    weight_decay: ${weight_decay}
+
+# -------------------------
+# Safety gates (trainer may enforce)
+# -------------------------
+safety:
+  forbid_nan_loss: true
+  zero_grad_on_nan: true
+  log_step_l2_grad_norm: true
