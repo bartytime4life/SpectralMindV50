@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import typer
 
@@ -19,12 +19,12 @@ try:
     from rich import print as rprint
     from rich.traceback import install as rich_install
     from rich.panel import Panel
-    from rich.table import Table
     _HAS_RICH = True
     rich_install(show_locals=False, suppress=["typer", "click"])
 except Exception:
     _HAS_RICH = False
-    rprint = print  # type: ignore[assignment]
+    def rprint(*args, **kwargs):  # noqa: D401
+        print(*args, **kwargs)
 
 # Optional OmegaConf (Hydra-like) support
 try:
@@ -33,7 +33,7 @@ try:
 except Exception:
     _HAS_OMEGA = False
 
-# Optional scientific libs for deterministic seeds (never required at import)
+# Optional scientific libs for deterministic seeds
 _HAS_TORCH = False
 _HAS_NUMPY = False
 try:
@@ -41,7 +41,6 @@ try:
     _HAS_TORCH = True
 except Exception:
     pass
-
 try:
     import numpy as _np  # type: ignore
     _HAS_NUMPY = True
@@ -49,9 +48,10 @@ except Exception:
     pass
 
 from spectramind.utils.logging import get_logger
-from spectramind.utils.io import p, read_yaml, read_json, ensure_dir  # YAML optional; JSON always works
+from spectramind.utils.io import p, read_yaml, read_json, ensure_dir
 from spectramind.train.trainer import train_from_config
 from spectramind.submit.validate import validate_csv as _validate_submission_csv  # NEW
+from spectramind.utils.manifest import write_run_manifest  # NEW
 
 __all__ = ["app", "main"]
 
@@ -94,34 +94,27 @@ class SpectraMindError(RuntimeError):
     """Typed error for SpectraMind CLI failures."""
 
 def _is_ci_or_kaggle() -> bool:
-    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
-        return True
-    if "KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle").exists():
-        return True
-    return False
+    return bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS")
+                or "KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle").exists())
 
 def _ok(msg: str) -> None:
-    if _HAS_RICH:
-        rprint(f"[bold green]✓[/bold green] {msg}")
-    else:
-        typer.echo(msg)
+    rprint(f"[bold green]✓[/bold green] {msg}") if _HAS_RICH else typer.echo(msg)
 
 def _warn(msg: str) -> None:
-    if _HAS_RICH:
-        rprint(f"[yellow]warn:[/yellow] {msg}")
-    else:
-        typer.secho(f"warn: {msg}", fg=typer.colors.YELLOW)
+    rprint(f"[yellow]warn:[/yellow] {msg}") if _HAS_RICH else typer.secho(f"warn: {msg}", fg=typer.colors.YELLOW)
 
 def _fail(msg: str, code: int = 1) -> None:
-    if _HAS_RICH:
-        rprint(f"[bold red]error:[/bold red] {msg}")
-    else:
-        typer.secho(f"error: {msg}", fg=typer.colors.RED, err=True)
+    rprint(f"[bold red]error:[/bold red] {msg}") if _HAS_RICH else typer.secho(f"error: {msg}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=code)
 
 def _ensure_exists(pth: Optional[Path], label: str) -> None:
     if pth is not None and not Path(pth).exists():
         raise SpectraMindError(f"{label} not found: {pth}")
+
+def _ensure_file_parent(path: Path) -> None:
+    """Make sure parent directory exists for a file path."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
 # ======================================================================================
 # Determinism / seeding
@@ -131,18 +124,17 @@ def _set_seeds(seed: Optional[int], *, deterministic_torch: bool = True) -> None
     """
     Set global RNG seeds for Python, NumPy, and (optionally) PyTorch.
 
-    Parameters
-    ----------
-    seed : int | None
-        Seed value to set. If None, nothing is changed.
-    deterministic_torch : bool, default=True
-        If True, configures PyTorch for deterministic ops
-        (cudnn.deterministic=True, cudnn.benchmark=False).
+    deterministic_torch also sets TF32 override and cuBLAS workspace to ensure parity.
     """
     if seed is None:
         return
 
     os.environ["PYTHONHASHSEED"] = str(seed)
+    # Deterministic cuBLAS matmul kernels
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    # Disable TF32 to align math paths across envs
+    os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "0")
+
     random.seed(seed)
 
     if _HAS_NUMPY:
@@ -153,8 +145,11 @@ def _set_seeds(seed: Optional[int], *, deterministic_torch: bool = True) -> None
         if torch.cuda.is_available():  # type: ignore[name-defined]
             torch.cuda.manual_seed_all(seed)  # type: ignore[attr-defined]
         if deterministic_torch:
+            torch.use_deterministic_algorithms(True)  # type: ignore[attr-defined]
             torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
             torch.backends.cudnn.benchmark = False     # type: ignore[attr-defined]
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("highest")  # type: ignore[attr-defined]
 
     _ok(f"Deterministic seeds set → {seed}"
         + ("" if not _HAS_TORCH else f" (torch deterministic={deterministic_torch})"))
@@ -172,13 +167,11 @@ def _coerce_value(val: str) -> Any:
         return False
     if lv in {"null", "none"}:
         return None
-    # JSON object/array?
     if (v.startswith("{") and v.endswith("}")) or (v.startswith("[") and v.endswith("]")):
         try:
             return json.loads(v)
         except Exception:
             pass
-    # numeric
     try:
         if "." in v:
             return float(v)
@@ -207,7 +200,6 @@ def _load_config_any(config: Optional[Path]) -> Dict[str, Any]:
         return read_yaml(cfg_path)  # type: ignore[return-value]
     if ext == ".json":
         return read_json(cfg_path)
-    # last resort: try YAML then JSON
     try:
         return read_yaml(cfg_path)  # type: ignore[return-value]
     except Exception:
@@ -222,12 +214,9 @@ def _merge_overrides(base: Dict[str, Any], overrides: List[str]) -> Dict[str, An
             ov = OmegaConf.from_dotlist(overrides)  # type: ignore
             merged = OmegaConf.merge(OmegaConf.create(base), ov)  # type: ignore
             result = OmegaConf.to_container(merged, resolve=True)  # type: ignore
-            if not isinstance(result, dict):
-                return base
-            return result
+            return result if isinstance(result, dict) else base
         except Exception as e:
             raise SpectraMindError(f"Failed to apply overrides: {overrides} :: {e}")
-    # manual fallback
     result = dict(base)
     for item in overrides:
         if "=" not in item:
@@ -238,7 +227,6 @@ def _merge_overrides(base: Dict[str, Any], overrides: List[str]) -> Dict[str, An
     return result
 
 def _hash_config_dict(d: Dict[str, Any]) -> str:
-    """Stable sha256 over a canonicalized JSON representation of a dict."""
     enc = json.dumps(d, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(enc).hexdigest()
 
@@ -254,7 +242,8 @@ class Event:
     extra: Dict[str, Any]
 
 def _write_event(path: Path, kind: str, msg: str, **extra: Any) -> None:
-    ensure_dir(path)
+    """Append a JSONL event record; creates parent dirs if needed."""
+    _ensure_file_parent(path)
     rec = Event(t=time.time(), kind=kind, msg=msg, extra=extra)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(asdict(rec), sort_keys=False) + "\n")
@@ -270,7 +259,9 @@ def _run_dvc(
     dry_run: bool = False,
     print_cmd: bool = False,
 ) -> None:
-    cmd = ["dvc", "repro", "-f", "-s", stage]
+    cmd = ["dvc", "repro", "--single-item", stage]
+    if _is_ci_or_kaggle():
+        cmd.insert(2, "--no-tty")
     if extra:
         cmd += extra
     if print_cmd or dry_run:
@@ -296,14 +287,15 @@ def _global(
     log_file: Optional[Path] = typer.Option(None, help="Optional log file to tee messages"),
     seed: Optional[int] = typer.Option(None, help="Deterministic seed for all stages"),
     events_path: Path = typer.Option(Path("artifacts/logs/events.jsonl"), help="JSONL event stream path"),
+    manifest_path: Path = typer.Option(Path("artifacts/run_manifest.jsonl"), help="Append run manifests here"),  # NEW
 ) -> None:
     """
-    Global flags for logging, determinism, and event stream.
+    Global flags for logging, determinism, event stream, and run manifest.
     """
     # Wire seeds early
     _set_seeds(seed, deterministic_torch=True)
 
-    # Set logger level
+    # Logging level
     if quiet:
         os.environ["SPECTRAMIND_LOGLEVEL"] = "ERROR"
     elif verbose:
@@ -314,18 +306,24 @@ def _global(
     # Tee to file if requested
     if log_file:
         try:
-            ensure_dir(log_file)
-            # simple tee: append startup banner
+            _ensure_file_parent(log_file)
             with log_file.open("a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] spectramind start pid={os.getpid()}\n")
         except Exception as e:
             _warn(f"Failed to open log_file: {e}")
+
+    # Initial manifest line (append JSONL)
+    try:
+        write_run_manifest(manifest_path, extra={"stage": "cli-entry", "pid": os.getpid(), "seeds": seed})
+    except Exception as e:
+        _warn(f"manifest emit failed: {e}")
 
     # Stash in context
     ctx.obj = {
         "events_path": events_path,
         "log_file": log_file,
         "seed": seed,
+        "manifest_path": manifest_path,
     }
 
 # ======================================================================================
@@ -410,7 +408,7 @@ def sys_seed(
     deterministic_torch: bool = typer.Option(
         True,
         "--deterministic-torch/--no-deterministic-torch",
-        help="Configure PyTorch for deterministic ops (cudnn.deterministic=True, benchmark=False).",
+        help="Configure PyTorch for deterministic ops.",
     ),
 ) -> None:
     """
@@ -425,8 +423,6 @@ def sys_seed(
         _set_seeds(value, deterministic_torch=deterministic_torch)
         _ok(f"Global seed set to {value} "
             f"({'deterministic torch' if deterministic_torch else 'non-deterministic torch'})")
-        # NOTE: environment changes here affect only this process and its children.
-        # For persistence across shells, export PYTHONHASHSEED in your shell profile if desired.
     except Exception as e:
         _fail(f"Failed to set seed: {e}")
 
@@ -451,11 +447,13 @@ def calibrate_run(
     """
     t0 = time.time()
     events_path: Path = ctx.obj["events_path"]
+    manifest_path: Path = ctx.obj["manifest_path"]
     try:
         cfg = _merge_overrides(_load_config_any(config), set)
         cfg_hash = _hash_config_dict(cfg)
         _ensure_exists(raw_dir, "raw_dir")
         ensure_dir(out_dir)
+        write_run_manifest(manifest_path, extra={"stage": "calibrate", "cfg_hash": cfg_hash, "raw": str(raw_dir)})
 
         _write_event(events_path, "calibrate:start", "begin", cfg_hash=cfg_hash, raw=str(raw_dir), out=str(out_dir))
 
@@ -465,7 +463,6 @@ def calibrate_run(
             if dry_run:
                 _ok("DRY-RUN: would call spectramind.pipeline.calibrate.run(...)")
             else:
-                # Delegate to your real calibrator
                 # from spectramind.pipeline.calibrate import run as calib_impl
                 # calib_impl(raw_dir=raw_dir, out_dir=out_dir, cfg=cfg)
                 _warn("Using placeholder calibrator — wire spectramind.pipeline.calibrate.run(...)")
@@ -501,16 +498,15 @@ def preprocess_run(
 ) -> None:
     """
     Run preprocessing / feature extraction (calibrated → model-ready tensors).
-
-    This stage isolates detrending, segmentation, feature engineering, and standardization
-    from the upstream calibration step to maximize DVC cache hits and reproducibility.
     """
     events_path: Path = ctx.obj["events_path"]
+    manifest_path: Path = ctx.obj["manifest_path"]
     try:
         cfg = _merge_overrides(_load_config_any(config), set)
         cfg_hash = _hash_config_dict(cfg)
         _ensure_exists(calib_dir, "calib_dir")
         ensure_dir(out_dir)
+        write_run_manifest(manifest_path, extra={"stage": "preprocess", "cfg_hash": cfg_hash, "calib": str(calib_dir)})
 
         _write_event(events_path, "preprocess:start", "begin", cfg_hash=cfg_hash, calib=str(calib_dir), out=str(out_dir))
 
@@ -520,7 +516,6 @@ def preprocess_run(
             if dry_run:
                 _ok("DRY-RUN: would call spectramind.pipeline.preprocess.run(...)")
             else:
-                # Delegate to your real preprocessor
                 # from spectramind.pipeline.preprocess import run as preproc_impl
                 # preproc_impl(calib_dir=calib_dir, out_dir=out_dir, cfg=cfg)
                 _warn("Using placeholder preprocessor — wire spectramind.pipeline.preprocess.run(...)")
@@ -552,6 +547,7 @@ def train_run(
     Train the dual-encoder model (FGS1 encoder + AIRS encoder + heteroscedastic decoder).
     """
     events_path: Path = ctx.obj["events_path"]
+    manifest_path: Path = ctx.obj["manifest_path"]
     try:
         if use_dvc:
             _run_dvc("train", dry_run=dry_run, print_cmd=dvc_print_cmd)
@@ -561,6 +557,8 @@ def train_run(
 
         cfg = _merge_overrides(_load_config_any(config), set)
         cfg_hash = _hash_config_dict(cfg)
+        write_run_manifest(manifest_path, extra={"stage": "train", "cfg_hash": cfg_hash})
+
         _write_event(events_path, "train:start", "begin", cfg_hash=cfg_hash)
 
         if dry_run:
@@ -568,7 +566,7 @@ def train_run(
             return
 
         ckpt_path, metrics = train_from_config(cfg)
-        # Pretty summary
+
         logger.info("===== Training Summary =====")
         if ckpt_path:
             logger.info("Best/Last checkpoint: %s", ckpt_path)
@@ -610,9 +608,10 @@ def predict_run(
     Predict spectral μ/σ per bin (283 bins per id) for submission.
     """
     events_path: Path = ctx.obj["events_path"]
+    manifest_path: Path = ctx.obj["manifest_path"]
     try:
         _ensure_exists(ckpt, "ckpt")
-        ensure_dir(out_csv)
+        _ensure_file_parent(out_csv)
 
         if use_dvc:
             _run_dvc("predict", dry_run=dry_run, print_cmd=dvc_print_cmd)
@@ -622,13 +621,14 @@ def predict_run(
 
         cfg = _merge_overrides(_load_config_any(config), set)
         cfg_hash = _hash_config_dict(cfg)
+        write_run_manifest(manifest_path, extra={"stage": "predict", "cfg_hash": cfg_hash, "ckpt": str(ckpt)})
+
         _write_event(events_path, "predict:start", "begin", cfg_hash=cfg_hash, ckpt=str(ckpt))
 
         if dry_run:
             _ok(f"DRY-RUN: would run inference and write → {out_csv}")
             return
 
-        # Delegate to your inference
         # from spectramind.inference.predict import run as impl
         # impl(ckpt=ckpt, data_dir=data_dir, out_csv=out_csv, cfg=cfg)
         _warn("Using placeholder predictor — wire spectramind.inference.predict.run(...)")
@@ -662,9 +662,11 @@ def diagnose_run(
     Run metrics & sanity checks (GLL, residuals, coverage, smoothness) and emit JSON summary.
     """
     events_path: Path = ctx.obj["events_path"]
+    manifest_path: Path = ctx.obj["manifest_path"]
     try:
         _ensure_exists(preds, "preds")
         ensure_dir(out_dir)
+        write_run_manifest(manifest_path, extra={"stage": "diagnose", "preds": str(preds)})
 
         if use_dvc:
             _run_dvc("diagnose", dry_run=dry_run, print_cmd=dvc_print_cmd)
@@ -676,7 +678,6 @@ def diagnose_run(
             _ok(f"DRY-RUN: would call spectramind.diagnostics.run_diagnostics(...) → {out_dir}")
             return
 
-        # Delegate to diagnostics module (added in src/spectramind/diagnostics/__init__.py)
         try:
             from spectramind.diagnostics import run_diagnostics
         except Exception as e:
@@ -706,11 +707,12 @@ def diagnose_report(
     Build an offline HTML diagnostics dashboard with calibration & residuals plots.
     """
     try:
-        from spectramind.reports import generate_report  # local import to keep CLI slim
+        from spectramind.reports import generate_report
     except Exception as e:
         _fail(f"reports module not available: {e}")
 
     try:
+        _ensure_file_parent(out)
         out_path = generate_report(
             pred_path=pred,
             out_html=out,
@@ -748,9 +750,10 @@ def submit_package(
     """
     try:
         _ensure_exists(preds, "preds")
+        _ensure_file_parent(out_zip)
+
         if schema:
             _ensure_exists(schema, "schema")
-            # Optional validation via reports helpers (best-effort)
             try:
                 from spectramind.reports import Predictions, _validate_submission_schema, _read_csv
                 df = _read_csv(preds)
@@ -765,13 +768,9 @@ def submit_package(
             except Exception as e:
                 _warn(f"Schema validation skipped: {e}")
 
-        ensure_dir(out_zip)
         import zipfile
         with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # Required predictions
             zf.write(preds, arcname=preds.name)
-
-            # MANIFEST
             manifest = {
                 "name": name,
                 "generated_by": "spectramind submit package",
@@ -780,8 +779,6 @@ def submit_package(
                 "predictions_sha256": _sha256_file(preds),
             }
             zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
-
-            # Extras
             for ef in extra_file:
                 if Path(ef).exists():
                     zf.write(ef, arcname=Path(ef).name)
@@ -807,7 +804,7 @@ def submit_validate(
     Validate a submission CSV against schema + SpectraMind semantic checks.
 
     Supports:
-      1) Narrow: columns ['id', 'mu', 'sigma'] where mu/sigma are JSON arrays (or Python lists).
+      1) Narrow: columns ['id', 'mu', 'sigma'] where mu/sigma are JSON arrays.
       2) Wide:   columns ['id'] + mu_000..mu_{n_bins-1} + sigma_000..sigma_{n_bins-1}
     """
     try:
@@ -825,7 +822,7 @@ def submit_validate(
         }
 
         if json_out is not None:
-            json_out.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_file_parent(json_out)
             json_out.write_text(json.dumps({**report, "errors": res.errors}, indent=2), encoding="utf-8")
 
         if res.ok:
