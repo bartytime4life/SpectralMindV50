@@ -1,4 +1,3 @@
-# src/spectramind/pipeline/diagnostics.py
 from __future__ import annotations
 
 """
@@ -10,6 +9,7 @@ Key capabilities
 • Hydra config composition with robust defaults
 • Kaggle/CI guardrails (workers, determinism, low-mem)
 • DVC-/CI-friendly report root planning
+• Deterministic seeding (numpy/torch) from cfg.runtime.seed
 • Config snapshot + artifact manifest + SHA256 digests
 • Optional JSONL event logging (start/end) and run manifest
 
@@ -18,6 +18,7 @@ Notes
 • CLI stays thin; this module holds orchestration/business logic.
 • The actual diagnostics/report generation is delegated to
   `spectramind.diagnostics.report.generate(cfg)`.
+• Returns a structured payload suitable for pipeline chaining.
 """
 
 import hashlib
@@ -48,7 +49,6 @@ __all__ = ["run"]
 # Data model
 # ======================================================================================
 
-
 @dataclass(frozen=True, slots=True)
 class DiagPayload:
     """Strongly-typed diagnostics invocation payload."""
@@ -64,7 +64,6 @@ class DiagPayload:
 # Public API
 # ======================================================================================
 
-
 def run(
     *,
     config_name: str = "diagnose",
@@ -73,7 +72,7 @@ def run(
     strict: bool = True,
     quiet: bool = False,
     env: Dict[str, Any] | None = None,
-) -> None:
+) -> Dict[str, Any]:
     """
     Diagnostics runner: metrics/plots/HTML report (FFT/UMAP/SHAP, etc.)
 
@@ -83,10 +82,24 @@ def run(
     • Plan a DVC-friendly output structure
     • Dispatch to internal reporting orchestrator
     • Verify outputs and persist a manifest + config snapshots
+
+    Returns
+    -------
+    dict with shape:
+      {
+        "ok": True,
+        "run_id": str,
+        "report_dir": str,
+        "artifacts": {
+          "html_reports": [paths...],
+          "plots": [paths...],
+          "summaries": [paths...],
+        }
+      }
     """
     payload = DiagPayload(
         config_name=config_name,
-        overrides=list(overrides or []),
+        overrides=[str(x).strip() for x in (overrides or []) if str(x).strip()],
         report_dir=str(report_dir) if report_dir is not None else None,
         strict=strict,
         quiet=quiet,
@@ -103,6 +116,9 @@ def run(
     # detect env if not provided & apply guardrails
     _auto_env_flags(payload.env)
     _apply_guardrails(cfg, payload.env)
+
+    # deterministic seeding
+    _seed_everything(int(cfg.runtime.seed))
 
     # normalize modules (accept comma-separated string or list[str])
     cfg.diagnostics.modules = _normalize_modules(cfg.diagnostics.modules)
@@ -127,6 +143,7 @@ def run(
                 "num_workers": int(cfg.diagnostics.num_workers),
                 "deterministic": bool(cfg.runtime.deterministic),
                 "low_mem_mode": bool(cfg.runtime.low_mem_mode),
+                "seed": int(cfg.runtime.seed),
             },
         )
 
@@ -179,6 +196,7 @@ def run(
                 "modules": list(cfg.diagnostics.modules),
                 "outputs": outputs,
                 "env": payload.env,
+                "seed": int(cfg.runtime.seed),
             },
         )
         save_manifest(manifest, report_root / "manifest.json")
@@ -187,11 +205,17 @@ def run(
         evt_logger.info("diagnostics/end", data={"outputs": outputs})
         evt_logger.close()
 
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "report_dir": str(report_root),
+        "artifacts": outputs,
+    }
+
 
 # ======================================================================================
 # Hydra / Defaults / Guardrails
 # ======================================================================================
-
 
 def _compose_hydra_config(repo_root: Path, payload: DiagPayload) -> DictConfig:
     """Compose Hydra config from repo `configs/` with robust defaults + strict mode."""
@@ -274,10 +298,27 @@ def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
         cfg.runtime.low_mem_mode = True
 
 
+def _seed_everything(seed: int) -> None:
+    """Best-effort deterministic seeding (numpy, torch if present)."""
+    try:
+        import numpy as _np
+        _np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch as _torch  # pragma: no cover
+        _torch.manual_seed(seed)
+        _torch.cuda.manual_seed_all(seed)
+        _torch.backends.cudnn.deterministic = True
+        _torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
 # ======================================================================================
 # Planning, Snapshots, Discovery, Manifest
 # ======================================================================================
-
 
 def _prepare_report_root(repo_root: Path, cfg: DictConfig) -> Path:
     """Create report root under repo root (DVC-friendly); return absolute path."""
@@ -418,7 +459,6 @@ def _write_diagnostics_manifest(report_root: Path, cfg: DictConfig, outputs: Dic
 # Common helpers
 # ======================================================================================
 
-
 def _nearest_git_root(path: Path) -> Path | None:
     """Return nearest parent that contains `.git`, else None."""
     for p in [path, *path.parents]:
@@ -439,7 +479,6 @@ def _find_repo_root() -> Path:
     here = Path(__file__).resolve()
     for p in [here, *here.parents]:
         if (p / "pyproject.toml").exists() or (p / "setup.cfg").exists() or (p / ".git").exists():
-            # If we’re sitting in .../src, prefer its parent as root (layout: root/src/...)
             if p.name == "src":
                 return p.parent
             return p
