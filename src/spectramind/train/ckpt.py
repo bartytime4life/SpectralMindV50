@@ -9,10 +9,11 @@
 # Design goals:
 #   • Guarded imports (module is import-safe without torch/lightning).
 #   • Works with PL Trainer when available, falls back to torch-only.
-#   • Repro-friendly: explicit map_location, strict toggle, ignore prefixes.
+#   • Repro-friendly: explicit map_location, strict toggle, ignore/include prefixes.
 #   • Robust "best" selection (mode=min|max) compatible with filename schema
 #     like:  epoch{epoch:03d}-{monitor:.5f}.ckpt  (our default).
 #   • Utilities to average (mean or EMA) multiple ckpts for inference stability.
+#   • Small, composable API for Kaggle/CI and local dev.
 # =============================================================================
 
 from __future__ import annotations
@@ -110,10 +111,9 @@ def _state_dict_from_checkpoint(ckpt: Mapping[str, Any]) -> Optional[Mapping[str
     if "state_dict" in ckpt and isinstance(ckpt["state_dict"], Mapping):
         return ckpt["state_dict"]
     # Plain state dict checkpoint (torch.save(model.state_dict()))
-    # must look "flat"
-    maybe = {k: v for k, v in ckpt.items() if isinstance(v, (list, tuple)) or hasattr(v, "size")}
-    # Heuristic: if lots of tensor-like keys present, treat as state_dict
-    if len(maybe) > 10:
+    maybe = {k: v for k, v in ckpt.items() if hasattr(v, "size") or hasattr(v, "shape")}
+    # Heuristic: if enough tensor-like keys present, treat as state_dict
+    if len(maybe) >= 10 or all(isinstance(v, (list, tuple)) is False for v in maybe.values()):
         return ckpt  # type: ignore[return-value]
     return None
 
@@ -140,6 +140,19 @@ def _filter_ignore_prefixes(
     return out
 
 
+def _filter_include_prefixes(
+    state: Mapping[str, Any],
+    include_prefixes: Optional[Sequence[str]],
+) -> Dict[str, Any]:
+    if not include_prefixes:
+        return dict(state)
+    out: Dict[str, Any] = {}
+    for k, v in state.items():
+        if any(k.startswith(pref) for pref in include_prefixes):
+            out[k] = v
+    return out
+
+
 # =============================================================================
 # Public: discovery (best/last)
 # =============================================================================
@@ -148,6 +161,14 @@ def find_all_checkpoints(ckpt_dir: Union[str, Path]) -> List[Path]:
     if not d.exists():
         return []
     return sorted([p for p in d.iterdir() if _is_ckpt(p)])
+
+
+def find_checkpoints_by_glob(ckpt_dir: Union[str, Path], pattern: str = "*.ckpt") -> List[Path]:
+    """Find checkpoints using a glob pattern (e.g., 'epoch*.ckpt' or '*-val_loss*.ckpt')."""
+    d = Path(ckpt_dir)
+    if not d.exists():
+        return []
+    return sorted([p for p in d.glob(pattern) if _is_ckpt(p)])
 
 
 def find_best_checkpoint(
@@ -215,6 +236,17 @@ def save_checkpoint(
     trainer.save_checkpoint(str(path), weights_only=weights_only)
 
 
+def save_state_dict(
+    state_dict: Mapping[str, Any],
+    path: Union[str, Path],
+) -> None:
+    """Save a raw state_dict (torch-only) to disk."""
+    _require_torch()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(dict(state_dict), str(path))
+
+
 def load_weights_into_model(
     model: Any,
     ckpt_path: Union[str, Path],
@@ -222,7 +254,9 @@ def load_weights_into_model(
     map_location: Any = None,
     strict: bool = False,
     ignore_prefixes: Optional[Sequence[str]] = None,
+    include_prefixes: Optional[Sequence[str]] = None,
     strip_module_prefix: bool = True,
+    report: bool = True,
 ) -> Dict[str, Any]:
     """
     Load (Lightning or raw) checkpoint weights into a torch.nn.Module.
@@ -233,10 +267,12 @@ def load_weights_into_model(
       map_location: map location (default: CPU)
       strict: pass-through to `load_state_dict`
       ignore_prefixes: skip any state_dict entries whose keys start with these prefixes
+      include_prefixes: if provided, only keep entries with these prefixes
       strip_module_prefix: remove 'module.' (DDP) prefix if present
+      report: print missing/unexpected keys to help debugging (rank-zero assumed)
 
     Returns:
-      The return value from `model.load_state_dict` (a `MissingKeys`/`UnexpectedKeys` structure for torch).
+      The return value from `model.load_state_dict` (Missing/Unexpected keys).
     """
     _require_torch()
     import torch.nn as nn  # local to avoid import at module import time
@@ -256,16 +292,37 @@ def load_weights_into_model(
             raise RuntimeError(f"Unrecognized checkpoint structure at {ckpt_path}.")
 
     # Optional DP unwrap
-    if strip_module_prefix:
-        # Only strip if many keys start with 'module.'
-        if any(k.startswith("module.") for k in state.keys()):
-            state = _strip_prefix(state, "module.")
+    if strip_module_prefix and any(k.startswith("module.") for k in state.keys()):
+        state = _strip_prefix(state, "module.")
 
-    # Optional ignore filters
+    # Optional include/ignore filters
+    state = _filter_include_prefixes(state, include_prefixes)
     state = _filter_ignore_prefixes(state, ignore_prefixes)
 
-    # Finally load
-    return model.load_state_dict(state, strict=strict)
+    result = model.load_state_dict(state, strict=strict)
+    if report and hasattr(result, "missing_keys") and hasattr(result, "unexpected_keys"):
+        missing = list(getattr(result, "missing_keys"))
+        unexpected = list(getattr(result, "unexpected_keys"))
+        if missing or unexpected:
+            print(f"[ckpt] load report for: {ckpt_path}")
+            if missing:
+                print(f"  - missing_keys ({len(missing)}): {missing[:8]}{' ...' if len(missing) > 8 else ''}")
+            if unexpected:
+                print(f"  - unexpected_keys ({len(unexpected)}): {unexpected[:8]}{' ...' if len(unexpected) > 8 else ''}")
+    return result  # type: ignore[return-value]
+
+
+def load_lightning_checkpoint(
+    ckpt_path: Union[str, Path],
+    *,
+    map_location: Any = None,
+) -> Dict[str, Any]:
+    """
+    Load a Lightning checkpoint (dict) safely with map_location.
+    Returns the full checkpoint mapping.
+    """
+    map_location = map_location or _cpu_map_location()
+    return _load_torch_file(Path(ckpt_path), map_location=map_location)
 
 
 def resume_trainer_if_available(
@@ -298,7 +355,6 @@ def resume_trainer_if_available(
         return None
 
     # Lightning 2.x accepts `ckpt_path` in Trainer.fit(...); here we store on trainer for later.
-    # Some users set `trainer.ckpt_path` manually; we mimic that behavior safely.
     try:
         setattr(trainer, "ckpt_path", str(ckpt_path))
     except Exception:
@@ -315,7 +371,8 @@ def average_checkpoints(
     out_path: Optional[Union[str, Path]] = None,
     map_location: Any = None,
     ema_beta: Optional[float] = None,
-    # If provided, (epoch, path) order matters for EMA; we sort by epoch ascending if detected.
+    cast_dtype: Optional[str] = None,        # e.g., "float32", "float16", "bfloat16"
+    device: Optional[str] = None,            # e.g., "cpu", "cuda"
 ) -> Dict[str, Any]:
     """
     Average multiple checkpoints' `state_dict` into a single weights dict.
@@ -330,6 +387,8 @@ def average_checkpoints(
       out_path: optional file to write the resulting raw `state_dict` via `torch.save`
       map_location: map location (default CPU)
       ema_beta: optional EMA factor in (0, 1). If None => mean.
+      cast_dtype: optionally cast resulting tensors to dtype (name string)
+      device: optionally move resulting state to device name
 
     Returns:
       The averaged `state_dict` (a dict of tensor weights).
@@ -403,6 +462,19 @@ def average_checkpoints(
                 out_state[k] = v.div(c)
             else:
                 out_state[k] = v / c  # type: ignore[operator]
+
+    # Optional dtype/device cast
+    if cast_dtype is not None:
+        to_dtype = getattr(torch, cast_dtype, None)
+        if to_dtype is None:
+            raise ValueError(f"Unknown cast_dtype: {cast_dtype}")
+        for k, v in out_state.items():
+            if hasattr(v, "to"):
+                out_state[k] = v.to(dtype=to_dtype)
+    if device is not None:
+        for k, v in out_state.items():
+            if hasattr(v, "to"):
+                out_state[k] = v.to(device=device)
 
     # Optional write
     if out_path is not None:
