@@ -23,7 +23,8 @@ try:
     rich_install(show_locals=False, suppress=["typer", "click"])
 except Exception:
     _HAS_RICH = False
-    def rprint(*args, **kwargs):  # noqa: D401
+
+    def rprint(*args, **kwargs):  # fallback
         print(*args, **kwargs)
 
 # Optional OmegaConf (Hydra-like) support
@@ -47,11 +48,12 @@ try:
 except Exception:
     pass
 
-from spectramind.utils.logging import get_logger
+# Public logger from package (matches upgraded __init__.py)
+from spectramind import get_logger
 from spectramind.utils.io import p, read_yaml, read_json, ensure_dir
 from spectramind.train.trainer import train_from_config
-from spectramind.submit.validate import validate_csv as _validate_submission_csv  # NEW
-from spectramind.utils.manifest import write_run_manifest  # NEW
+from spectramind.submit.validate import validate_csv as _validate_submission_csv
+from spectramind.utils.manifest import write_run_manifest
 
 __all__ = ["app", "main"]
 
@@ -69,7 +71,7 @@ app = typer.Typer(
 
 # Subapps
 calib_app = typer.Typer(help="Calibration (raw → calibrated cubes)")
-preproc_app = typer.Typer(help="Preprocess (calibrated → model-ready tensors)")  # NEW
+preproc_app = typer.Typer(help="Preprocess (calibrated → model-ready tensors)")
 train_app = typer.Typer(help="Model training")
 predict_app = typer.Typer(help="Prediction / inference")
 diagnose_app = typer.Typer(help="Diagnostics & reporting")
@@ -93,23 +95,33 @@ logger = get_logger(__name__)
 class SpectraMindError(RuntimeError):
     """Typed error for SpectraMind CLI failures."""
 
+
 def _is_ci_or_kaggle() -> bool:
-    return bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS")
-                or "KAGGLE_KERNEL_RUN_TYPE" in os.environ or Path("/kaggle").exists())
+    return bool(
+        os.environ.get("CI")
+        or os.environ.get("GITHUB_ACTIONS")
+        or "KAGGLE_KERNEL_RUN_TYPE" in os.environ
+        or Path("/kaggle").exists()
+    )
+
 
 def _ok(msg: str) -> None:
     rprint(f"[bold green]✓[/bold green] {msg}") if _HAS_RICH else typer.echo(msg)
 
+
 def _warn(msg: str) -> None:
     rprint(f"[yellow]warn:[/yellow] {msg}") if _HAS_RICH else typer.secho(f"warn: {msg}", fg=typer.colors.YELLOW)
+
 
 def _fail(msg: str, code: int = 1) -> None:
     rprint(f"[bold red]error:[/bold red] {msg}") if _HAS_RICH else typer.secho(f"error: {msg}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=code)
 
+
 def _ensure_exists(pth: Optional[Path], label: str) -> None:
     if pth is not None and not Path(pth).exists():
         raise SpectraMindError(f"{label} not found: {pth}")
+
 
 def _ensure_file_parent(path: Path) -> None:
     """Make sure parent directory exists for a file path."""
@@ -123,17 +135,19 @@ def _ensure_file_parent(path: Path) -> None:
 def _set_seeds(seed: Optional[int], *, deterministic_torch: bool = True) -> None:
     """
     Set global RNG seeds for Python, NumPy, and (optionally) PyTorch.
-
-    deterministic_torch also sets TF32 override and cuBLAS workspace to ensure parity.
     """
     if seed is None:
         return
 
     os.environ["PYTHONHASHSEED"] = str(seed)
-    # Deterministic cuBLAS matmul kernels
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    # Disable TF32 to align math paths across envs
     os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "0")
+
+    # keep BLAS noise down in CI unless user overrides
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
     random.seed(seed)
 
@@ -179,6 +193,7 @@ def _coerce_value(val: str) -> Any:
     except Exception:
         return v
 
+
 def _set_in(d: Dict[str, Any], dotted_key: str, value: Any) -> None:
     cur = d
     parts = dotted_key.split(".")
@@ -187,6 +202,7 @@ def _set_in(d: Dict[str, Any], dotted_key: str, value: Any) -> None:
             cur[k] = {}
         cur = cur[k]
     cur[parts[-1]] = value
+
 
 def _load_config_any(config: Optional[Path]) -> Dict[str, Any]:
     """Load YAML/JSON config; returns {} if config is None."""
@@ -204,6 +220,7 @@ def _load_config_any(config: Optional[Path]) -> Dict[str, Any]:
         return read_yaml(cfg_path)  # type: ignore[return-value]
     except Exception:
         return read_json(cfg_path)
+
 
 def _merge_overrides(base: Dict[str, Any], overrides: List[str]) -> Dict[str, Any]:
     """Apply CLI overrides. Uses OmegaConf if available; otherwise manual dot-key set."""
@@ -226,6 +243,7 @@ def _merge_overrides(base: Dict[str, Any], overrides: List[str]) -> Dict[str, An
         _set_in(result, key.strip(), _coerce_value(raw))
     return result
 
+
 def _hash_config_dict(d: Dict[str, Any]) -> str:
     enc = json.dumps(d, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(enc).hexdigest()
@@ -240,6 +258,7 @@ class Event:
     kind: str
     msg: str
     extra: Dict[str, Any]
+
 
 def _write_event(path: Path, kind: str, msg: str, **extra: Any) -> None:
     """Append a JSONL event record; creates parent dirs if needed."""
@@ -287,7 +306,7 @@ def _global(
     log_file: Optional[Path] = typer.Option(None, help="Optional log file to tee messages"),
     seed: Optional[int] = typer.Option(None, help="Deterministic seed for all stages"),
     events_path: Path = typer.Option(Path("artifacts/logs/events.jsonl"), help="JSONL event stream path"),
-    manifest_path: Path = typer.Option(Path("artifacts/run_manifest.jsonl"), help="Append run manifests here"),  # NEW
+    manifest_path: Path = typer.Option(Path("artifacts/run_manifest.jsonl"), help="Append run manifests here"),
 ) -> None:
     """
     Global flags for logging, determinism, event stream, and run manifest.
@@ -339,6 +358,7 @@ def _read_version() -> str:
             return "unknown"
     return "unknown"
 
+
 @sys_app.command("version")
 def sys_version() -> None:
     """Print CLI, package, and Python versions."""
@@ -350,6 +370,7 @@ def sys_version() -> None:
     }
     rprint(info) if _HAS_RICH else typer.echo(json.dumps(info, indent=2))
 
+
 @sys_app.command("env")
 def sys_env() -> None:
     """Print environment hints (CI/Kaggle)."""
@@ -359,6 +380,7 @@ def sys_env() -> None:
         "cwd": str(Path.cwd()),
     }
     rprint(info) if _HAS_RICH else typer.echo(json.dumps(info, indent=2))
+
 
 @sys_app.command("doctor")
 def sys_doctor() -> None:
@@ -380,6 +402,7 @@ def sys_doctor() -> None:
         results["dvc"] = False
     rprint(results) if _HAS_RICH else typer.echo(json.dumps(results, indent=2))
 
+
 @sys_app.command("print-config")
 def sys_print_config(
     config: Optional[Path] = typer.Option(None, help="Config (.yaml/.json)"),
@@ -392,6 +415,7 @@ def sys_print_config(
     else:
         typer.echo(json.dumps(cfg, indent=2))
 
+
 @sys_app.command("hash-config")
 def sys_hash_config(
     config: Optional[Path] = typer.Option(None, help="Config (.yaml/.json)"),
@@ -401,6 +425,7 @@ def sys_hash_config(
     cfg = _merge_overrides(_load_config_any(config), set)
     h = _hash_config_dict(cfg)
     typer.echo(h)
+
 
 @sys_app.command("seed")
 def sys_seed(
@@ -421,8 +446,10 @@ def sys_seed(
     """
     try:
         _set_seeds(value, deterministic_torch=deterministic_torch)
-        _ok(f"Global seed set to {value} "
-            f"({'deterministic torch' if deterministic_torch else 'non-deterministic torch'})")
+        _ok(
+            f"Global seed set to {value} "
+            f"({'deterministic torch' if deterministic_torch else 'non-deterministic torch'})"
+        )
     except Exception as e:
         _fail(f"Failed to set seed: {e}")
 
@@ -482,7 +509,7 @@ def calibrate_run(
         _fail(str(e))
 
 # ======================================================================================
-# preprocess (NEW)
+# preprocess
 # ======================================================================================
 
 @preproc_app.command("run")
@@ -648,7 +675,7 @@ def predict_run(
 # diagnose
 # ======================================================================================
 
-@diagnose_app.command("run")  # NEW
+@diagnose_app.command("run")
 def diagnose_run(
     ctx: typer.Context,
     preds: Path = typer.Argument(..., exists=True, help="Predictions CSV: id,bin,mu,sigma"),
@@ -693,36 +720,47 @@ def diagnose_run(
         _write_event(events_path, "diagnose:error", f"unhandled: {e}")
         _fail(f"Diagnostics failed: {e}")
 
+
 @diagnose_app.command("report")
 def diagnose_report(
-    pred: Path = typer.Argument(..., exists=True, help="Predictions CSV: id,bin,mu,sigma"),
-    out: Path = typer.Option(Path("artifacts/reports/diagnostics_dashboard.html"), help="Output HTML"),
-    targets: Optional[Path] = typer.Option(None, help="Optional targets CSV: id,bin,target"),
-    events: Optional[Path] = typer.Option(None, help="Optional JSONL events"),
-    schema: Optional[Path] = typer.Option(None, help="Optional submission schema (.json)"),
-    base: Optional[Path] = typer.Option(None, help="Optional baseline preds CSV for Inject-&-Recover"),
-    title: str = typer.Option("SpectraMind V50 — Diagnostics Dashboard", help="Report title"),
+    preds: Path = typer.Argument(..., exists=True, help="Predictions table (CSV/Parquet/JSON) with mu_*** and sigma_***"),
+    out: Path = typer.Option(Path("artifacts/reports/diagnostics_report.html"), help="Output HTML/MD report path"),
+    cfg: Optional[Path] = typer.Option(None, "--config", help="Optional Hydra-composed config YAML to embed"),
+    metrics: Optional[Path] = typer.Option(None, "--metrics", help="Optional JSON metrics file to embed"),
+    history: Optional[Path] = typer.Option(None, "--history", help="Optional training history table (CSV/Parquet/JSON)"),
+    digests: List[Path] = typer.Option([], "--digest", help="Extra files/dirs to hash & include in audit (repeatable)"),
+    title: str = typer.Option("SpectraMind V50 — Diagnostics Report", help="Report title override"),
 ) -> None:
     """
-    Build an offline HTML diagnostics dashboard with calibration & residuals plots.
+    Build an offline HTML diagnostics report (figures, tables, audit digests) using
+    spectramind.diagnostics.reports.generate_report (Jinja2 with Markdown fallback).
     """
     try:
-        from spectramind.reports import generate_report
+        from spectramind.diagnostics.reports import generate_report  # matches upgraded reports.py
     except Exception as e:
-        _fail(f"reports module not available: {e}")
+        _fail(f"diagnostics.reports module not available: {e}")
 
     try:
         _ensure_file_parent(out)
-        out_path = generate_report(
-            pred_path=pred,
-            out_html=out,
-            targets_path=targets,
-            events_path=events,
-            submission_schema_path=schema,
-            base_pred_path=base,
-            report_title=title,
+
+        # Use dirname of output as artifacts_dir; the generator writes report + manifest there.
+        artifacts_dir = out.parent
+        run_id = f"diag-{int(time.time())}"
+
+        # generate_report writes either HTML (preferred) or Markdown fallback based on deps
+        report_path = generate_report(
+            run_id=run_id,
+            artifacts_dir=artifacts_dir,
+            config_path=cfg,
+            metrics_json=metrics,
+            history_csv=history,
+            predictions_csv=preds,
+            extra_digest_paths=list(digests),
+            notes=title,
+            templates_dir=None,
+            filename=out.name,  # keep the passed filename (html or .md)
         )
-        _ok(f"Report written → {out_path}")
+        _ok(f"Report written → {report_path}")
     except Exception as e:
         _fail(f"diagnose report failed: {e}")
 
@@ -737,6 +775,7 @@ def _sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
 @submit_app.command("package")
 def submit_package(
     preds: Path = typer.Argument(..., exists=True, help="Predictions CSV to package"),
@@ -746,25 +785,29 @@ def submit_package(
     extra_file: List[Path] = typer.Option([], help="Additional files to include in the archive"),
 ) -> None:
     """
-    Package predictions (and extras) into a submission ZIP, with optional JSON schema validation.
+    Package predictions (and extras) into a submission ZIP, with optional schema validation.
     """
     try:
         _ensure_exists(preds, "preds")
         _ensure_file_parent(out_zip)
 
+        # Always run our validator first
+        res = _validate_submission_csv(csv_path=preds, n_bins=283, strict_ids=True, chunksize=None)
+        if not res.ok:
+            _warn(f"Validation failed: {len(res.errors)} errors (showing first 10):")
+            for e in res.errors[:10]:
+                typer.echo(f"- {e}")
+            _fail("Submission CSV is invalid.")
+
+        # If a JSON schema is provided and there's a schema validator available, run it too.
         if schema:
-            _ensure_exists(schema, "schema")
             try:
-                from spectramind.reports import Predictions, _validate_submission_schema, _read_csv
-                df = _read_csv(preds)
-                pred_obj = Predictions(df)
-                pred_obj.validate()
-                msg = _validate_submission_schema(pred_obj, schema)
-                if msg:
-                    if "failed" in msg.lower():
-                        _fail(msg)
-                    else:
-                        _warn(msg)
+                from spectramind.submit.validate import validate_against_schema as _schema_check  # type: ignore
+                sch_ok, sch_msg = _schema_check(preds, schema)
+                if not sch_ok:
+                    _fail(f"Schema validation failed: {sch_msg}")
+                elif sch_msg:
+                    _warn(sch_msg)
             except Exception as e:
                 _warn(f"Schema validation skipped: {e}")
 
@@ -791,7 +834,8 @@ def submit_package(
     except Exception as e:
         _fail(f"Packaging failed: {e}")
 
-@submit_app.command("validate")  # NEW
+
+@submit_app.command("validate")
 def submit_validate(
     csv: Path = typer.Argument(..., exists=True, help="Predictions CSV to validate"),
     n_bins: int = typer.Option(283, "--n-bins", help="Expected number of spectral bins per id"),
@@ -828,8 +872,10 @@ def submit_validate(
         if res.ok:
             _ok(f"Validation OK: {res.n_valid}/{res.n_rows} rows valid.")
         else:
-            _warn(f"Validation failed: {len(res.errors)} errors "
-                  f"(showing first {min(show, len(res.errors))}; use --show to adjust)")
+            _warn(
+                f"Validation failed: {len(res.errors)} errors "
+                f"(showing first {min(show, len(res.errors))}; use --show to adjust)"
+            )
             for e in res.errors[:show]:
                 typer.echo(f"- {e}")
             _fail("Submission CSV is invalid.")
@@ -844,6 +890,7 @@ def submit_validate(
 
 def main() -> None:
     app()
+
 
 if __name__ == "__main__":
     main()
