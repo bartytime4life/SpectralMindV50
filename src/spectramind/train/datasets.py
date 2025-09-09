@@ -1,4 +1,3 @@
-
 # src/spectramind/train/datasets.py
 # =============================================================================
 # SpectraMind V50 — Dataset Implementations (FGS1 + AIRS)
@@ -18,15 +17,20 @@
 #     "sigma": Tensor[283 or 284],
 #     "y": Tensor[283 or 284],
 #     # optional metadata:
-#     "id": str, "index": int, ...
+#     "id": str, "index": int, "path": str ...
 #   }
 #
 # Normalization / slicing / channel selection are supported via kwargs:
 #   normalize={"airs": {"mean": ..., "std": ...}, "fgs1": {...}}
 #   select={"airs_channels": [int, ...], "mu_bins": [int, ...], "sigma_bins": [int, ...]}
 #
-# NOTE: Prefer Hydra `_target_` instantiation in configs; these classes are designed
-#       to be passed to the ArielDataModule (or instantiated directly in configs).
+# Extras in this upgrade:
+#   • Optional "target_bincount" handling (e.g., force 283 bins by dropping bin-0 or selecting bins)
+#   • Robust CSV/TSV autodetection in IndexedNPZDataset
+#   • Optional ID extraction from NPZ metadata or filename stem
+#   • Safer dtype handling (float32 by default), contiguous tensors
+#   • Soft dependencies (h5py) are import-guarded
+#   • Clear, stable public API (see __all__)
 # =============================================================================
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 # Guarded Torch import (dataset API)
 try:  # pragma: no cover
@@ -59,7 +63,7 @@ def _require_torch() -> None:
         ) from _TORCH_IMPORT_ERROR
 
 
-def _to_tensor(x: Any, dtype: Optional[torch.dtype] = torch.float32) -> "torch.Tensor":
+def _to_tensor(x: Any, dtype: Optional["torch.dtype"] = torch.float32) -> "torch.Tensor":
     t = torch.as_tensor(x)
     if dtype is not None:
         t = t.to(dtype=dtype)
@@ -88,6 +92,7 @@ class np_load:
 def _maybe_select_1d(arr: "torch.Tensor", idxs: Optional[Sequence[int]]) -> "torch.Tensor":
     if idxs is None:
         return arr
+    # Make sure indices are on the same device and long dtype
     return arr.index_select(dim=-1, index=torch.as_tensor(list(idxs), dtype=torch.long, device=arr.device))
 
 
@@ -104,6 +109,13 @@ def _apply_norm(x: "torch.Tensor", mean: Optional[Union[float, Sequence[float]]]
     if std is not None:
         x = x / (std + 1e-8)
     return x
+
+
+def _autodelim_from_suffix(path: Path) -> str:
+    suf = path.suffix.lower()
+    if suf == ".tsv":
+        return "\t"
+    return ","
 
 
 # -----------------------------------------------------------------------------
@@ -129,6 +141,12 @@ class ArielPairDataset(Dataset):  # type: ignore
     Concrete subclasses must implement:
       - __len__(self) -> int
       - _load_raw(self, idx) -> Dict[str, Any]  # returns raw numpy-like arrays
+
+    Upgrade additions:
+      • target_bincount: if provided (e.g., 283), will force targets to that length by:
+          - using select.* if provided, else
+          - dropping first bin if length==284 (common FGS1+282) and drop_first_target_bin=True
+      • drop_first_target_bin: explicitly drop bin-0 from mu/sigma/y if shape matches expected+1
     """
     REQUIRED_INPUT_KEYS: Tuple[str, str] = ("airs", "fgs1")
 
@@ -138,6 +156,8 @@ class ArielPairDataset(Dataset):  # type: ignore
         select: Optional[SelectSpec] = None,
         require_targets: bool = True,
         to_float_dtype: "torch.dtype" = torch.float32,
+        target_bincount: Optional[int] = None,
+        drop_first_target_bin: bool = True,
     ) -> None:
         _require_torch()
         super().__init__()
@@ -145,6 +165,8 @@ class ArielPairDataset(Dataset):  # type: ignore
         self.select = select or SelectSpec()
         self.require_targets = require_targets
         self.to_float_dtype = to_float_dtype
+        self.target_bincount = target_bincount
+        self.drop_first_target_bin = bool(drop_first_target_bin)
 
     # Subclasses implement
     def __len__(self) -> int:  # pragma: no cover
@@ -152,6 +174,29 @@ class ArielPairDataset(Dataset):  # type: ignore
 
     def _load_raw(self, idx: int) -> Dict[str, Any]:  # pragma: no cover
         raise NotImplementedError
+
+    def _coerce_target_bins(self, x: "torch.Tensor") -> "torch.Tensor":
+        """
+        Ensure mu/sigma/y match target_bincount.
+        If selection masks are provided (select.*), they take precedence.
+        Otherwise, if drop_first_target_bin=True and x.shape[-1]==target_bincount+1, drop bin-0.
+        """
+        if self.target_bincount is None:
+            return x
+        if x.ndim == 0:
+            return x
+        bins = x.shape[-1]
+        # Already correct
+        if bins == self.target_bincount:
+            return x
+        # Length + 1 -> drop first if configured
+        if self.drop_first_target_bin and bins == self.target_bincount + 1:
+            return x[..., 1:]
+        # Otherwise, raise if mismatch cannot be reconciled here
+        raise ValueError(
+            f"Target vector has {bins} bins but target_bincount={self.target_bincount}; "
+            f"provide SelectSpec (mu_bins/sigma_bins) or set drop_first_target_bin appropriately."
+        )
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         raw = self._load_raw(idx)
@@ -167,20 +212,27 @@ class ArielPairDataset(Dataset):  # type: ignore
             if k in ("id", "path", "meta"):  # leave metadata as-is
                 sample[k] = v
                 continue
-            # auto dtype float for tensors; allow ints to stay ints for indices in meta
-            sample[k] = _to_tensor(v, dtype=self.to_float_dtype if k not in ("index",) else None)
+            # keep int dtype for 'index' if present
+            dtype = None if k in ("index",) else self.to_float_dtype
+            sample[k] = _to_tensor(v, dtype=dtype)
 
-        # Apply feature selection (channels / bins)
+        # Apply feature selection (channels / bins) on inputs
         if "airs" in sample and self.select.airs_channels is not None:
             sample["airs"] = _maybe_select_1d(sample["airs"], self.select.airs_channels)
 
-        if "mu" in sample and self.select.mu_bins is not None:
-            sample["mu"] = _maybe_select_1d(sample["mu"], self.select.mu_bins)
+        # Targets: selection or coerce length
+        for tkey, skey in (("mu", "mu_bins"), ("sigma", "sigma_bins")):
+            if tkey in sample:
+                spec_idxs = getattr(self.select, skey)
+                if spec_idxs is not None:
+                    sample[tkey] = _maybe_select_1d(sample[tkey], spec_idxs)
+                elif self.target_bincount is not None:
+                    sample[tkey] = self._coerce_target_bins(sample[tkey])
 
-        if "sigma" in sample and self.select.sigma_bins is not None:
-            sample["sigma"] = _maybe_select_1d(sample["sigma"], self.select.sigma_bins)
+        if "y" in sample and self.target_bincount is not None:
+            sample["y"] = self._coerce_target_bins(sample["y"])
 
-        # Apply normalization
+        # Apply normalization to inputs
         if "airs" in sample and "airs" in self.normalize:
             ns = self.normalize["airs"]
             sample["airs"] = _apply_norm(sample["airs"], ns.mean, ns.std)
@@ -223,8 +275,13 @@ class NPZDirectoryDataset(ArielPairDataset):
         to_float_dtype: "torch.dtype" = torch.float32,
         sort: bool = True,
         glob_pattern: str = "*.npz",
+        id_from: Optional[str] = "stem",   # 'stem' | 'npz_key:<key>' | None
+        target_bincount: Optional[int] = None,
+        drop_first_target_bin: bool = True,
     ) -> None:
-        super().__init__(normalize=normalize, select=select, require_targets=require_targets, to_float_dtype=to_float_dtype)
+        super().__init__(normalize=normalize, select=select, require_targets=require_targets,
+                         to_float_dtype=to_float_dtype, target_bincount=target_bincount,
+                         drop_first_target_bin=drop_first_target_bin)
         self.root = Path(root)
         if not self.root.exists():
             raise FileNotFoundError(f"NPZ root not found: {self.root}")
@@ -234,6 +291,7 @@ class NPZDirectoryDataset(ArielPairDataset):
         if not files:
             raise RuntimeError(f"No NPZ files found under {self.root} (pattern={glob_pattern})")
         self.files: List[Path] = files
+        self.id_from = id_from
 
     def __len__(self) -> int:
         return len(self.files)
@@ -251,9 +309,19 @@ class NPZDirectoryDataset(ArielPairDataset):
             for key in ("mu", "sigma", "y"):
                 if key in npz:
                     raw[key] = npz[key]
-            # metadata
+            # metadata id
             raw["path"] = str(path)
             raw["id"] = str(path.stem)
+            if self.id_from:
+                if self.id_from == "stem":
+                    raw["id"] = str(path.stem)
+                elif self.id_from.startswith("npz_key:"):
+                    k = self.id_from.split(":", 1)[1]
+                    if k in npz:
+                        try:
+                            raw["id"] = str(npz[k].item() if hasattr(npz[k], "item") else npz[k])
+                        except Exception:
+                            raw["id"] = str(path.stem)
         return raw
 
 
@@ -279,29 +347,30 @@ class IndexedNPZDataset(ArielPairDataset):
         select: Optional[SelectSpec] = None,
         require_targets: bool = True,
         to_float_dtype: "torch.dtype" = torch.float32,
+        target_bincount: Optional[int] = None,
+        drop_first_target_bin: bool = True,
     ) -> None:
-        super().__init__(normalize=normalize, select=select, require_targets=require_targets, to_float_dtype=to_float_dtype)
+        super().__init__(normalize=normalize, select=select, require_targets=require_targets,
+                         to_float_dtype=to_float_dtype, target_bincount=target_bincount,
+                         drop_first_target_bin=drop_first_target_bin)
         self.index_file = Path(index_file)
         if not self.index_file.exists():
             raise FileNotFoundError(f"Index file not found: {self.index_file}")
         self.base_dir = Path(base_dir) if base_dir is not None else None
 
         if delimiter is None:
-            if self.index_file.suffix.lower() in (".tsv",):
-                delimiter = "\t"
-            else:
-                delimiter = ","
+            delimiter = _autodelim_from_suffix(self.index_file)
 
         # parse index
         self.rows: List[Dict[str, str]] = []
         with self.index_file.open("r", encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter=delimiter) if has_header else csv.reader(f, delimiter=delimiter)
             if has_header:
-                for row in reader:  # type: ignore
+                reader = csv.DictReader(f, delimiter=delimiter)
+                for row in reader:
                     self.rows.append({k: (v or "").strip() for k, v in row.items()})
             else:
-                # manual field names
-                for r in reader:  # type: ignore
+                reader = csv.reader(f, delimiter=delimiter)
+                for r in reader:
                     # Expect: path[, id, mu_path, sigma_path, y_path]
                     row = {
                         "path": (r[0] if len(r) > 0 else "").strip(),
@@ -346,15 +415,15 @@ class IndexedNPZDataset(ArielPairDataset):
             p = row.get(col, "") if row else ""
             if p:
                 tpath = self._resolve(p)
+                if not tpath.exists():
+                    raise FileNotFoundError(f"Target file not found: {tpath}")
                 with np_load(tpath) as tnpz:
-                    if key not in tnpz:
-                        # If the separate file contains the array directly, look for "arr_0"
-                        if "arr_0" in tnpz:
-                            out[key] = tnpz["arr_0"]
-                        else:
-                            raise KeyError(f"{tpath} does not contain '{key}' or 'arr_0'")
-                    else:
+                    if key in tnpz:
                         out[key] = tnpz[key]
+                    elif "arr_0" in tnpz:
+                        out[key] = tnpz["arr_0"]
+                    else:
+                        raise KeyError(f"{tpath} does not contain '{key}' or 'arr_0'")
 
         out["id"] = (row.get("id") or npz_path.stem)
         out["path"] = str(npz_path)
@@ -388,8 +457,12 @@ class H5Dataset(ArielPairDataset):
         require_targets: bool = True,
         to_float_dtype: "torch.dtype" = torch.float32,
         group_prefix: str = "/samples",
+        target_bincount: Optional[int] = None,
+        drop_first_target_bin: bool = True,
     ) -> None:
-        super().__init__(normalize=normalize, select=select, require_targets=require_targets, to_float_dtype=to_float_dtype)
+        super().__init__(normalize=normalize, select=select, require_targets=require_targets,
+                         to_float_dtype=to_float_dtype, target_bincount=target_bincount,
+                         drop_first_target_bin=drop_first_target_bin)
         self.h5_path = Path(h5_path)
         if not self.h5_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {self.h5_path}")
