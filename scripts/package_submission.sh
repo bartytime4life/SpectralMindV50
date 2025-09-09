@@ -24,8 +24,9 @@
 #                            default: submission_<VERSION|nogit>_<YYYYmmdd_HHMMSS>
 #   -S, --skip-validate      Skip CSV validation checks
 #   -q, --quiet              Less verbose logging
+#       --dry-run            Show actions and exit (no writes/uploads)
 #       --auto-upload        Upload bundle via Kaggle CLI (requires -C)
-#   -C, --competition SLUG   Kaggle competition slug (e.g. neurips-2025-ariel-data-challenge)
+#   -C, --competition SLUG   Kaggle competition slug
 #   -m, --message MSG        Submission message (Kaggle upload)
 #       --retries N          Retries for Kaggle upload (default: 3)
 #       --backoff SEC        Initial backoff seconds (default: 2, doubles each retry)
@@ -42,6 +43,7 @@
 # -----------------------------------------------------------------------------
 
 set -Eeuo pipefail
+LC_ALL=C
 IFS=$'\n\t'
 
 # --- Defaults ----------------------------------------------------------------
@@ -51,6 +53,7 @@ OUTDIR=""
 BASENAME=""
 SKIP_VALIDATE="0"
 QUIET="0"
+DRY_RUN="0"
 AUTO_UPLOAD="0"
 KAGGLE_COMPETITION=""
 KAGGLE_MSG="SpectraMind V50 submission"
@@ -109,6 +112,7 @@ while [[ $# -gt 0 ]]; do
     -n|--name)          BASENAME="${2:-}"; shift 2 ;;
     -S|--skip-validate) SKIP_VALIDATE="1"; shift ;;
     -q|--quiet)         QUIET="1"; shift ;;
+        --dry-run)      DRY_RUN="1"; shift ;;
         --auto-upload)  AUTO_UPLOAD="1"; shift ;;
     -C|--competition)   KAGGLE_COMPETITION="${2:-}"; shift 2 ;;
     -m|--message)       KAGGLE_MSG="${2:-}"; shift 2 ;;
@@ -126,7 +130,7 @@ ENV_TYPE="$(detect_env)"
 if [[ -z "$OUTDIR" ]]; then
   OUTDIR="$([ "$ENV_TYPE" = "kaggle" ] && echo "$DEFAULT_OUTDIR_KAGGLE" || echo "$DEFAULT_OUTDIR_LOCAL")"
 fi
-mkdir -p "$OUTDIR" "$OUTDIR/logs"
+[[ "$DRY_RUN" = "1" ]] || mkdir -p "$OUTDIR" "$OUTDIR/logs"
 
 # --- Version/Git -------------------------------------------------------------
 git_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -142,13 +146,16 @@ fi
 
 # --- Locate / Produce submission.csv ----------------------------------------
 if [[ -z "$SUBMISSION_FILE" ]]; then
-  if has_cmd spectramind; then
-    log "Running submit stage with config: $CFG_NAME"
-    spectramind submit --config-name "$CFG_NAME"
+  log "No CSV provided; running submit stage with config: $CFG_NAME"
+  if [[ "$DRY_RUN" = "0" ]]; then
+    if has_cmd spectramind; then
+      spectramind submit --config-name "$CFG_NAME"
+    else
+      log "spectramind CLI not found; trying python -m spectramind submit"
+      python -m spectramind submit --config-name "$CFG_NAME"
+    fi
   else
-    # fallback to python -m for environments without CLI entrypoint
-    log "spectramind CLI not found; trying python -m spectramind submit"
-    python -m spectramind submit --config-name "$CFG_NAME"
+    log "[dry-run] would run: spectramind submit --config-name $CFG_NAME"
   fi
 
   CANDIDATES=(
@@ -173,21 +180,10 @@ log "Using submission CSV: $SUBMISSION_FILE"
 # --- Validation --------------------------------------------------------------
 EXPECTED_COLS=$((2 * N_BINS + 1))
 
-# Build exact expected header string
-build_expected_header() {
-  python - "$ID_COL" "$N_BINS" <<'PY'
-import sys
-id_col = sys.argv[1]; n=int(sys.argv[2])
-mu = [f"mu_{i:03d}" for i in range(n)]
-sg = [f"sigma_{i:03d}" for i in range(n)]
-print(",".join([id_col] + mu + sg))
-PY
-}
-
 validate_csv_streaming() {
   local path="$1"
   python - "$path" "$ID_COL" "$N_BINS" "$EXPECTED_COLS" "$ALLOW_MISSING_COLS" <<'PY'
-import csv, math, sys, hashlib, re
+import csv, sys, hashlib, re, math, platform
 from itertools import islice
 
 path, id_col = sys.argv[1], sys.argv[2]
@@ -195,9 +191,8 @@ n_bins = int(sys.argv[3]); expected_cols = int(sys.argv[4])
 allow_missing = int(sys.argv[5]) == 1
 
 def is_number(x:str)->bool:
-    if x == "" or x.lower() in {"nan", "+nan", "-nan", "inf", "+inf", "-inf"}:
+    if x == "" or x.lower() in {"nan","+nan","-nan","inf","+inf","-inf"}:
         return False
-    # simple numeric pattern (int/float/scientific)
     return bool(re.match(r'^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$', x))
 
 with open(path, newline='') as f:
@@ -205,12 +200,10 @@ with open(path, newline='') as f:
     header = next(r, None)
     if not header:
         print("ERR: CSV has no header", file=sys.stderr); sys.exit(2)
-    cols = len(header)
 
     # exact header check
     exp = [id_col] + [f"mu_{i:03d}" for i in range(n_bins)] + [f"sigma_{i:03d}" for i in range(n_bins)]
     if header != exp:
-        # if allowing missing, permit cases where trailing columns are absent, but order/prefix must match
         if allow_missing and header == exp[:len(header)]:
             pass
         else:
@@ -221,6 +214,7 @@ with open(path, newline='') as f:
                     break
             sys.exit(3)
 
+    cols = len(header)
     if cols != expected_cols and not (allow_missing and cols <= expected_cols):
         print(f"ERR: Unexpected column count: got {cols}, expected {expected_cols}", file=sys.stderr)
         sys.exit(4)
@@ -230,8 +224,6 @@ with open(path, newline='') as f:
     bad = None
     id_first = None
     id_last = None
-
-    # Cheap rolling checksum for sampling integrity
     sample_hash = hashlib.sha256()
     for row in r:
         total += 1
@@ -239,12 +231,10 @@ with open(path, newline='') as f:
             bad = f"Row {total+1} fields={len(row)} expected={cols}"; break
         if id_first is None: id_first = row[0]
         id_last = row[0]
-        # numeric checks for mu/sigma columns
         for v in row[1:cols]:
             if not is_number(v):
                 bad = f"Row {total+1} has non-numeric/invalid value '{v}'"; break
         if bad: break
-        # sample checksum (first 10 rows)
         if total <= 10:
             sample_hash.update(",".join(row).encode())
 
@@ -263,18 +253,22 @@ PY
 
 if [[ "$SKIP_VALIDATE" = "0" ]]; then
   log "Validating CSV (streaming full-file checks)…"
-  OUT="$(validate_csv_streaming "$SUBMISSION_FILE" 2>&1 || true)"
-  if ! grep -q "^OK$" <<<"$OUT"; then
-    printf "%s\n" "$OUT" >&2
-    die "CSV validation failed."
+  if [[ "$DRY_RUN" = "1" ]]; then
+    log "[dry-run] would validate: $SUBMISSION_FILE"
+    COLS="$EXPECTED_COLS"; ROWS="-1"; ID_FIRST=""; ID_LAST=""; SAMPLE_SHA256=""
+  else
+    OUT="$(validate_csv_streaming "$SUBMISSION_FILE" 2>&1 || true)"
+    if ! grep -q "^OK$" <<<"$OUT"; then
+      printf "%s\n" "$OUT" >&2
+      die "CSV validation failed."
+    fi
+    COLS="$(awk -F: '/^COLS:/{print $2}' <<<"$OUT")"
+    ROWS="$(awk -F: '/^ROWS:/{print $2}' <<<"$OUT")"
+    ID_FIRST="$(awk -F: '/^ID_FIRST:/{print $2}' <<<"$OUT")"
+    ID_LAST="$(awk -F: '/^ID_LAST:/{print $2}' <<<"$OUT")"
+    SAMPLE_SHA256="$(awk -F: '/^SAMPLE_SHA256:/{print $2}' <<<"$OUT")"
+    log "Validation passed: cols=$COLS rows=$ROWS first_id=$ID_FIRST last_id=$ID_LAST"
   fi
-  # capture stats
-  COLS="$(awk -F: '/^COLS:/{print $2}' <<<"$OUT")"
-  ROWS="$(awk -F: '/^ROWS:/{print $2}' <<<"$OUT")"
-  ID_FIRST="$(awk -F: '/^ID_FIRST:/{print $2}' <<<"$OUT")"
-  ID_LAST="$(awk -F: '/^ID_LAST:/{print $2}' <<<"$OUT")"
-  SAMPLE_SHA256="$(awk -F: '/^SAMPLE_SHA256:/{print $2}' <<<"$OUT")"
-  log "Validation passed: cols=$COLS rows=$ROWS first_id=$ID_FIRST last_id=$ID_LAST"
 else
   log "Skipping CSV validation as requested"
   COLS="$EXPECTED_COLS"; ROWS="-1"; ID_FIRST=""; ID_LAST=""; SAMPLE_SHA256=""
@@ -283,57 +277,80 @@ fi
 # --- Manifest ----------------------------------------------------------------
 manifest_path="$OUTDIR/${BASENAME}_manifest.json"
 csv_sha256="$(sha256_file "$SUBMISSION_FILE")"
-csv_size="$(stat_size "$SUBMISSION_FILE" || echo 0)"
+csv_size="$([[ -f "$SUBMISSION_FILE" ]] && stat_size "$SUBMISSION_FILE" || echo 0)"
 
 # header hash (exact bytes of first line)
-HEADER_SHA256="$(head -n1 "$SUBMISSION_FILE" | { sha256_file /dev/stdin || cat; } 2>/dev/null || echo "unavailable")"
+HEADER_SHA256="$(
+  if [[ "$DRY_RUN" = "1" ]]; then echo "dry-run";
+  else head -n1 "$SUBMISSION_FILE" | { sha256_file /dev/stdin || echo "unavailable"; }; fi
+)"
 
 log "Writing manifest → $manifest_path"
-cat > "$manifest_path" <<EOF
-{
-  "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "environment": "$ENV_TYPE",
-  "submit_config": "$CFG_NAME",
+if [[ "$DRY_RUN" = "1" ]]; then
+  log "[dry-run] would write manifest: $manifest_path"
+else
+  python - "$manifest_path" <<PY
+import json, os, platform, sys, subprocess, datetime
+out = sys.argv[1]
+def shell(cmd):
+    try: return subprocess.check_output(cmd, shell=True, text=True).strip()
+    except Exception: return ""
+data = {
+  "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+  "environment": "${ENV_TYPE}",
+  "submit_config": "${CFG_NAME}",
   "schema": {
-    "id_column": "$ID_COL",
-    "n_bins": $N_BINS,
-    "expected_columns": $EXPECTED_COLS,
-    "allow_missing_cols": $ALLOW_MISSING_COLS
+    "id_column": "${ID_COL}",
+    "n_bins": ${N_BINS},
+    "expected_columns": ${EXPECTED_COLS},
+    "allow_missing_cols": ${ALLOW_MISSING_COLS}
   },
   "csv": {
     "path": "$(realpath_f "$SUBMISSION_FILE")",
-    "sha256": "$csv_sha256",
-    "size_bytes": $csv_size,
-    "header_sha256": "$HEADER_SHA256",
-    "validated": $(( SKIP_VALIDATE == 0 ? 1 : 0 )),
-    "cols": $COLS,
-    "rows": $ROWS,
-    "id_first": "$(printf "%s" "$ID_FIRST")",
-    "id_last": "$(printf "%s" "$ID_LAST")",
-    "sample_sha256": "$(printf "%s" "$SAMPLE_SHA256")"
+    "sha256": "${csv_sha256}",
+    "size_bytes": ${csv_size},
+    "header_sha256": "${HEADER_SHA256}",
+    "validated": ${SKIP_VALIDATE:+0}${SKIP_VALIDATE:+"0"},
+    "cols": ${COLS},
+    "rows": ${ROWS},
+    "id_first": "${ID_FIRST}",
+    "id_last": "${ID_LAST}",
+    "sample_sha256": "${SAMPLE_SHA256}"
   },
   "git": {
     "root": "$(realpath_f "$git_root")",
-    "revision": "$git_rev",
-    "state": "$git_dirty"
+    "revision": "${git_rev}",
+    "state": "${git_dirty}"
   },
   "version_file": {
     "path": "$(realpath_f "$version_file")",
-    "value": "$repo_version"
+    "value": "${repo_version}"
+  },
+  "runtime": {
+    "python_version": platform.python_version(),
+    "implementation": platform.python_implementation(),
+    "platform": platform.platform(),
+    "exe": sys.executable
   }
 }
-EOF
+with open(out, "w") as f: json.dump(data, f, indent=2, sort_keys=False)
+print(out)
+PY
+fi
 
 # --- Zip ---------------------------------------------------------------------
 zip_path="$OUTDIR/${BASENAME}.zip"
 log "Packaging bundle → $zip_path"
 
-if has_cmd zip; then
-  ( cd "$(dirname "$SUBMISSION_FILE")" && zip -q -j "$zip_path" "$(basename "$SUBMISSION_FILE")" )
-  ( cd "$(dirname "$manifest_path")"   && zip -q -j "$zip_path" "$(basename "$manifest_path")" )
+if [[ "$DRY_RUN" = "1" ]]; then
+  log "[dry-run] would create zip with: $(basename "$SUBMISSION_FILE") and $(basename "$manifest_path")"
 else
-  warn "zip not found; using Python zipfile fallback."
-  python - "$zip_path" "$SUBMISSION_FILE" "$manifest_path" <<'PYZ'
+  if has_cmd zip; then
+    ( cd "$(dirname "$SUBMISSION_FILE")" && zip -q -j "$zip_path" "$(basename "$SUBMISSION_FILE")" )
+    ( cd "$(dirname "$manifest_path")"   && zip -q -j "$zip_path" "$(basename "$manifest_path")" )
+  else
+    warn "zip not found; using Python zipfile fallback."
+    python - "$zip_path" "$SUBMISSION_FILE" "$manifest_path" <<'PYZ'
 import sys, zipfile, os
 zip_path, sub_csv, manifest = sys.argv[1], sys.argv[2], sys.argv[3]
 with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
@@ -341,15 +358,20 @@ with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
     z.write(manifest, arcname=os.path.basename(manifest))
 print("Wrote", zip_path)
 PYZ
+  fi
 fi
 
-ZIP_SHA256="$(sha256_file "$zip_path")"
-ZIP_SIZE="$(stat_size "$zip_path" || echo 0)"
+ZIP_SHA256="$([[ -f "$zip_path" ]] && sha256_file "$zip_path" || echo "dry-run")"
+ZIP_SIZE="$([[ -f "$zip_path" ]] && stat_size "$zip_path" || echo 0)"
 log "Submission bundle ready ✅"
 log "ZIP: $zip_path"
 log "ZIP sha256: $ZIP_SHA256  size: ${ZIP_SIZE} bytes"
 
 # --- Optional Kaggle Upload --------------------------------------------------
+if [[ "$AUTO_UPLOAD" = "1" ]]; then
+  [[ "$DRY_RUN" = "1" ]] && { log "[dry-run] would upload to Kaggle"; AUTO_UPLOAD="0"; }
+fi
+
 if [[ "$AUTO_UPLOAD" = "1" ]]; then
   [[ -n "$KAGGLE_COMPETITION" ]] || die "--auto-upload requires --competition <slug>"
   has_cmd kaggle || die "Kaggle CLI not found."
@@ -379,5 +401,8 @@ if [[ "$AUTO_UPLOAD" = "1" ]]; then
   echo "  • Upload      : DONE (see Kaggle for result)"
 else
   echo "  • Upload      : SKIPPED (use --auto-upload)"
+fi
+if [[ "$DRY_RUN" = "1" ]]; then
+  echo "  • Dry-run     : YES (no files written)"
 fi
 echo "──────────────────────────────────────────────────────────────────────────────"
