@@ -1,7 +1,6 @@
 # -----------------------------------------------------------------------------
 # SpectraMind V50 — Mission-grade Makefile (Upgraded)
 # -----------------------------------------------------------------------------
-# POSIX shell with strict mode
 SHELL := /usr/bin/env bash
 .ONESHELL:
 .SHELLFLAGS := -Eeuo pipefail -c
@@ -47,14 +46,14 @@ SUBMISSION_SCHEMA ?= schemas/submission.schema.json
 # Docker
 IMAGE_NAME     ?= spectramind-v50
 IMAGE_TAG      ?= local
-INSTALL_EXTRAS ?= gpu,dev   # must match pyproject extras
+INSTALL_EXTRAS ?= gpu,dev
 DOCKER_BUILDKIT?= 1
 GPU_FLAG       ?= $(shell (command -v nvidia-smi >/dev/null 2>&1 && echo "--gpus all") || echo "")
 
-# Pipeline config (for scripts/run_pipeline.sh)
+# Pipeline config for scripts/run_pipeline.sh
 CFG ?= train
 
-# Docs/diagrams
+# Diagrams
 DIAGRAMS_THEME ?= neutral
 DIAGRAMS_CONC  ?= 8
 
@@ -68,10 +67,11 @@ export PYTHONHASHSEED = 0
 .PHONY: help about env ensure-venv ensure-tools ensure-precommit dev precommit \
         lint fmt-check format type test test-fast coverage check \
         docs docs-serve \
-        train calibrate predict submit pipeline \
+        calibrate preprocess train predict diagnose submit pipeline \
         dvc-setup dvc-repro dvc-push dvc-pull \
+        doctor cuda-parity \
         sbom pip-audit trivy scan licenses schema-check yaml-lint md-lint nb-clean \
-        kaggle-package kaggle-verify kaggle-clean kaggle \
+        kaggle-boot kaggle-package kaggle-verify kaggle-clean kaggle \
         docker-build docker-build-cpu docker-run docker-shell \
         version tag push-tag release bump ensure-clean \
         diagrams diagrams-dark diagrams-clean clean distclean ci
@@ -92,22 +92,22 @@ about: ## Show environment diagnostics
 # -----------------------------------------------------------------------------
 # Environment bootstrapping
 # -----------------------------------------------------------------------------
-env: ensure-venv ensure-tools ensure-precommit ## Create .venv and install dev tools (fast if uv available)
+env: ensure-venv ensure-tools ensure-precommit ## Create .venv and install dev tools
 
 ensure-venv: ## Create virtualenv if missing
 	@if [ ! -d "$(VENV)" ]; then \
 	  echo ">> Creating venv: $(VENV)"; \
-	  $(PY) -m venv $(VENV); \
+	  $(PY) -m venv "$(VENV)"; \
 	fi
 
 ensure-tools: ensure-venv ## Install dev dependencies and tools (prefers uv, falls back to pip)
 	@if command -v uv >/dev/null 2>&1; then \
 	  echo ">> Using uv for fast installs"; \
 	  uv pip install --system --python $(PYTHON) -U pip wheel || true; \
-	  uv pip install --system --python $(PYTHON) -e . -r requirements-dev.txt || true; \
+	  uv pip install --system --python $(PYTHON) -r requirements-dev.txt -e . || true; \
 	else \
 	  $(PIP) install -U pip wheel || true; \
-	  $(PIP) install -e . -r requirements-dev.txt || true; \
+	  $(PIP) install -r requirements-dev.txt -e . || true; \
 	fi
 	@if [ -f requirements-kaggle.txt ]; then $(PIP) install -r requirements-kaggle.txt || true; fi
 	@echo "$(C_OK)Env ready$(C_RESET)"
@@ -163,19 +163,25 @@ docs-serve: diagrams ## Serve docs locally (MkDocs @ http://0.0.0.0:8000)
 	@if [ -x "$(VENV_BIN)/mkdocs" ]; then $(VENV_BIN)/mkdocs serve -a 0.0.0.0:8000; else echo "::warning::mkdocs not found"; fi
 
 # -----------------------------------------------------------------------------
-# Pipeline (CLI-first via Hydra)
+# Pipeline (CLI-first)
 # -----------------------------------------------------------------------------
+calibrate: ## Calibrate sensors/data → data/interim/calibrated
+	$(PYTHON) -m $(PKG) calibrate run
+
+preprocess: ## Preprocess calibrated → data/processed/tensors_*
+	$(PYTHON) -m $(PKG) preprocess run
+
 train: ## Train model
-	$(PYTHON) -m $(PKG) train --config-name train
+	$(PYTHON) -m $(PKG) train run
 
-calibrate: ## Calibrate sensors/data
-	$(PYTHON) -m $(PKG) calibrate --config-name train
+predict: ## Run predictions → artifacts/predictions/preds.csv
+	$(PYTHON) -m $(PKG) predict run
 
-predict: ## Run predictions
-	$(PYTHON) -m $(PKG) predict --config-name predict
+diagnose: ## Diagnostics & HTML report
+	$(PYTHON) -m $(PKG) diagnose run
 
-submit: ## Build submission artifacts (CLI submit command)
-	$(PYTHON) -m $(PKG) submit --config-name submit
+submit: ## Build submission artifacts (ZIP)
+	$(PYTHON) -m $(PKG) submit package
 
 pipeline: ## Run calibrate → train → predict → submit via scripts/run_pipeline.sh (CFG?=train)
 	@if [ -x scripts/run_pipeline.sh ]; then \
@@ -198,8 +204,12 @@ dvc-setup: ## Initialize DVC and default remote
 	  echo "::warning::dvc not installed"; \
 	fi
 
-dvc-repro: ## Reproduce DVC pipeline
-	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc repro; else echo "::warning::dvc not installed"; fi
+dvc-repro: ## Reproduce DVC pipeline (no-tty in CI/Kaggle)
+	@if [ -x "$(VENV_BIN)/dvc" ]; then \
+	  EXTRA=""; \
+	  if [ -n "$${CI:-}" ] || [ -n "$${GITHUB_ACTIONS:-}" ] || [ -d /kaggle ]; then EXTRA="--no-tty"; fi; \
+	  $(VENV_BIN)/dvc repro $$EXTRA || exit 1; \
+	else echo "::warning::dvc not installed"; fi
 
 dvc-push: ## Push DVC-tracked data to remote
 	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc push; else echo "::warning::dvc not installed"; fi
@@ -208,35 +218,41 @@ dvc-pull: ## Pull DVC-tracked data from remote
 	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc pull; else echo "::warning::dvc not installed"; fi
 
 # -----------------------------------------------------------------------------
+# System / parity checks
+# -----------------------------------------------------------------------------
+doctor: ## Quick dependency checks (IO, DVC, OmegaConf)
+	$(PYTHON) -m $(PKG) sys doctor
+
+cuda-parity: ## Enforce CUDA parity with Kaggle (fails on mismatch)
+	@if [ -x "$(PYTHON)" ]; then \
+	  $(PYTHON) -m $(PKG) sys doctor || true; \
+	  $(PYTHON) -m $(PKG) doctor --cuda --fail-on-mismatch; \
+	else echo "::error::Python venv missing. Run 'make env'."; exit 1; fi
+
+# -----------------------------------------------------------------------------
 # Security / Supply Chain
 # -----------------------------------------------------------------------------
 licenses: ## Export 3rd-party license manifest (pip-licenses)
-	@mkdir -p $(ARTIFACTS_DIR)
+	@mkdir -p "$(ARTIFACTS_DIR)"
 	@if [ -x "$(VENV_BIN)/pip-licenses" ]; then \
 	  $(VENV_BIN)/pip-licenses --format=json --with-authors --with-urls > $(ARTIFACTS_DIR)/licenses.json; \
 	  echo "::notice::Licenses -> $(ARTIFACTS_DIR)/licenses.json"; \
-	else \
-	  echo "::warning::pip-licenses not installed (add to requirements-dev.txt)"; \
-	fi
+	else echo "::warning::pip-licenses not installed (add to requirements-dev.txt)"; fi
 
 sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
-	mkdir -p $(ARTIFACTS_DIR)
+	mkdir -p "$(ARTIFACTS_DIR)"
 	if command -v syft >/dev/null 2>&1; then \
 	  syft packages dir:. -o cyclonedx-json > $(ARTIFACTS_DIR)/sbom.json; \
 	elif [ -x "$(VENV_BIN)/cyclonedx-bom" ]; then \
 	  $(VENV_BIN)/cyclonedx-bom -o $(ARTIFACTS_DIR)/sbom.json || true; \
-	else \
-	  echo "::warning::No SBOM tool available; skipping SBOM."; \
-	fi
+	else echo "::warning::No SBOM tool available; skipping SBOM."; fi
 	@echo "::notice::SBOM -> $(ARTIFACTS_DIR)/sbom.json"
 
 pip-audit: ## Audit Python deps (pip-audit)
 	@if [ -x "$(VENV_BIN)/pip-audit" ]; then \
 	  $(VENV_BIN)/pip-audit -r requirements-dev.txt || true; \
 	  if [ -f requirements-kaggle.txt ]; then $(VENV_BIN)/pip-audit -r requirements-kaggle.txt || true; fi; \
-	else \
-	  echo "::warning::pip-audit not installed"; \
-	fi
+	else echo "::warning::pip-audit not installed"; fi
 
 yaml-lint: ## Lint YAML (yamllint)
 	@if [ -x "$(VENV_BIN)/yamllint" ]; then $(VENV_BIN)/yamllint . || true; fi
@@ -246,8 +262,6 @@ md-lint: ## Lint Markdown (mdformat check)
 
 schema-check: ## Validate JSON files against schemas (check-jsonschema)
 	@if [ -x "$(VENV_BIN)/check-jsonschema" ]; then \
-	  find . -type f -name '*.json' -not -path './$(ARTIFACTS_DIR)/*' -print0 \
-	    | xargs -0 -I{} echo "{}" > /dev/null; \
 	  echo ">> Run schema checks where mappings exist (submission/events)"; \
 	  for j in $$(git ls-files '*.json'); do \
 	    case "$$j" in \
@@ -256,9 +270,7 @@ schema-check: ## Validate JSON files against schemas (check-jsonschema)
 	        "$(VENV_BIN)/check-jsonschema" --schemafile "$(SUBMISSION_SCHEMA)" "$$j" || true ;; \
 	    esac; \
 	  done; \
-	else \
-	  echo "::warning::check-jsonschema not installed"; \
-	fi
+	else echo "::warning::check-jsonschema not installed"; fi
 
 nb-clean: ## Strip outputs from notebooks (nbstripout)
 	@if [ -x "$(VENV_BIN)/nbstripout" ]; then \
@@ -271,13 +283,16 @@ trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	if command -v trivy >/dev/null 2>&1; then \
 	  trivy fs --exit-code 0 --severity HIGH,CRITICAL . || true; \
 	  trivy config --exit-code 0 . || true; \
-	else \
-	  echo "::warning::Trivy not installed; skipping scan."; \
-	fi
+	else echo "::warning::Trivy not installed; skipping scan."; fi
 
 # -----------------------------------------------------------------------------
-# Kaggle packaging (submission.zip -> artifacts/submission.zip)
+# Kaggle helper targets
 # -----------------------------------------------------------------------------
+kaggle-boot: ## Bootstrap Kaggle kernel with the pinned stack (bin/kaggle-boot.sh)
+	@if [ -x bin/kaggle-boot.sh ]; then \
+	  bash bin/kaggle-boot.sh --quiet || true; \
+	else echo "::warning::bin/kaggle-boot.sh not found"; fi
+
 kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
 	mkdir -p "$(SUBMISSION_DIR)"
 	if [ -x scripts/package_submission.sh ]; then \
@@ -287,7 +302,7 @@ kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
 	  echo ">> Fallback packaging: collecting outputs"; \
 	  set -Eeuo pipefail; \
 	  files=""; \
-	  for f in outputs/* predictions/*; do \
+	  for f in outputs/* predictions/* artifacts/predictions/*; do \
 	    case "$$f" in *.csv|*.parquet|*.json) [ -e "$$f" ] && files="$$files $$f" ;; esac; \
 	  done; \
 	  if [ -z "$$files" ]; then \
@@ -298,9 +313,7 @@ kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
 	fi
 	@if [ ! -f "$(SUBMISSION_ZIP)" ]; then \
 	  echo "::error::Missing bundle: $(SUBMISSION_ZIP)"; exit 1; \
-	else \
-	  echo "::notice::Kaggle bundle created: $(SUBMISSION_ZIP)"; \
-	fi
+	else echo "::notice::Kaggle bundle created: $(SUBMISSION_ZIP)"; fi
 
 kaggle-verify: ## Verify submission bundle integrity (schema if present)
 	@if [ ! -f "$(SUBMISSION_ZIP)" ]; then \
@@ -317,18 +330,14 @@ kaggle-verify: ## Verify submission bundle integrity (schema if present)
 	      "$(VENV_BIN)/check-jsonschema" --schemafile "$(SUBMISSION_SCHEMA)" "$$j" || exit 1; \
 	    done; \
 	    rm -rf "$$tmpdir"; \
-	  else \
-	    echo "::warning::check-jsonschema not available; skipping schema validation."; \
-	  fi; \
-	else \
-	  echo ">> No schema provided; basic verification only."; \
-	fi
+	  else echo "::warning::check-jsonschema not available; skipping schema validation."; fi; \
+	else echo ">> No schema provided; basic verification only."; fi
 	@echo "::notice::Kaggle bundle verified."
 
 kaggle-clean: ## Remove local Kaggle bundle
 	rm -f "$(SUBMISSION_ZIP)"
 
-kaggle: kaggle-package kaggle-verify ## Package + verify submission
+kaggle: kaggle-boot kaggle-package kaggle-verify ## Bootstrap + package + verify submission
 
 # -----------------------------------------------------------------------------
 # Diagrams (Mermaid via scripts/render_diagrams.sh)
@@ -336,16 +345,12 @@ kaggle: kaggle-package kaggle-verify ## Package + verify submission
 diagrams: ## Render Mermaid diagrams -> SVG (and optional PNG) with scripts/render_diagrams.sh
 	@if [ -x scripts/render_diagrams.sh ]; then \
 	  ./scripts/render_diagrams.sh -t "$(DIAGRAMS_THEME)" -c "$(DIAGRAMS_CONC)"; \
-	else \
-	  echo "::warning::scripts/render_diagrams.sh not found; skipping diagrams."; \
-	fi
+	else echo "::warning::scripts/render_diagrams.sh not found; skipping diagrams."; fi
 
 diagrams-dark: ## Render Mermaid diagrams with dark theme + PNGs into assets/diagrams/out
 	@if [ -x scripts/render_diagrams.sh ]; then \
 	  ./scripts/render_diagrams.sh -t dark -p -o assets/diagrams/out -c "$(DIAGRAMS_CONC)"; \
-	else \
-	  echo "::warning::scripts/render_diagrams.sh not found; skipping diagrams."; \
-	fi
+	else echo "::warning::scripts/render_diagrams.sh not found; skipping diagrams."; fi
 
 diagrams-clean: ## Remove generated diagram images
 	-find assets/diagrams -type f \( -name '*.svg' -o -name '*.png' \) -delete || true
@@ -370,16 +375,12 @@ docker-run: ## Run container (GPU if available) -> spectramind --help
 	@if docker info >/dev/null 2>&1; then \
 	  echo ">> Running container"; \
 	  docker run --rm $(GPU_FLAG) -it $(IMAGE_NAME):$(IMAGE_TAG) --help; \
-	else \
-	  echo "::error::Docker not available."; exit 1; \
-	fi
+	else echo "::error::Docker not available."; exit 1; fi
 
 docker-shell: ## Interactive shell inside image
 	@if docker info >/dev/null 2>&1; then \
 	  docker run --rm $(GPU_FLAG) -it $(IMAGE_NAME):$(IMAGE_TAG) /bin/bash; \
-	else \
-	  echo "::error::Docker not available."; exit 1; \
-	fi
+	else echo "::error::Docker not available."; exit 1; fi
 
 # -----------------------------------------------------------------------------
 # Versioning & Releases
@@ -396,7 +397,7 @@ endef
 ensure-clean: ## Fail if git working tree is dirty
 	$(_ensure_clean)
 
-# Cross-platform TOML version set (no brittle sed; uses Python tomllib/tomli-w)
+# Cross-platform TOML version set via Python
 define PY_SET_VERSION
 import sys, pathlib
 try:
@@ -480,16 +481,12 @@ bump: ## Bump semver (BUMP=patch|minor|major) & update CHANGELOG header
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
-	rm -rf $(ARTIFACTS_DIR)/coverage
+	rm -rf "$(ARTIFACTS_DIR)/coverage"
 
 distclean: clean ## Remove venv and artifacts
-	rm -rf $(VENV) $(ARTIFACTS_DIR)
+	rm -rf "$(VENV)" "$(ARTIFACTS_DIR)"
 
 # -----------------------------------------------------------------------------
 # CI convenience
 # -----------------------------------------------------------------------------
-ci: check docs diagrams ## Run the same checks CI does locally
-
-# -----------------------------------------------------------------------------
-# End of Makefile
-# -----------------------------------------------------------------------------
+ci: doctor cuda-parity check docs diagrams ## Run the same checks CI does locally
