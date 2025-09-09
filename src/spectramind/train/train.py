@@ -15,11 +15,9 @@
 
 from __future__ import annotations
 
-import io
 import json
-import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 # --- Hydra / OmegaConf
 try:
@@ -27,24 +25,24 @@ try:
     from hydra.utils import instantiate
 except Exception as _e:  # pragma: no cover
     DictConfig = Any  # type: ignore
-    def instantiate(*args, **kwargs):  # type: ignore
-        raise RuntimeError("Hydra is required to instantiate configs") from _e
     OmegaConf = None  # type: ignore
+
+    def instantiate(*_a, **_k):  # type: ignore
+        raise RuntimeError("Hydra is required to instantiate configs") from _e
 
 # --- PyTorch / Lightning (guarded imports)
 try:  # pragma: no cover
-    import torch
-    from torch.utils.data import DataLoader
     import pytorch_lightning as pl
     from pytorch_lightning.utilities.rank_zero import rank_zero_only
 except Exception as _e:  # pragma: no cover
-    torch = None  # type: ignore
     pl = None  # type: ignore
-    DataLoader = None  # type: ignore
+
     def rank_zero_only(fn):  # type: ignore
         def _wrap(*a, **k):
             return fn(*a, **k)
+
         return _wrap
+
     _PL_IMPORT_ERROR = _e
 else:
     _PL_IMPORT_ERROR = None
@@ -65,22 +63,23 @@ from .config import (
     TrainPaths,  # for typing
 )
 from .collate import build_collate_fn, CollateConfig
+from .datamodule import ArielDataModule  # NEW: first-class DataModule
 
 
 # ----------------------------------------------------------------------------- #
 # Helpers
 # ----------------------------------------------------------------------------- #
 
-@rank_zero_only
-def _log_rank_zero(msg: str) -> None:
-    print(f"[SpectraMind][train] {msg}")
-
-
 def _ensure_pl() -> None:
     if _PL_IMPORT_ERROR is not None:
         raise RuntimeError(
-            "This module requires `pytorch-lightning` and `torch` at runtime."
+            "This module requires `pytorch-lightning` at runtime."
         ) from _PL_IMPORT_ERROR
+
+
+@rank_zero_only
+def _log_rank_zero(msg: str) -> None:
+    print(f"[SpectraMind][train] {msg}")
 
 
 def _save_config_snapshot(cfg: DictConfig, run_dir: Path) -> None:
@@ -89,16 +88,20 @@ def _save_config_snapshot(cfg: DictConfig, run_dir: Path) -> None:
     for reproducibility. (JSON + YAML)
     """
     run_dir.mkdir(parents=True, exist_ok=True)
-    # YAML
+
+    # YAML (if OmegaConf is present)
     if OmegaConf is not None:
         yaml_path = run_dir / "config_snapshot.yaml"
-        with yaml_path.open("w", encoding="utf-8") as f:
-            OmegaConf.save(config=cfg, f=f.name)
-    # JSON (resolves OmegaConf to pure dict)
-    try:
-        cfg_dict = OmegaConf.to_container(cfg, resolve=True) if OmegaConf else dict(cfg)
-    except Exception:
+        OmegaConf.save(config=cfg, f=str(yaml_path))
+
+        # JSON (resolves OmegaConf to pure dict)
+        try:
+            cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        except Exception:
+            cfg_dict = dict(cfg)  # best effort
+    else:
         cfg_dict = dict(cfg)
+
     json_path = run_dir / "config_snapshot.json"
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(cfg_dict, f, indent=2, sort_keys=True)
@@ -112,78 +115,69 @@ def _maybe_instantiate(obj_cfg: Any, **overrides: Any) -> Any:
     """
     if obj_cfg is None:
         return None
-    if isinstance(obj_cfg, dict) and "_target_" in obj_cfg:
-        merged = {**obj_cfg, **overrides}
-        return instantiate(merged)
-    # OmegaConf DictConfig supports attribute-style; handle that too
-    if hasattr(obj_cfg, "_get_full_key") or hasattr(obj_cfg, "get"):
-        try:
-            if "_target_" in obj_cfg:
-                merged = {**OmegaConf.to_container(obj_cfg, resolve=True), **overrides}
-                return instantiate(merged)
-        except Exception:
-            pass
+    try:
+        container = (
+            OmegaConf.to_container(obj_cfg, resolve=True) if OmegaConf else dict(obj_cfg)
+        )
+    except Exception:
+        container = dict(obj_cfg)
+    if isinstance(container, dict) and "_target_" in container:
+        return instantiate({**container, **overrides})
     return None
 
 
-def _build_datamodule_from_cfg(cfg: DictConfig, paths: TrainPaths) -> Any:
+def _build_datamodule_from_cfg(cfg: DictConfig, _paths: TrainPaths) -> Any:
     """
-    Construct a LightningDataModule (preferred) or ad-hoc dataloaders from cfg.
-
-    Supports:
+    Construct a LightningDataModule (preferred) using either:
       - Hydra instantiate: cfg.data.datamodule._target_
-      - Passing a collate_fn via CollateConfig
-      - Fallback: instantiate datasets + wrap in DataLoader
+      - ArielDataModule directly with loader/NPZ/split knobs
     """
-    collate_cfg = None
-    if "data" in cfg and "collate" in cfg.data:
-        # Convert to CollateConfig dataclass if fields match
-        try:
-            collate_cfg = CollateConfig(**OmegaConf.to_container(cfg.data.collate, resolve=True))  # type: ignore
-        except Exception:
-            collate_cfg = CollateConfig()
-    collate_fn = build_collate_fn(collate_cfg)
-
     # 1) Preferred: LightningDataModule via Hydra
-    dm = _maybe_instantiate(getattr(cfg.data, "datamodule", None), collate_fn=collate_fn)
+    dm = _maybe_instantiate(getattr(cfg.data, "datamodule", None))
     if dm is not None:
         return dm
 
-    # 2) Fallback: datasets + DataLoader via Hydra
-    train_ds = _maybe_instantiate(getattr(cfg.data, "train_dataset", None))
-    val_ds = _maybe_instantiate(getattr(cfg.data, "val_dataset", None))
-    if train_ds is not None and val_ds is not None:
-        batch_size = int(getattr(cfg.data, "batch_size", 32))
-        num_workers = int(getattr(cfg.data, "num_workers", 2))
-        shuffle = bool(getattr(cfg.data, "shuffle", True))
-
-        train_loader = DataLoader(
-            train_ds, batch_size=batch_size, shuffle=shuffle,
-            num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
+    # 2) ArielDataModule fallback (covers Hydra datasets OR NPZ dirs OR single-dir split)
+    # Collate
+    if "collate" in cfg.data:
+        try:
+            collate_cfg = CollateConfig(
+                **(OmegaConf.to_container(cfg.data.collate, resolve=True) if OmegaConf else dict(cfg.data.collate))
+            )
+        except Exception:
+            collate_cfg = CollateConfig()
+        collate_dict = (
+            OmegaConf.to_container(cfg.data.collate, resolve=True)
+            if OmegaConf
+            else dict(cfg.data.collate)
         )
-        val_loader = DataLoader(
-            val_ds, batch_size=batch_size, shuffle=False,
-            num_workers=num_workers, collate_fn=collate_fn, pin_memory=True
-        )
+    else:
+        collate_cfg = CollateConfig()
+        collate_dict = None
 
-        class _AdHocDM(pl.LightningDataModule):  # type: ignore
-            def __init__(self):
-                super().__init__()
-                self._train = train_loader
-                self._val = val_loader
-
-            def train_dataloader(self):
-                return self._train
-
-            def val_dataloader(self):
-                return self._val
-
-        return _AdHocDM()
-
-    raise RuntimeError(
-        "Could not build datamodule. Provide either `cfg.data.datamodule._target_` "
-        "or both `cfg.data.train_dataset._target_` and `cfg.data.val_dataset._target_`."
+    # Loader knobs
+    dm = ArielDataModule(
+        batch_size=int(getattr(cfg.data, "batch_size", 32)),
+        shuffle=bool(getattr(cfg.data, "shuffle", True)),
+        num_workers=int(getattr(cfg.data, "num_workers", 4)),
+        pin_memory=bool(getattr(cfg.data, "pin_memory", True)),
+        persistent_workers=bool(getattr(cfg.data, "persistent_workers", True)),
+        prefetch_factor=getattr(cfg.data, "prefetch_factor", 2),
+        drop_last=bool(getattr(cfg.data, "drop_last", False)),
+        collate=collate_dict,
+        # Hydra dataset nodes (optional)
+        train_dataset=getattr(cfg.data, "train_dataset", None),
+        val_dataset=getattr(cfg.data, "val_dataset", None),
+        test_dataset=getattr(cfg.data, "test_dataset", None),
+        # NPZ directories (optional)
+        train_npz_dir=getattr(cfg.data, "train_npz_dir", None),
+        val_npz_dir=getattr(cfg.data, "val_npz_dir", None),
+        test_npz_dir=getattr(cfg.data, "test_npz_dir", None),
+        # Single NPZ source with split (optional)
+        split_npz_dir=getattr(cfg.data, "split_npz_dir", None),
+        split=getattr(cfg.data, "split", None),
     )
+    return dm
 
 
 def _build_model_from_cfg_or_registry(cfg: DictConfig) -> Any:
@@ -219,7 +213,7 @@ def _build_model_from_cfg_or_registry(cfg: DictConfig) -> Any:
 def _attach_optimizers_if_needed(model: Any, cfg: DictConfig) -> None:
     """
     If the LightningModule doesn't implement `configure_optimizers`, build optimizer/
-    scheduler via registry (or Hydra) and attach to the model (expects setters or attributes).
+    scheduler via registry and attach to the model (expects setters or attributes).
     """
     if hasattr(model, "configure_optimizers"):
         # Assume model fully handles optimizers; nothing to do.
@@ -322,7 +316,6 @@ if __name__ == "__main__":  # pragma: no cover
     # function after Hydra composition. This block is provided for direct manual runs.
     try:
         import hydra
-        from omegaconf import OmegaConf
 
         @hydra.main(config_path="../../../configs", config_name="train", version_base="1.3")
         def _main(cfg: DictConfig) -> None:
