@@ -1,18 +1,17 @@
-
 # src/spectramind/train/loggers.py
 # =============================================================================
 # SpectraMind V50 — Logger Builders
 # -----------------------------------------------------------------------------
-# Builds a list of PyTorch Lightning loggers driven by Hydra config. Guarded
-# imports keep Kaggle/CI happy (no hard deps unless enabled in config).
+# Builds a list of PyTorch Lightning loggers driven by Hydra/Dict config. Guarded
+# imports keep Kaggle/CI happy (no heavy deps unless explicitly enabled).
 #
-# Supported out-of-the-box:
+# Supported out of the box:
 #   • CSVLogger
 #   • TensorBoardLogger
 #   • WandbLogger (optional; requires `wandb`)
 #   • MLFlowLogger (optional; requires `mlflow`)
 #
-# Minimal example (configs/train.yaml):
+# Example (configs/train.yaml):
 #
 # logging:
 #   csv:
@@ -20,29 +19,40 @@
 #     name: v50
 #   tensorboard:
 #     enable: true
+#     default_hp_metric: false
 #   wandb:
 #     enable: false
 #     project: spectramind-v50
 #     entity: your_team
+#     group: ${paths.exp_name}
 #     tags: [v50, ariel, neurips2025]
+#     mode: ${env:WANDB_MODE, "online"}  # "offline"|"dryrun"|"online"
+#     log_model: false
 #   mlflow:
 #     enable: false
 #     tracking_uri: ${env:MLFLOW_TRACKING_URI, null}
 #     experiment_name: spectramind-v50
+#     run_name: ${paths.run_name}
+#     tags:
+#       repo: spectramind-v50
 #
-# All loggers default save_dir/name/version sensibly using `paths` inputs.
+# Notes:
+#   • All loggers pick sensible defaults for save_dir/name/version based on `paths`.
+#   • `paths` is the object returned by resolve_train_paths(cfg) (run_dir/logs_dir/exp_name/timestamp).
+#   • This module does not import optional loggers unless enabled in config.
 # =============================================================================
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Guarded Lightning import
+# ---- Guarded Lightning import ------------------------------------------------
 try:  # pragma: no cover
     import pytorch_lightning as pl
-    from pytorch_lightning.utilities.rank_zero import rank_zero_only
     from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
+    from pytorch_lightning.utilities.rank_zero import rank_zero_only
 except Exception as _e:  # pragma: no cover
     pl = None  # type: ignore
 
@@ -57,11 +67,14 @@ except Exception as _e:  # pragma: no cover
 else:
     _PL_IMPORT_ERROR = None
 
-# Optional loggers are imported lazily if enabled in config
+# Optional backends are imported lazily only if enabled
 _WANDB_AVAILABLE = False
 _MLFLOW_AVAILABLE = False
 
 
+# -----------------------------------------------------------------------------
+# Internals
+# -----------------------------------------------------------------------------
 @rank_zero_only
 def _log(msg: str) -> None:
     print(f"[SpectraMind][loggers] {msg}")
@@ -80,21 +93,20 @@ def _as_path(p: Optional[str | Path]) -> Path:
 
 def _default_name_version(paths: Any, cfg_name: Optional[str], cfg_version: Optional[str]) -> tuple[str, str]:
     """
-    Compute default (name, version) pair for loggers. If Hydra config provides name/version
-    (e.g., logging.tensorboard.name), they win. Otherwise use experiment/run_name from paths/cfg.
+    Compute default (name, version) pair for loggers. If config provides name/version
+    they take precedence. Otherwise use experiment/run identifiers from paths.
     """
-    # Try provided overrides first
+    # name
     if cfg_name is not None:
         name = cfg_name
     else:
         name = getattr(paths, "exp_name", None) or getattr(paths, "exp", None) or "spectramind"
-
+    # version
     if cfg_version is not None:
         version = cfg_version
     else:
         # timestamped run_dir folder can serve as a stable version tag
         version = getattr(paths, "timestamp", None) or getattr(paths, "run_name", None) or "run"
-
     return str(name), str(version)
 
 
@@ -114,7 +126,20 @@ def _resolve_save_dir(paths: Any, explicit: Optional[str | Path]) -> Path:
     return Path("logs")
 
 
-def _maybe_csv_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.Logger]:
+def _get_logging_cfg(cfg: Dict[str, Any] | Any) -> Dict[str, Any]:
+    """Return cfg.logging as a plain dict without depending on OmegaConf at import time."""
+    try:
+        if hasattr(cfg, "logging"):
+            return dict(getattr(cfg, "logging"))
+        return dict(cfg.get("logging", {}))
+    except Exception:
+        return {}
+
+
+# -----------------------------------------------------------------------------
+# CSV
+# -----------------------------------------------------------------------------
+def _maybe_csv_logger(cfg: Dict[str, Any], paths: Any) -> Optional["pl.loggers.Logger"]:
     opts = cfg.get("csv", {})
     if not bool(opts.get("enable", False)):
         return None
@@ -125,7 +150,10 @@ def _maybe_csv_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.Lo
     return CSVLogger(save_dir=str(save_dir), name=name, version=version)
 
 
-def _maybe_tensorboard_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.Logger]:
+# -----------------------------------------------------------------------------
+# TensorBoard
+# -----------------------------------------------------------------------------
+def _maybe_tensorboard_logger(cfg: Dict[str, Any], paths: Any) -> Optional["pl.loggers.Logger"]:
     opts = cfg.get("tensorboard", {})
     if not bool(opts.get("enable", False)):
         return None
@@ -144,6 +172,9 @@ def _maybe_tensorboard_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.lo
     )
 
 
+# -----------------------------------------------------------------------------
+# Weights & Biases
+# -----------------------------------------------------------------------------
 def _maybe_import_wandb() -> bool:
     global _WANDB_AVAILABLE
     if _WANDB_AVAILABLE:
@@ -158,7 +189,17 @@ def _maybe_import_wandb() -> bool:
         return True
 
 
-def _maybe_wandb_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.Logger]:
+def _apply_wandb_mode(mode: Optional[str]) -> None:
+    """
+    Respect config/env WANDB_MODE. Allowed: "online" | "offline" | "dryrun"
+    """
+    if not mode:
+        mode = os.environ.get("WANDB_MODE", "").strip().lower() or None
+    if mode:
+        os.environ["WANDB_MODE"] = mode
+
+
+def _maybe_wandb_logger(cfg: Dict[str, Any], paths: Any) -> Optional["pl.loggers.Logger"]:
     opts = cfg.get("wandb", {})
     if not bool(opts.get("enable", False)):
         return None
@@ -168,17 +209,22 @@ def _maybe_wandb_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.
 
     from pytorch_lightning.loggers import WandbLogger  # type: ignore
 
+    # Apply WANDB mode (offline/online/dryrun)
+    _apply_wandb_mode(opts.get("mode"))
+
     project = opts.get("project", "spectramind-v50")
     entity = opts.get("entity", None)
     group = opts.get("group", getattr(paths, "exp_name", None))
     job_type = opts.get("job_type", "train")
     tags = list(opts.get("tags", []))
+    resume = opts.get("resume", "allow")  # 'allow'|'never'|'must'|run_id
+
     # Provide save_dir/name/version for consistency with other loggers
     save_dir = _resolve_save_dir(paths, opts.get("save_dir"))
     name, version = _default_name_version(paths, opts.get("name"), opts.get("version"))
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    _log(f"WandbLogger → project={project}, entity={entity}, group={group}, name={name}, version={version}")
+    _log(f"WandbLogger → project={project}, entity={entity}, group={group}, name={name}, version={version}, resume={resume}")
     return WandbLogger(
         project=project,
         entity=entity,
@@ -189,10 +235,14 @@ def _maybe_wandb_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.
         name=name,
         version=version,
         log_model=bool(opts.get("log_model", False)),
-        resume="allow",  # safe resume behavior
+        resume=resume,
+        settings=opts.get("settings", None),
     )
 
 
+# -----------------------------------------------------------------------------
+# MLflow
+# -----------------------------------------------------------------------------
 def _maybe_import_mlflow() -> bool:
     global _MLFLOW_AVAILABLE
     if _MLFLOW_AVAILABLE:
@@ -207,7 +257,7 @@ def _maybe_import_mlflow() -> bool:
         return True
 
 
-def _maybe_mlflow_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers.Logger]:
+def _maybe_mlflow_logger(cfg: Dict[str, Any], paths: Any) -> Optional["pl.loggers.Logger"]:
     opts = cfg.get("mlflow", {})
     if not bool(opts.get("enable", False)):
         return None
@@ -220,44 +270,29 @@ def _maybe_mlflow_logger(cfg: Dict[str, Any], paths: Any) -> Optional[pl.loggers
     tracking_uri = opts.get("tracking_uri", None)
     experiment_name = opts.get("experiment_name", getattr(paths, "exp_name", "spectramind"))
     run_name = opts.get("run_name", getattr(paths, "run_name", None))
-    save_dir = _resolve_save_dir(paths, opts.get("save_dir"))
-    name, version = _default_name_version(paths, opts.get("name"), opts.get("version"))
-    save_dir.mkdir(parents=True, exist_ok=True)
+    # Save dir is not directly used by MLflow, but we keep consistency
+    _resolve_save_dir(paths, opts.get("save_dir")).mkdir(parents=True, exist_ok=True)
 
-    # MLflow does not use save_dir for artifacts directly (server/URI controls that),
-    # but we keep name/version for consistency in Trainer logs.
     _log(f"MLFlowLogger → experiment={experiment_name}, uri={tracking_uri}, run_name={run_name}")
     return MLFlowLogger(
         experiment_name=experiment_name,
         tracking_uri=tracking_uri,
-        run_name=run_name or f"{name}-{version}",
+        run_name=run_name or f"{experiment_name}-{getattr(paths, 'timestamp', 'run')}",
         tags=opts.get("tags", None),
     )
 
 
-# ----------------------------------------------------------------------------- #
+# -----------------------------------------------------------------------------
 # Public API
-# ----------------------------------------------------------------------------- #
-
-def build_loggers(cfg: Dict[str, Any] | Any, paths: Any) -> List[pl.loggers.Logger]:
+# -----------------------------------------------------------------------------
+def build_loggers(cfg: Dict[str, Any] | Any, paths: Any) -> List["pl.loggers.Logger"]:
     """
     Build a list of Lightning loggers from `cfg.logging` and return them.
     `paths` is the TrainPaths-like object (run_dir/logs_dir/exp_name/timestamp).
     """
     _ensure_pl()
-
-    # Get logging sub-config as plain dict
-    logging_cfg: Dict[str, Any]
-    try:
-        if hasattr(cfg, "logging"):
-            # OmegaConf or attr-like namespace
-            logging_cfg = dict(getattr(cfg, "logging"))
-        else:
-            logging_cfg = dict(cfg.get("logging", {}))
-    except Exception:
-        logging_cfg = dict(cfg.get("logging", {})) if isinstance(cfg, dict) else {}
-
-    loggers: List[pl.loggers.Logger] = []
+    logging_cfg = _get_logging_cfg(cfg)
+    loggers: List["pl.loggers.Logger"] = []
 
     # CSV
     csv_logger = _maybe_csv_logger(logging_cfg, paths)
@@ -288,6 +323,7 @@ def build_loggers(cfg: Dict[str, Any] | Any, paths: Any) -> List[pl.loggers.Logg
 def add_loggers_to_trainer_kwargs(trainer_kwargs: Dict[str, Any], cfg: Dict[str, Any] | Any, paths: Any) -> None:
     """
     Mutates `trainer_kwargs` to include built loggers if not already set.
+    If `trainer_kwargs['logger']` is True, Lightning uses its default CSVLogger.
     """
     if "logger" in trainer_kwargs and trainer_kwargs["logger"] is not True:
         # respect explicit override (True means 'use default')
