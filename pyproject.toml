@@ -4,7 +4,7 @@
 # • Reproducible pins (Kaggle/CI safe)
 # • Torch stack lives in extras (install locally or in GH Actions)
 # • CLI exposed as `spectramind` (mirrors `python -m spectramind`)
-# • Package-data ensures configs/schemas ship inside the wheel
+# • Package-data ensures configs/schemas/diagrams ship inside the wheel
 # • Pytest/mypy configuration lives in setup.cfg (avoid duplication)
 # =====================================================================
 
@@ -35,7 +35,7 @@ classifiers = [
 # ---- Runtime dependencies (Kaggle-safe core; heavy stacks moved to extras) ----
 dependencies = [
   # CLI & config
-  "typer[all]==0.12.5",        # stable Typer; keeps click in good range
+  "typer[all]==0.12.5",
   "hydra-core==1.3.2",
   "omegaconf==2.3.0",
   "pydantic==2.7.4",
@@ -44,7 +44,7 @@ dependencies = [
   "packaging==24.1",
 
   # Core scientific stack
-  "numpy==1.26.4",             # NumPy <2 for broad manylinux on Kaggle
+  "numpy==1.26.4",
   "scipy==1.11.4",
   "pandas==2.2.2",
   "polars==1.33.0",
@@ -61,7 +61,6 @@ dependencies = [
 
 [project.optional-dependencies]
 # GPU stack: install on local/dev or CI. In Kaggle, prefer the boot script (wheels tied to CUDA).
-# Versions aligned (torch 2.2.x trio).
 gpu = [
   "torch==2.2.2",
   "torchvision==0.17.2",
@@ -76,7 +75,7 @@ analysis = [
   "joblib==1.4.2",
   "statsmodels==0.14.2",
   "sympy==1.13.1",
-  "numba==0.59.1",  # 0.60+ requires NumPy 2.x; keep 1.26.x compatibility
+  "numba==0.59.1",
 ]
 
 # Dev/test/typing/linting (tool configs live in setup.cfg).
@@ -86,8 +85,8 @@ dev = [
   "pytest-xdist==3.5.0",
   "pytest-timeout==2.3.1",
   "hypothesis==6.112.0",
-  "ruff==0.6.3",             # aligned with .pre-commit-config.yaml
-  "mypy==1.11.2",            # aligned with pre-commit mirror
+  "ruff==0.6.3",
+  "mypy==1.11.2",
   "typing-extensions==4.12.2",
   "toml-sort==0.23.1",
   "check-jsonschema==0.33.3",
@@ -95,7 +94,7 @@ dev = [
   "types-requests==2.32.0.20240907",
   "pre-commit==3.7.1",
   "pip-licenses==4.5.1",
-  # Optional but useful locally:
+  # Optional locally:
   # "dvc[gdrive,s3]==3.55.2",
 ]
 
@@ -114,8 +113,8 @@ security = [
   # "bandit==1.7.9",
 ]
 
-# Meta-extra for a full local workstation
-all = ["spectramind-v50[analysis,dev,docs,security]"]
+# Meta-extra for a full local workstation (PEP 508 self-ref)
+all = [".[analysis,dev,docs,security]"]
 
 [project.urls]
 Homepage = "https://github.com/your-org/spectramind-v50"
@@ -135,15 +134,14 @@ where = ["src"]
 include = ["spectramind*"]
 exclude = ["tests*", "examples*", "docs*"]
 
-# Ensure configs/schemas ship inside the built wheel.
+# Ensure configs/schemas/diagrams ship inside the built wheel.
 # Place files under src/spectramind/{configs,schemas,assets/...}
 [tool.setuptools.package-data]
 spectramind = [
   "configs/**/*.yaml",
   "configs/**/*.yml",
   "schemas/**/*.json",
-  "assets/diagrams/**/*.mmd",
-  "assets/diagrams/rendered/*.*",
+  "assets/diagrams/**/*.{mmd,svg,png}",
 ]
 
 [tool.setuptools.exclude-package-data]
@@ -152,11 +150,11 @@ spectramind = ["**/*.tmp", "**/*.bak"]
 # --------------------------------- Ruff -----------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py311"   # aligns with mypy python_version=3.11 in setup.cfg
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C90"]
-ignore = ["E203", "W503"]  # black/PEP8 compat patterns
+ignore = ["E203", "W503"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["spectramind"]
