@@ -2,8 +2,46 @@
   "$id": "https://spectramind-v50.org/schemas/diagnostics.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Diagnostics Report",
+  "description": "End-to-end diagnostics snapshot emitted by the SpectraMind CLI (diagnose). Captures provenance, model info, datasets, scores, resource usage, and physics-informed checks.",
   "type": "object",
   "additionalProperties": false,
+
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$",
+      "description": "SHA-256 hex digest (lower/upper allowed)."
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp in RFC 3339 format."
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["train", "predict", "diagnose", "submit"]
+    },
+    "labelsArray": {
+      "type": "array",
+      "items": { "type": ["number", "string", "boolean"] }
+    },
+    "nonNegInt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nonNegNumber": {
+      "type": "number",
+      "minimum": 0
+    }
+  },
 
   "required": ["run_id", "model", "datasets", "checks"],
 
@@ -15,8 +53,7 @@
     },
 
     "created_at": {
-      "type": "string",
-      "format": "date-time",
+      "$ref": "#/$defs/dateTime",
       "description": "UTC timestamp of diagnostics generation."
     },
 
@@ -27,9 +64,16 @@
       "properties": {
         "git_commit": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
         "git_branch": { "type": "string" },
+        "git_remote": { "type": "string" },
         "dvc_hash": { "type": "string" },
-        "dataset_id": { "type": "string" }
+        "dataset_id": { "type": "string" },
+        "config_hash": { "type": "string", "description": "Hash of the Hydra/DVC merged config snapshot." }
       }
+    },
+
+    "stage": {
+      "$ref": "#/$defs/stage",
+      "description": "Optional stage label if report is aliased to a specific pipeline step."
     },
 
     "model": {
@@ -37,8 +81,8 @@
       "required": ["arch", "checkpoint"],
       "additionalProperties": false,
       "properties": {
-        "arch": { "type": "string" },
-        "checkpoint": { "type": "string" },
+        "arch": { "$ref": "#/$defs/nonEmptyString" },
+        "checkpoint": { "$ref": "#/$defs/nonEmptyString" },
         "params": { "type": "object", "additionalProperties": true }
       }
     },
@@ -51,9 +95,9 @@
         "required": ["name", "n_samples"],
         "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
+          "name": { "$ref": "#/$defs/name" },
           "split": { "type": "string", "enum": ["train", "val", "test", "holdout"] },
-          "n_samples": { "type": "integer", "minimum": 0 },
+          "n_samples": { "$ref": "#/$defs/nonNegInt" },
           "filters": { "type": "object", "additionalProperties": true }
         }
       }
@@ -64,7 +108,7 @@
       "description": "Key metrics captured during diagnostics.",
       "additionalProperties": { "type": "number" },
       "properties": {
-        "gll": { "type": "number" },
+        "gll": { "type": "number", "description": "Gaussian Log-Likelihood (competition metric)." },
         "loss": { "type": "number" },
         "val_loss": { "type": "number" }
       }
@@ -75,10 +119,38 @@
       "description": "Runtime and resource footprint for traceability.",
       "additionalProperties": false,
       "properties": {
-        "wall_ms": { "type": "integer", "minimum": 0 },
-        "cpu_ms": { "type": "integer", "minimum": 0 },
-        "gpu_ms": { "type": "integer", "minimum": 0 },
-        "max_rss_mb": { "type": "number", "minimum": 0 }
+        "wall_ms": { "$ref": "#/$defs/nonNegInt" },
+        "cpu_ms": { "$ref": "#/$defs/nonNegInt" },
+        "gpu_ms": { "$ref": "#/$defs/nonNegInt" },
+        "max_rss_mb": { "$ref": "#/$defs/nonNegNumber" }
+      }
+    },
+
+    "hardware": {
+      "type": "object",
+      "description": "Optional hardware/runtime details to aid reproducibility (pairs with ADR-0003).",
+      "additionalProperties": false,
+      "properties": {
+        "python": { "type": "string" },
+        "torch": { "type": "string" },
+        "torch_cuda": { "type": "string" },
+        "cudnn": { "type": ["string", "integer"] },
+        "nvidia_smi": { "type": "string" },
+        "cuda_version_txt": { "type": "string" },
+        "device_count": { "$ref": "#/$defs/nonNegInt" },
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "index": { "$ref": "#/$defs/nonNegInt" },
+              "name": { "type": "string" },
+              "capability": { "type": "string" },
+              "total_memory_bytes": { "$ref": "#/$defs/nonNegInt" }
+            }
+          }
+        }
       }
     },
 
@@ -100,7 +172,7 @@
             "minItems": 1,
             "items": { "type": "number", "minimum": 0 }
           },
-          "sampling_rate_hz": { "type": "number", "minimum": 0 },
+          "sampling_rate_hz": { "$ref": "#/$defs/nonNegNumber" },
           "window": { "type": "string" }
         }
       }
@@ -124,8 +196,7 @@
           "description": "List of [x,y] or [x,y,z] coordinates."
         },
         "labels": {
-          "type": "array",
-          "items": { "type": ["number", "string", "boolean"] },
+          "$ref": "#/$defs/labelsArray",
           "description": "Optional per-point labels (length should match points)."
         },
         "params": {
@@ -167,13 +238,25 @@
       "required": ["nonnegativity", "smoothness", "fgs1_weighting"],
       "properties": {
         "nonnegativity": { "type": "boolean" },
-        "smoothness": { "type": "number", "minimum": 0 },
-        "fgs1_weighting": { "type": "number", "minimum": 0 },
+        "smoothness": { "$ref": "#/$defs/nonNegNumber" },
+        "fgs1_weighting": { "$ref": "#/$defs/nonNegNumber" },
         "range_ok": {
           "type": "boolean",
           "description": "All predicted depths within [0,1] (if evaluated)."
         }
       }
+    },
+
+    "warnings": {
+      "type": "array",
+      "description": "Optional human-readable warnings from the diagnostics pass.",
+      "items": { "$ref": "#/$defs/nonEmptyString" }
+    },
+
+    "errors": {
+      "type": "array",
+      "description": "Optional human-readable errors from the diagnostics pass.",
+      "items": { "$ref": "#/$defs/nonEmptyString" }
     },
 
     "artifacts": {
@@ -185,10 +268,75 @@
         "required": ["path", "sha256"],
         "properties": {
           "path": { "type": "string" },
-          "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+          "sha256": { "$ref": "#/$defs/sha256" },
           "content_type": { "type": "string" }
         }
       }
     }
-  }
+  },
+
+  "dependentSchemas": {
+    "scores": {
+      "properties": {
+        "scores": {
+          "type": "object",
+          "properties": {
+            "gll": { "type": "number" }
+          }
+        }
+      }
+    },
+    "checks": {
+      "properties": {
+        "checks": {
+          "type": "object",
+          "properties": {
+            "nonnegativity": { "type": "boolean" },
+            "smoothness": { "type": "number" }
+          }
+        }
+      }
+    }
+  },
+
+  "examples": [
+    {
+      "run_id": "2025-09-06T21-21-00Z_ab12cd",
+      "created_at": "2025-09-06T21:21:15Z",
+      "provenance": {
+        "git_commit": "deadbeefc0ffee1234",
+        "git_branch": "main",
+        "dvc_hash": "e3b0c44298fc1c149afbf4c8996fb924",
+        "dataset_id": "ariel-2025-v1"
+      },
+      "model": {
+        "arch": "fgs1_ssm+airs_cnn+hetero_decoder",
+        "checkpoint": "artifacts/ckpts/epoch=12-step=3456.ckpt",
+        "params": { "hidden_dim": 512, "dropout": 0.1 }
+      },
+      "datasets": [
+        { "name": "kfold0-val", "split": "val", "n_samples": 512 }
+      ],
+      "scores": {
+        "gll": -1.2345,
+        "loss": 0.4567,
+        "val_loss": 0.5678
+      },
+      "resources": {
+        "wall_ms": 123456,
+        "cpu_ms": 98765,
+        "gpu_ms": 54321,
+        "max_rss_mb": 4096
+      },
+      "checks": {
+        "nonnegativity": true,
+        "smoothness": 0.0123,
+        "fgs1_weighting": 58.0,
+        "range_ok": true
+      },
+      "artifacts": [
+        { "path": "artifacts/reports/diagnostics_dashboard.html", "sha256": "9f2c3a0b4b2e4e5dde55c2e2f1f8b0f05b95d6f52f0f9b9a0c8d829fbf9f6f83" }
+      ]
+    }
+  ]
 }
