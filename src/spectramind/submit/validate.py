@@ -3,8 +3,8 @@
 SpectraMind V50 — Submission Validation Utilities
 =================================================
 
-Validates a submission CSV against the repository JSON schema and additional
-semantic checks tailored for the Ariel Data Challenge:
+Validates a submission CSV/DF against the repository JSON schema and additional
+semantic checks tailored for the Ariel Data Challenge.
 
 Supported layouts
 -----------------
@@ -16,12 +16,13 @@ Extras in this upgrade
 ----------------------
 - Robust schema resolution + optional user-supplied schema path
 - Accepts 'id' or 'sample_id' (configurable), with optional strict-uniqueness
-- Mask-safe numeric checks; sigma >= 0; finite μ/σ; vector length == N_BINS
+- Mask-safe numeric checks; μ ≥ 0; σ ≥ 0; finite μ/σ; vector length == N_BINS
 - Chunked validation for low memory environments (Kaggle/CI)
 - Optional CSV gz/bz2/zip inferencing via pandas
 - Optional report writing (JSON) with summary stats & first-N errors
 - Utility to normalize to *wide* format (`coerce_to_wide`) for diagnostics
-- CLI entry-point: `python -m spectramind.submit.validate <csv> [--schema ...]`
+- Back-compat helpers: `validate_row_dict`, `validate_dataframe`
+- CLI entry point: `python -m spectramind.submit.validate <csv> [--schema ...]`
 
 Notes
 -----
@@ -37,10 +38,12 @@ import math
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple, Union, Dict
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 from jsonschema import ValidationError, validate
+
+from .utils import write_json_pretty  # atomic writer
 
 # ==============================================================================
 # Constants / schema loader
@@ -75,13 +78,12 @@ def _find_schema_file(explicit: Optional[Union[str, Path]] = None) -> Path:
         if candidate.exists():
             return candidate
 
-    # Fallback to original relative path (will raise later if missing)
+    # Fallback (will error on open)
     return local
 
 
 def _load_schema(explicit: Optional[Union[str, Path]] = None) -> Dict:
     global _SUB_SCHEMA_CACHE
-    # Cache only if using default path; explicit schemas might differ across calls
     if explicit is None and _SUB_SCHEMA_CACHE is not None:
         return _SUB_SCHEMA_CACHE
 
@@ -161,7 +163,6 @@ def _extract_vectors(
     mu = _try_parse_json_array(row.get("mu"))
     sigma = _try_parse_json_array(row.get("sigma"))
 
-    # Path 2: wide columns
     if mu is None or sigma is None:
         mu_wide = _collect_wide_columns(row, "mu", n_bins)
         sigma_wide = _collect_wide_columns(row, "sigma", n_bins)
@@ -176,8 +177,9 @@ def _extract_vectors(
     if len(mu) != n_bins or len(sigma) != n_bins:
         return [], [], f"vector length mismatch: got mu={len(mu)}, sigma={len(sigma)}, expected={n_bins}"
 
-    if not all(_is_finite_number(v) for v in mu):
-        return [], [], "mu contains non-finite values"
+    # physics & numeric guards
+    if not all(_is_finite_number(v) and float(v) >= 0.0 for v in mu):
+        return [], [], "mu contains negative or non-finite values"
     if not all(_is_finite_number(v) and float(v) >= 0.0 for v in sigma):
         return [], [], "sigma contains negative or non-finite values"
 
@@ -198,15 +200,19 @@ def _validate_record(rec: Dict, schema: Dict, n_bins: int) -> Optional[str]:
     sigma = rec.get("sigma") or []
     if len(mu) != n_bins or len(sigma) != n_bins:
         return f"expected length {n_bins}, got mu={len(mu)}, sigma={len(sigma)}"
-    if any(not _is_finite_number(x) for x in mu):
-        return "mu contains non-finite values"
+    if any((not _is_finite_number(x) or float(x) < 0.0) for x in mu):
+        return "mu contains negative or non-finite values"
     if any((not _is_finite_number(s) or float(s) < 0.0) for s in sigma):
         return "sigma contains negative or non-finite values"
     return None
 
 
+def _expected_wide_columns(n_bins: int, id_field: str) -> List[str]:
+    return [id_field] + [f"mu_{i:03d}" for i in range(n_bins)] + [f"sigma_{i:03d}" for i in range(n_bins)]
+
+
 # ==============================================================================
-# Public API
+# Public API (CSV-focused) + Back-compat helpers
 # ==============================================================================
 
 @dataclass
@@ -217,20 +223,21 @@ class CSVValidationResult:
     n_valid: int
 
 
-def coerce_to_wide(df: pd.DataFrame, *, n_bins: int = N_BINS_DEFAULT, id_field: str = "id") -> pd.DataFrame:
+def coerce_to_wide(
+    df: pd.DataFrame, *, n_bins: int = N_BINS_DEFAULT, id_field: str = "id"
+) -> pd.DataFrame:
     """
     Return a normalized *wide* dataframe with columns:
        [id_field, mu_000.., mu_XXX, sigma_000.., sigma_XXX]
 
     If rows are already wide, they are passed through. For narrow rows, 'mu'/'sigma' JSON arrays are expanded.
     """
-    out_cols = [id_field] + [f"mu_{i:03d}" for i in range(n_bins)] + [f"sigma_{i:03d}" for i in range(n_bins)]
+    out_cols = _expected_wide_columns(n_bins, id_field)
     rows: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
         rid = row.get(id_field)
         mu, sigma, err = _extract_vectors(row, n_bins)
         if err is not None:
-            # keep row but leave missing cols as NaN
             rows.append({id_field: rid})
             continue
         rec = {id_field: rid}
@@ -238,6 +245,82 @@ def coerce_to_wide(df: pd.DataFrame, *, n_bins: int = N_BINS_DEFAULT, id_field: 
         rec.update({f"sigma_{i:03d}": sigma[i] for i in range(n_bins)})
         rows.append(rec)
     return pd.DataFrame(rows, columns=out_cols)
+
+
+def validate_row_dict(
+    row: Dict[str, Any],
+    *,
+    n_bins: int = N_BINS_DEFAULT,
+    schema_path: Optional[Union[str, Path]] = None,
+    id_field: str = "sample_id",
+) -> Optional[str]:
+    """
+    Back-compat single-record validator. Expects a dict with 'mu'/'sigma' lists and an id.
+    Returns error string if any else None.
+    """
+    schema = _load_schema(schema_path)
+    rid = row.get(id_field) or row.get("id")
+    rec = {"mu": row.get("mu"), "sigma": row.get("sigma"), "id": rid, "sample_id": rid}
+    return _validate_record(rec, schema, n_bins)
+
+
+def validate_dataframe(
+    df: pd.DataFrame,
+    *,
+    n_bins: int = N_BINS_DEFAULT,
+    strict_order: bool = True,
+    check_unique_ids: bool = True,
+    id_field: str = "id",
+    allow_alt_id: bool = True,
+) -> CSVValidationResult:
+    """
+    Back-compat DF validator for wide DataFrames (or narrow with 'mu'/'sigma').
+    """
+    errors: List[str] = []
+    n_rows = 0
+    n_valid = 0
+    seen_ids: set = set()
+    resolved_id = id_field if id_field in df.columns else ("sample_id" if allow_alt_id and "sample_id" in df.columns else id_field)
+
+    # If it's obviously wide, optionally check order
+    maybe_wide = all(f"mu_{i:03d}" in df.columns for i in range(min(n_bins, 5))) and all(
+        f"sigma_{i:03d}" in df.columns for i in range(min(n_bins, 5))
+    )
+    if strict_order and maybe_wide:
+        expected = _expected_wide_columns(n_bins, resolved_id)
+        missing = [c for c in expected if c not in df.columns]
+        extra = [c for c in df.columns if c not in expected]
+        if missing:
+            errors.append(f"Missing expected columns (wide): {missing[:10]}{'...' if len(missing)>10 else ''}")
+        if extra:
+            errors.append(f"Unexpected columns (wide): {extra[:10]}{'...' if len(extra)>10 else ''}")
+
+    schema = _load_schema(None)
+    for idx, row in df.iterrows():
+        n_rows += 1
+        rid = row.get(resolved_id)
+        if check_unique_ids:
+            if pd.isna(rid) or (isinstance(rid, str) and rid.strip() == ""):
+                errors.append(f"row {idx}: missing/empty {resolved_id}")
+                continue
+            if rid in seen_ids:
+                errors.append(f"row {idx}: duplicate {resolved_id} '{rid}'")
+                continue
+            seen_ids.add(rid)
+
+        mu_vec, sigma_vec, parse_err = _extract_vectors(row, n_bins)
+        if parse_err is not None:
+            errors.append(f"row {idx} ({resolved_id}={rid}): {parse_err}")
+            continue
+
+        rec = {resolved_id: rid, "mu": mu_vec, "sigma": sigma_vec, "id": rid, "sample_id": rid}
+        err = _validate_record(rec, schema, n_bins)
+        if err is not None:
+            errors.append(f"row {idx} ({resolved_id}={rid}): {err}")
+        else:
+            n_valid += 1
+
+    return CSVValidationResult(ok=(len(errors) == 0), errors=errors, n_rows=n_rows, n_valid=n_valid)
 
 
 def validate_csv(
@@ -251,6 +334,7 @@ def validate_csv(
     schema_path: Optional[Union[str, Path]] = None,
     write_report: Optional[Union[str, Path]] = None,
     max_errors_in_report: int = 200,
+    strict_wide_order: bool = False,
 ) -> CSVValidationResult:
     """
     Validate a submission CSV against schema + SpectraMind semantic checks.
@@ -279,16 +363,13 @@ def validate_csv(
         If set, write a JSON report (summary + first N errors) to this path.
     max_errors_in_report : int
         Cap number of stored error strings in the output report.
+    strict_wide_order : bool
+        If True and the file is wide, enforce exact wide column order.
 
     Returns
     -------
     CSVValidationResult
         ok=True if all rows validate, else ok=False with per-row error messages.
-
-    Raises
-    ------
-    FileNotFoundError
-        If csv_path does not exist.
     """
     path = Path(csv_path)
     if not path.exists():
@@ -301,14 +382,34 @@ def validate_csv(
     seen_ids: set = set()
 
     alt_field = "sample_id"
-    # We will dynamically decide which id column is present
-    resolved_id_field = id_field
+    resolved_id_field = id_field  # may flip to 'sample_id' if found
+
+    def _maybe_check_wide_order(frame: pd.DataFrame) -> None:
+        if not strict_wide_order:
+            return
+        nonlocal resolved_id_field
+        if resolved_id_field not in frame.columns and allow_alt_id and alt_field in frame.columns:
+            resolved_id_field = alt_field
+        # If looks wide, enforce order
+        maybe_wide = all(f"mu_{i:03d}" in frame.columns for i in range(min(n_bins, 5))) and all(
+            f"sigma_{i:03d}" in frame.columns for i in range(min(n_bins, 5))
+        )
+        if maybe_wide:
+            expected = _expected_wide_columns(n_bins, resolved_id_field)
+            missing = [c for c in expected if c not in frame.columns]
+            extra = [c for c in frame.columns if c not in expected]
+            if missing:
+                errors.append(f"Missing expected columns (wide): {missing[:10]}{'...' if len(missing)>10 else ''}")
+            if extra:
+                errors.append(f"Unexpected columns (wide): {extra[:10]}{'...' if len(extra)>10 else ''}")
 
     def _process_frame(frame: pd.DataFrame) -> None:
         nonlocal n_rows, n_valid, resolved_id_field
         # Resolve id column once per chunk (first chunk determines resolution)
         if resolved_id_field not in frame.columns and allow_alt_id and alt_field in frame.columns:
             resolved_id_field = alt_field
+
+        _maybe_check_wide_order(frame)
 
         for idx, row in frame.iterrows():
             n_rows += 1
@@ -329,8 +430,7 @@ def validate_csv(
                 continue
 
             rec = {resolved_id_field: rid, "mu": mu_vec, "sigma": sigma_vec}
-            # For schema validation, ensure property name is 'sample_id' or 'id' as schema expects.
-            # We pass both; schema allows one (preferred 'sample_id' in newer schema).
+            # Ensure both id keys exist for schema variants
             if resolved_id_field == "sample_id":
                 rec["id"] = rid
             else:
@@ -343,7 +443,6 @@ def validate_csv(
                 n_valid += 1
 
     read_kwargs = dict(dtype=object, keep_default_na=False)
-    # pandas infers compression by extension; keep dtype=object to avoid coercion
     if chunksize and chunksize > 0:
         for chunk in pd.read_csv(path, chunksize=chunksize, **read_kwargs):  # type: ignore[arg-type]
             _process_frame(chunk)
@@ -354,7 +453,6 @@ def validate_csv(
     ok = len(errors) == 0
     result = CSVValidationResult(ok=ok, errors=errors, n_rows=n_rows, n_valid=n_valid)
 
-    # Optional report
     if write_report:
         report = {
             "ok": ok,
@@ -368,7 +466,7 @@ def validate_csv(
             "schema": str(_find_schema_file(schema_path)),
         }
         Path(write_report).parent.mkdir(parents=True, exist_ok=True)
-        Path(write_report).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        write_json_pretty(write_report, report)
 
     return result
 
@@ -379,7 +477,7 @@ def validate_csv(
 
 def _main() -> None:
     ap = argparse.ArgumentParser(description="Validate SpectraMind V50 submission CSV.")
-    ap.add_argument("csv", type=str, help="Path to submission CSV (supports .csv.gz).")
+    ap.add_argument("csv", type=str, help="Path to submission CSV (supports .csv.gz/.bz2/.zip).")
     ap.add_argument("--schema", type=str, default=None, help="Path to submission.schema.json (optional).")
     ap.add_argument("--bins", type=int, default=N_BINS_DEFAULT, help=f"Number of spectral bins (default {N_BINS_DEFAULT}).")
     ap.add_argument("--no-strict-ids", action="store_true", help="Do not enforce unique/non-empty ids.")
@@ -387,6 +485,7 @@ def _main() -> None:
     ap.add_argument("--no-alt-id", action="store_true", help="Do not accept 'sample_id' as an alternative id.")
     ap.add_argument("--chunksize", type=int, default=None, help="Validate in chunks (memory friendly).")
     ap.add_argument("--report", type=str, default=None, help="Write JSON report to this path.")
+    ap.add_argument("--strict-wide-order", action="store_true", help="Enforce exact wide column order if detected.")
     args = ap.parse_args()
 
     res = validate_csv(
@@ -398,6 +497,7 @@ def _main() -> None:
         allow_alt_id=(not args.no_alt_id),
         schema_path=args.schema,
         write_report=args.report,
+        strict_wide_order=args.strict_wide_order,
     )
 
     print(json.dumps(asdict(res), indent=2, sort_keys=True))
