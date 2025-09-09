@@ -1,22 +1,22 @@
-# src/spectramind/pipeline/calibrate.py
 from __future__ import annotations
 
 """
-SpectraMind V50 — Calibration Runner (Hydra + Calibration Orchestrator)
-=======================================================================
+SpectraMind V50 — Calibration Runner (Hydra + Orchestrator)
+===========================================================
 
 Key capabilities
 ----------------
 • Hydra config composition with robust defaults
 • Kaggle/CI guardrails (workers, determinism, low-mem)
 • DVC-/CI-friendly output planning (calibration root)
-• Config snapshot + artifact manifest + SHA256 digests
+• Config snapshot + artifact manifest + SHA256 digests + run_id
 • Optional JSONL event logging (start/end) and run manifest
+• Deterministic seeding for numpy/torch
 
 Notes
 -----
-• CLI stays thin; this module holds the orchestration/business logic.
-• The actual calibration is delegated to `spectramind.calibration.run(cfg)`.
+• Thin runner; the actual calibration logic lives in `spectramind.calibration.run(cfg)`.
+• This module returns a dict payload (artifacts + metadata) for pipeline tooling.
 """
 
 import hashlib
@@ -47,7 +47,6 @@ __all__ = ["run"]
 # Data model
 # ======================================================================================
 
-
 @dataclass(frozen=True, slots=True)
 class CalibPayload:
     """Strongly-typed calibration invocation payload."""
@@ -63,7 +62,6 @@ class CalibPayload:
 # Public API
 # ======================================================================================
 
-
 def run(
     *,
     config_name: str = "calibrate",
@@ -72,20 +70,28 @@ def run(
     strict: bool = True,
     quiet: bool = False,
     env: Dict[str, Any] | None = None,
-) -> None:
+) -> Dict[str, Any]:
     """
-    Calibration runner: raw data + calib config → calibrated artifacts (tensors, cubes, json).
+    Orchestrate calibration: raw data + calib config → calibrated artifacts (tensors, cubes, json).
 
-    Responsibilities
-    ----------------
-    • Compose Hydra config (calib + data refs)
-    • Plan a DVC-friendly output structure
-    • Dispatch to internal calibration orchestrator
-    • Verify outputs and persist a manifest + config snapshots
+    Returns
+    -------
+    dict with shape:
+      {
+        "ok": bool,
+        "run_id": str,
+        "out_dir": str,
+        "artifacts": {
+          "primary": [paths...],
+          "tensors": [paths...],
+          "cubes": [paths...],
+          "summaries": [paths...],
+        }
+      }
     """
     payload = CalibPayload(
         config_name=config_name,
-        overrides=list(overrides or []),
+        overrides=_normalize_overrides(overrides),
         out_dir=str(out_dir) if out_dir is not None else None,
         strict=strict,
         quiet=quiet,
@@ -95,13 +101,16 @@ def run(
     repo_root = _find_repo_root()
     cfg = _compose_hydra_config(repo_root, payload)
 
-    # honor explicit out_dir
+    # honor explicit out_dir if provided
     if payload.out_dir is not None:
         cfg.calib.out_dir = payload.out_dir
 
     # detect env if not provided & apply guardrails
     _auto_env_flags(payload.env)
     _apply_guardrails(cfg, payload.env)
+
+    # deterministic seeding
+    _seed_everything(int(cfg.runtime.seed))
 
     # normalize modules (accept comma-separated string or list[str])
     cfg.calib.modules = _normalize_modules(cfg.calib.modules)
@@ -126,6 +135,7 @@ def run(
                 "num_workers": int(cfg.calib.num_workers),
                 "deterministic": bool(cfg.runtime.deterministic),
                 "low_mem_mode": bool(cfg.runtime.low_mem_mode),
+                "seed": int(cfg.runtime.seed),
             },
         )
 
@@ -178,6 +188,7 @@ def run(
                 "modules": list(cfg.calib.modules),
                 "outputs": outputs,
                 "env": payload.env,
+                "seed": int(cfg.runtime.seed),
             },
         )
         save_manifest(manifest, calib_root / "manifest.json")
@@ -186,10 +197,27 @@ def run(
         evt_logger.info("calibrate/end", data={"outputs": outputs})
         evt_logger.close()
 
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "out_dir": str(calib_root),
+        "artifacts": outputs,
+    }
+
 
 # ======================================================================================
 # Hydra / Defaults / Guardrails
 # ======================================================================================
+
+def _normalize_overrides(ovr: Iterable[str] | None) -> list[str]:
+    if not ovr:
+        return []
+    out: list[str] = []
+    for s in ovr:
+        s = str(s).strip()
+        if s:
+            out.append(s)
+    return out
 
 
 def _compose_hydra_config(repo_root: Path, payload: CalibPayload) -> DictConfig:
@@ -286,10 +314,27 @@ def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
         cfg.runtime.low_mem_mode = True
 
 
+def _seed_everything(seed: int) -> None:
+    """Best-effort deterministic seeding (numpy, torch if present)."""
+    try:
+        import numpy as _np
+        _np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch as _torch  # pragma: no cover
+        _torch.manual_seed(seed)
+        _torch.cuda.manual_seed_all(seed)
+        _torch.backends.cudnn.deterministic = True
+        _torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+
 # ======================================================================================
 # Planning, Snapshots, Discovery, Manifest
 # ======================================================================================
-
 
 def _prepare_calib_root(repo_root: Path, cfg: DictConfig) -> Path:
     """Create calibration root under repo root (DVC-friendly); return absolute path."""
@@ -347,7 +392,7 @@ def _discover_outputs(calib_root: Path, orchestrator_ret: Any) -> Dict[str, List
       • primary: list[str] (main calibrated artifacts)
       • tensors: list[str]
       • cubes: list[str]
-      • summaries: list[str] (json)
+      • summaries: list[str]
     Orchestrator may return:
       - a path to a primary artifact
       - a dict of paths (e.g., {'primary': '...', 'summary': '...'})
@@ -362,16 +407,18 @@ def _discover_outputs(calib_root: Path, orchestrator_ret: Any) -> Dict[str, List
                 if p.exists():
                     outputs["primary"].append(str(p))
             elif isinstance(orchestrator_ret, dict):
-                for k, v in orchestrator_ret.items():
+                for _, v in orchestrator_ret.items():
                     try:
                         p = Path(str(v)).resolve()
                         if p.exists():
                             if p.is_file() and p.suffix.lower() == ".json":
                                 outputs["summaries"].append(str(p))
                             elif p.is_dir():
-                                if "tensor" in k:
+                                # classify by parent name
+                                sp = str(p).lower()
+                                if "tensor" in sp:
                                     outputs["tensors"].append(str(p))
-                                elif "cube" in k:
+                                elif "cube" in sp:
                                     outputs["cubes"].append(str(p))
                                 else:
                                     outputs["primary"].append(str(p))
@@ -387,9 +434,10 @@ def _discover_outputs(calib_root: Path, orchestrator_ret: Any) -> Dict[str, List
         if d.exists():
             for p in d.rglob("*"):
                 if p.is_file() and p.suffix.lower() in {".npz", ".npy", ".pt", ".pth", ".parquet"}:
-                    if "tensors" in str(p.parent):
+                    parent = str(p.parent).lower()
+                    if "tensors" in parent:
                         outputs["tensors"].append(str(p.resolve()))
-                    elif "cubes" in str(p.parent):
+                    elif "cubes" in parent:
                         outputs["cubes"].append(str(p.resolve()))
                     else:
                         outputs["primary"].append(str(p.resolve()))
@@ -434,7 +482,6 @@ def _write_calibration_manifest(calib_root: Path, cfg: DictConfig, outputs: Dict
 # Common helpers
 # ======================================================================================
 
-
 def _nearest_git_root(path: Path) -> Path | None:
     """Return nearest parent that contains `.git`, else None."""
     for p in [path, *path.parents]:
@@ -468,10 +515,13 @@ def _as_path(p: str | os.PathLike[str]) -> Path:
 
 def _sha256_of_file(path: Path, chunk: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
-    with path.open("rb") as f:
-        while True:
-            b = f.read(chunk)
-            if not b:
-                break
-            h.update(b)
+    try:
+        with path.open("rb") as f:
+            while True:
+                b = f.read(chunk)
+                if not b:
+                    break
+                h.update(b)
+    except Exception:
+        return ""
     return h.hexdigest()
