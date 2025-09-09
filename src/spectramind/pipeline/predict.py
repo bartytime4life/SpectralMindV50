@@ -1,4 +1,3 @@
-# src/spectramind/pipeline/predict.py
 from __future__ import annotations
 
 """
@@ -10,13 +9,15 @@ Key capabilities
 • Hydra config composition with robust defaults
 • Kaggle/CI guardrails (workers, batch-size, determinism, low-mem)
 • Checkpoint & output path resolution (DVC-/CI-friendly)
+• Deterministic seeding (numpy/torch) from cfg.runtime.seed
 • Config snapshot + artifact manifest + SHA256
 • Optional JSONL event logging (start/end) and run manifest
 
 Notes
 -----
-• CLI stays thin; this module holds the orchestration/business logic.
-• The actual inference is delegated to `spectramind.inference.predict.run(cfg)`.
+• CLI stays thin; this module holds orchestration/business logic.
+• The actual inference is delegated to `spectramind.predict.inference.infer(cfg)`.
+• Returns a structured payload for pipeline chaining.
 """
 
 import hashlib
@@ -47,11 +48,9 @@ __all__ = ["run"]
 # Data model
 # ======================================================================================
 
-
 @dataclass(frozen=True, slots=True)
 class PredictPayload:
     """Strongly-typed prediction invocation payload."""
-
     config_name: str
     overrides: list[str]
     checkpoint: Optional[str]
@@ -65,7 +64,6 @@ class PredictPayload:
 # Public API
 # ======================================================================================
 
-
 def run(
     *,
     config_name: str = "predict",
@@ -75,7 +73,7 @@ def run(
     strict: bool = True,
     quiet: bool = False,
     env: Dict[str, Any] | None = None,
-) -> None:
+) -> Dict[str, Any]:
     """
     Inference runner: checkpoint + test data → predictions (CSV/Parquet).
 
@@ -84,12 +82,26 @@ def run(
     • Compose Hydra config (predict + data + model refs)
     • Resolve/validate checkpoint and output destination
     • Apply Kaggle/CI guardrails (workers, batch size, deterministic flags)
+    • Apply deterministic seeding (numpy/torch)
     • Emit config snapshot & call internal orchestrator
     • Verify output was written; persist inference manifest & JSONL events
+
+    Returns
+    -------
+    dict with shape:
+      {
+        "ok": True,
+        "run_id": str,
+        "out_path": str,
+        "artifacts": {
+          "predictions": str,
+          "sha256": str
+        }
+      }
     """
     payload = PredictPayload(
         config_name=config_name,
-        overrides=list(overrides or []),
+        overrides=[str(x).strip() for x in (overrides or []) if str(x).strip()],
         checkpoint=checkpoint,
         out_path=str(out_path) if out_path is not None else None,
         strict=strict,
@@ -113,6 +125,9 @@ def run(
     _apply_guardrails(cfg, payload.env)
     _validate_minimal_schema(cfg, strict=payload.strict)
 
+    # Deterministic seeding
+    _seed_everything(int(cfg.runtime.seed))
+
     # Resolve paths & compose traceability
     ckpt_file = _resolve_checkpoint(repo_root, cfg, strict=payload.strict)
     out_file = _prepare_output_path(repo_root, cfg)
@@ -120,7 +135,7 @@ def run(
     # Config snapshot (human+machine)
     _emit_config_snapshot(out_file, cfg)
 
-    # Optional JSONL event logger (linked to output dir/version)
+    # Optional JSONL event logger (linked to output file stem)
     evt_logger: Optional[EventLogger] = None
     run_id = out_file.stem
     if _HAS_SM_LOGGING:
@@ -137,17 +152,21 @@ def run(
                 "num_workers": int(cfg.predict.num_workers),
                 "deterministic": bool(cfg.runtime.deterministic),
                 "low_mem_mode": bool(cfg.runtime.low_mem_mode),
+                "seed": int(cfg.runtime.seed),
             },
         )
 
-    # Dispatch to user orchestrator
+    # Dispatch to orchestrator
     try:
-        # Expected orchestrator: spectramind.inference.predict.run(cfg=cfg)
-        from spectramind.inference.predict import run as run_inference  # type: ignore[attr-defined]
+        # Upgraded orchestrator: spectramind.predict.inference.infer(cfg)
+        from spectramind.predict.inference import infer as run_inference  # type: ignore[attr-defined]
     except Exception as e:  # pragma: no cover
+        if evt_logger is not None:
+            evt_logger.error("predict/error", message="import_failure", data={"cause": f"{type(e).__name__}: {e}"})
+            evt_logger.close()
         raise RuntimeError(
             "Inference entrypoint not found. Implement "
-            "`spectramind.inference.predict.run(cfg)` or adjust this import. "
+            "`spectramind.predict.inference.infer(cfg)` or adjust this import. "
             f"Cause: {type(e).__name__}: {e}"
         ) from e
 
@@ -157,25 +176,29 @@ def run(
         sys.stderr.write(f"[predict] checkpoint = {ckpt_file}\n")
         sys.stderr.write(f"[predict] out_path   = {out_file}\n")
 
-    # Orchestrator may optionally return the final artifact path (string/Path)
-    result = run_inference(cfg=cfg)
-    if result:
-        try:
-            candidate = Path(str(result)).resolve()
+    # Orchestrator may optionally return the final artifact path
+    result_path: Path = out_file
+    try:
+        ret = run_inference(cfg=cfg)
+        if ret:
+            candidate = Path(str(ret)).resolve()
             if candidate.is_file():
-                out_file = candidate  # prefer orchestrator's path if present
-        except Exception:
-            pass
+                result_path = candidate
+    except Exception as e:
+        if evt_logger is not None:
+            evt_logger.error("predict/error", message="orchestrator_failure", data={"cause": f"{type(e).__name__}: {e}"})
+            evt_logger.close()
+        raise
 
     # Verify output exists
-    if not out_file.exists():
+    if not result_path.exists():
         if evt_logger is not None:
-            evt_logger.error("predict/error", message="output_missing", data={"expected_path": str(out_file)})
+            evt_logger.error("predict/error", message="output_missing", data={"expected_path": str(result_path)})
             evt_logger.close()
-        raise RuntimeError(f"[predict] orchestrator did not produce output: {out_file}")
+        raise RuntimeError(f"[predict] orchestrator did not produce output: {result_path}")
 
     # Persist an inference manifest (DVC/CI-friendly)
-    _write_inference_manifest(out_file, cfg)
+    _write_inference_manifest(result_path, cfg)
 
     # Optional: save a richer run manifest
     if _HAS_SM_LOGGING:
@@ -183,30 +206,40 @@ def run(
             stage="predict",
             config_snapshot=OmegaConf.to_container(cfg, resolve=True),  # type: ignore
             extra={
-                "predictions_path": str(out_file),
-                "predictions_sha256": _sha256_of_file(out_file),
+                "predictions_path": str(result_path),
+                "predictions_sha256": _sha256_of_file(result_path),
                 "checkpoint": str(cfg.predict.get("checkpoint") or ""),
                 "hydra_overrides": list(getattr(cfg, "hydra", {}).get("overrides", [])),
                 "env": payload.env,
+                "seed": int(cfg.runtime.seed),
             },
         )
-        save_manifest(manifest, out_file.parent / "manifest.json")
+        save_manifest(manifest, result_path.parent / "manifest.json")
 
     if evt_logger is not None:
         evt_logger.info(
             "predict/end",
             data={
-                "predictions_path": str(out_file),
-                "predictions_sha256": _sha256_of_file(out_file),
+                "predictions_path": str(result_path),
+                "predictions_sha256": _sha256_of_file(result_path),
             },
         )
         evt_logger.close()
+
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "out_path": str(result_path),
+        "artifacts": {
+            "predictions": str(result_path),
+            "sha256": _sha256_of_file(result_path),
+        },
+    }
 
 
 # ======================================================================================
 # Hydra / Defaults / Guardrails
 # ======================================================================================
-
 
 def _compose_hydra_config(repo_root: Path, payload: PredictPayload) -> DictConfig:
     """Compose Hydra config from repo `configs/` with robust defaults + strict mode."""
@@ -217,14 +250,13 @@ def _compose_hydra_config(repo_root: Path, payload: PredictPayload) -> DictConfi
             "(expected at repo root per repo blueprint)"
         )
 
-    # Prefer absolute-dir initializer (stable CWD)
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
         try:
             cfg = compose(config_name=payload.config_name, overrides=payload.overrides)
         except Exception:
             if payload.strict:
                 raise
-            # Best-effort: attempt to compose base config with no overrides
+        # Best-effort: attempt to compose base config with no overrides
             cfg = compose(config_name=payload.config_name, overrides=[])
 
     _ensure_defaults(cfg)
@@ -302,7 +334,6 @@ def _apply_guardrails(cfg: DictConfig, env: Dict[str, Any]) -> None:
 # ======================================================================================
 # Path resolution / Snapshots / Manifests
 # ======================================================================================
-
 
 def _resolve_checkpoint(repo_root: Path, cfg: DictConfig, *, strict: bool) -> Path:
     raw = str(cfg.predict.checkpoint or "")
@@ -421,3 +452,21 @@ def _find_repo_root() -> Path:
 
 def _as_path(p: str | os.PathLike[str]) -> Path:
     return Path(p) if isinstance(p, Path) else Path(os.fspath(p))
+
+
+def _seed_everything(seed: int) -> None:
+    """Best-effort deterministic seeding (numpy, torch if present)."""
+    try:
+        import numpy as _np
+        _np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch as _torch  # pragma: no cover
+        _torch.manual_seed(seed)
+        _torch.cuda.manual_seed_all(seed)
+        _torch.backends.cudnn.deterministic = True
+        _torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+    os.environ["PYTHONHASHSEED"] = str(seed)
