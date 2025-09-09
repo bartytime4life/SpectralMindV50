@@ -4,9 +4,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union, Iterable
 
 BackendArray = Union["np.ndarray", "torch.Tensor"]  # noqa: F821
+
+__all__ = [
+    "NonLinearity",
+    "ADCParams",
+    "ADCResult",
+    "calibrate_adc",
+    "build_nonlinearity_from_coeffs",
+    "sanity_check_params",
+]
 
 
 # --------------------------- Backend helpers ---------------------------------
@@ -24,14 +33,47 @@ def _torch() -> Any:
     return torch
 
 
-def _to_float(x: BackendArray, dtype: Optional[Any | str] = None) -> BackendArray:
+def _resolve_dtype(backend: str, dtype: Optional[Union[str, Any]]) -> Any:
+    """
+    Resolve dtype consistently for both backends.
+
+    - backend: "torch" or "numpy"
+    - dtype may be: None | str (e.g., "float32", "float64") | backend dtype object
+    """
+    if dtype is None:
+        return None
+
+    if backend == "torch":
+        torch = _torch()
+        if isinstance(dtype, str):
+            # Map common strings to torch dtypes; fallback to attribute lookup
+            map_ = {
+                "float32": torch.float32,
+                "float": torch.float32,
+                "float64": torch.float64,
+                "double": torch.float64,
+                "float16": torch.float16,
+                "half": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            return map_.get(dtype.lower(), getattr(torch, dtype))
+        return dtype
+
+    # numpy
+    np = _np()
+    if isinstance(dtype, str):
+        return getattr(np, dtype)
+    return dtype
+
+
+def _to_float(x: BackendArray, dtype: Optional[Union[str, Any]] = None) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        target = getattr(torch, dtype) if isinstance(dtype, str) else (dtype or torch.float32)
+        target = _resolve_dtype("torch", dtype) or torch.float32
         return x.to(target)
     else:
         np = _np()
-        target = dtype or np.float32
+        target = _resolve_dtype("numpy", dtype) or np.float32
         return x.astype(target, copy=False)
 
 
@@ -83,7 +125,7 @@ def _clip(x: BackendArray, low: Optional[float], high: Optional[float]) -> Backe
 class NonLinearity:
     """
     Forward polynomial model: y = c0 + c1*x + c2*x^2 + ... + cN*x^N
-    During calibration we invert it with Newton iterations.
+    During calibration we invert it with damped Newton iterations.
 
     coeffs  : [..., deg+1] ascending degree (c0..cN). None ≡ identity.
     max_iter: Newton iterations (element-wise).
@@ -107,8 +149,8 @@ class NonLinearity:
             torch = _torch()
             if c.numel() < 2:
                 return True
-            ok01 = torch.allclose(c[..., 0], torch.zeros_like(c[..., 0]), atol=1e-9) \
-                and torch.allclose(c[..., 1], torch.ones_like(c[..., 1]), atol=1e-9)
+            ok01 = torch.allclose(c[..., 0], torch.zeros_like(c[..., 0]), atol=1e-9) and \
+                   torch.allclose(c[..., 1], torch.ones_like(c[..., 1]), atol=1e-9)
             rest_ok = True
             if c.shape[-1] > 2:
                 rest_ok = torch.allclose(c[..., 2:], torch.zeros_like(c[..., 2:]), atol=1e-12)
@@ -183,10 +225,9 @@ class NonLinearity:
             f = self.poly(x) - y_meas
             df = self.dpoly(x)
 
-            # Guard df≈0 without leaving device/dtype
-            tiny = _full_like(df, 1e-12)
-            sgn = _where(df >= 0, tiny, -tiny)
-            df = _where(_abs(df) < 1e-12, sgn, df)
+            # Guard df≈0 without leaving device/dtype, preserve sign
+            eps = _full_like(df, 1e-12)
+            df = _where(_abs(df) < 1e-12, df + _where(df >= 0, eps, -eps), df)
 
             step = f / df
             x_new = x - damp * step
@@ -195,7 +236,7 @@ class NonLinearity:
 
             # Per-element done
             done = _abs(step) <= tol
-            # If every element is done, break early
+            # Early exit only when all are converged
             if _is_torch(done):
                 if bool(done.all()):
                     x = x_new
@@ -227,7 +268,7 @@ class ADCParams:
     nonlinearity  : NonLinearity model to invert
     quant_debias  : subtract 0.5 LSB prior to offset removal (mid-tread ADC)
     clip_out      : optional (low, high) clamp on output signal
-    dtype         : torch dtype string (e.g., "float32") or numpy dtype
+    dtype         : dtype (torch or numpy or string) for floats in computation
     """
     gain: BackendArray
     offset: BackendArray
@@ -266,7 +307,7 @@ def calibrate_adc(
     Calibrate raw ADC values → linearized, gain/offset-corrected signal.
 
     Steps:
-      1) cast to float
+      1) cast to float with requested dtype
       2) saturated := raw_dn >= sat_dn
       3) (optional) quant_debias: raw_dn -= 0.5
       4) offset removal: x_off = raw_dn - offset
@@ -274,7 +315,7 @@ def calibrate_adc(
       6) divide by gain: signal = x_lin / gain
       7) (optional) clip_out
     """
-    # Cast to float consistently
+    # Cast inputs to float consistently
     x = _to_float(raw_dn, dtype=params.dtype)
     gain = _to_float(params.gain, dtype=params.dtype)
     offset = _to_float(params.offset, dtype=params.dtype)
@@ -287,6 +328,14 @@ def calibrate_adc(
     if return_intermediate:
         meta["raw_dn"] = x
         meta["sat_threshold"] = sat_thr
+        # Count saturation for quick diagnostics
+        if _is_torch(saturated):
+            meta["saturated_count"] = int(saturated.sum().item())
+            meta["saturated_ratio"] = float(saturated.float().mean().item())
+        else:
+            np = _np()
+            meta["saturated_count"] = int(saturated.sum())
+            meta["saturated_ratio"] = float(np.mean(saturated))
 
     # Optional 0.5 LSB debias (mid-tread ADC)
     if params.quant_debias:
@@ -308,6 +357,7 @@ def calibrate_adc(
     signal = _clip(signal, low, high)
 
     if return_intermediate:
+        # Enrich metadata for reproducibility/debuggability
         meta.update(
             dict(
                 quant_debias=params.quant_debias,
@@ -323,6 +373,8 @@ def calibrate_adc(
                 nonlinearity_tol=params.nonlinearity.tol,
                 nonlinearity_damping=params.nonlinearity.damping,
                 nonlinearity_clamp=params.nonlinearity.clamp,
+                compute_dtype=str(signal.dtype) if hasattr(signal, "dtype") else "float",
+                backend="torch" if _is_torch(signal) else "numpy",
             )
         )
 
@@ -341,30 +393,44 @@ def build_nonlinearity_from_coeffs(
     return NonLinearity(coeffs=coeffs, max_iter=max_iter, tol=tol, damping=damping, clamp=clamp)
 
 
+def _broadcastable(shape_a: Tuple[int, ...], shape_b: Tuple[int, ...]) -> bool:
+    """
+    True if NumPy-style broadcasting from B into A is possible.
+    """
+    # Align right
+    a = list(shape_a)[::-1]
+    b = list(shape_b)[::-1]
+    for i in range(max(len(a), len(b))):
+        da = a[i] if i < len(a) else 1
+        db = b[i] if i < len(b) else 1
+        if da != 1 and db != 1 and da != db:
+            return False
+    return True
+
+
 def sanity_check_params(raw_shape: Tuple[int, ...], params: ADCParams) -> None:
     """
     Best-effort broadcastability checks for gain/offset/coeffs against raw shape.
-    Uses 1-sized dummy dimensions to avoid large allocations.
     """
-    np = _np()
-    dummy = np.empty(tuple(1 if d > 0 else 1 for d in raw_shape), dtype=np.float32)
+    g_shape = getattr(params.gain, "shape", ())
+    o_shape = getattr(params.offset, "shape", ())
 
-    def _check(x: BackendArray | None, name: str) -> None:
-        if x is None:
-            return
-        try:
-            _ = dummy + np.empty_like(np.zeros(getattr(x, "shape", (1,)), dtype=np.float32))
-        except Exception as e:
-            raise ValueError(
-                f"{name} with shape {getattr(x,'shape',None)} may not broadcast to raw shape {raw_shape}: {e}"
-            )
+    if not _broadcastable(raw_shape, g_shape):
+        raise ValueError(f"gain shape {g_shape} does not broadcast to raw shape {raw_shape}")
+    if not _broadcastable(raw_shape, o_shape):
+        raise ValueError(f"offset shape {o_shape} does not broadcast to raw shape {raw_shape}")
 
-    _check(params.gain, "gain")
-    _check(params.offset, "offset")
     coeffs = getattr(params.nonlinearity, "coeffs", None)
     if coeffs is not None:
-        # touch one coeff array to check the broadcast path
-        _check(coeffs[..., 0], "nonlinearity.coeffs")
+        if coeffs.shape[-1] < 1:
+            raise ValueError("nonlinearity.coeffs must have at least 1 coefficient (c0).")
+        # For poly evaluation, coeffs[..., deg+1] broadcasts element-wise with x
+        coeffs_shape = coeffs.shape[:-1]  # drop degree axis
+        if not _broadcastable(raw_shape, coeffs_shape):
+            raise ValueError(
+                f"nonlinearity.coeffs shape {coeffs.shape} (sans degree {coeffs_shape}) "
+                f"does not broadcast to raw shape {raw_shape}"
+            )
 
 
 # --------------------------- Lightweight self-tests ---------------------------
