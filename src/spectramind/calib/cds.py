@@ -21,6 +21,14 @@ from typing import Any, Dict, Optional, Tuple, Union, Literal
 
 BackendArray = Union["np.ndarray", "torch.Tensor"]  # noqa: F821
 
+__all__ = [
+    "AggMode",
+    "CDSMode",
+    "WeightMode",
+    "CDSParams",
+    "CDSResult",
+    "cds",
+]
 
 # -----------------------------------------------------------------------------
 # Minimal backend shims (mirroring adc.py style for consistency)
@@ -40,6 +48,30 @@ def _torch() -> Any:
     return torch
 
 
+def _resolve_dtype(backend: str, dtype: Optional[Union[str, Any]]) -> Any:
+    if dtype is None:
+        return None
+    if backend == "torch":
+        torch = _torch()
+        if isinstance(dtype, str):
+            m = {
+                "float32": torch.float32,
+                "float": torch.float32,
+                "float64": torch.float64,
+                "double": torch.float64,
+                "float16": torch.float16,
+                "half": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            return m.get(dtype.lower(), getattr(torch, dtype))
+        return dtype
+    # numpy
+    np = _np()
+    if isinstance(dtype, str):
+        return getattr(np, dtype)
+    return dtype
+
+
 def _as_tensor_like(x: BackendArray, val: float) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
@@ -57,16 +89,12 @@ def _to_float(x: BackendArray, dtype: Optional[Union[str, Any]] = None) -> Backe
     """
     if _is_torch(x):
         torch = _torch()
-        target = dtype
-        if isinstance(dtype, str):
-            target = getattr(torch, dtype)
-        return x.to(target or torch.float32)
+        target = _resolve_dtype("torch", dtype) or torch.float32
+        return x.to(target)
     else:
         np = _np()
-        target = dtype
-        if isinstance(dtype, str):
-            target = getattr(np, dtype)
-        return x.astype(target or np.float32, copy=False)
+        target = _resolve_dtype("numpy", dtype) or np.float32
+        return x.astype(target, copy=False)
 
 
 def _zeros_like(x: BackendArray, shape: Optional[Tuple[int, ...]] = None) -> BackendArray:
@@ -100,16 +128,6 @@ def _isnan(x: BackendArray) -> BackendArray:
     return _np().isnan(x)
 
 
-def _fill_nan(x: BackendArray, val: float) -> BackendArray:
-    if _is_torch(x):
-        torch = _torch()
-        return torch.where(torch.isnan(x), _as_tensor_like(x, val), x)
-    else:
-        x = x.copy()
-        x[_np().isnan(x)] = val
-        return x
-
-
 def _nanmean(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
@@ -129,10 +147,10 @@ def _nanmean(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
 def _torch_nanmedian(x, axis=None, keepdims=False):
     """
     Torch-compatible nanmedian: tries torch.nanmedian when available,
-    else sorts with nan -> +inf and takes the median robustly.
+    else uses take_along_dim workaround, else NumPy bridge last-resort.
     """
     torch = _torch()
-    # Newer torch:
+    # Newer torch
     if hasattr(torch, "nanmedian"):
         return torch.nanmedian(x, dim=axis, keepdim=keepdims).values  # type: ignore[attr-defined]
 
@@ -143,27 +161,9 @@ def _torch_nanmedian(x, axis=None, keepdims=False):
     sorted_xf, _ = torch.sort(xf, dim=axis)
     valid = (~isnan).sum(dim=axis, keepdim=True)
 
-    # Determine low/high indices
-    # For even counts, median = mean(low, high). For odd, they are identical.
     low_idx = (valid - 1) // 2
     high_idx = valid // 2
 
-    # Build index tensors to gather along axis
-    def _gather_along_axis(arr, idx, dim):
-        # idx shape should match arr except dim=1 index; broadcast as needed
-        # Expand idx to arr shape for gather
-        # Create a full index list
-        expanded = []
-        for d in range(arr.ndim):
-            if d == dim:
-                expanded.append(idx)
-            else:
-                expanded.append(torch.arange(arr.shape[d], device=arr.device).view(
-                    *((1,) * d), arr.shape[d], *((1,) * (arr.ndim - d - 1))
-                ).expand_as(arr)[(...,)])
-        return arr.gather(dim, torch.zeros_like(arr).long().add(0))  # placeholder (never used)
-
-    # Simpler: use take_along_dim if available
     if hasattr(torch, "take_along_dim"):
         tl = torch.take_along_dim(sorted_xf, low_idx.long(), dim=axis)
         th = torch.take_along_dim(sorted_xf, high_idx.long(), dim=axis)
@@ -173,11 +173,11 @@ def _torch_nanmedian(x, axis=None, keepdims=False):
         # if all valid==0 -> med == inf; replace those with nan
         all_nan = (valid == 0)
         if all_nan.any():
-            repl = torch.where(all_nan, torch.full_like(med, float("nan")), med)
+            repl = torch.where(all_nan.squeeze(dim=axis), torch.full_like(med, float("nan")), med)
             return repl
         return med
 
-    # As a last resort (very old torch), fallback to NumPy bridge (CPU); small perf hit.
+    # As a last resort (very old torch), fallback to NumPy bridge (CPU).
     return _to_numpy_and_back_nanmedian(x, axis=axis, keepdims=keepdims)
 
 
@@ -310,7 +310,6 @@ def _normalize_time_axis(x: BackendArray, time_axis: int) -> Tuple[BackendArray,
     target = nd - 3
     if time_axis == target:
         return x, target
-    # transpose by swapping the given time axis with the target
     if _is_torch(x):
         perm = list(range(nd))
         perm[target], perm[time_axis] = perm[time_axis], perm[target]
@@ -378,33 +377,29 @@ def _robust_aggregate(
     w   : effective sample count over axis
     var : estimated sample variance of the aggregate (per-pixel), i.e.
           var(val) ~ (std^2 / w) for mean; for median, we return an empirical
-          robust proxy using 1.253 * MAD as std-equivalent (asymptotic factor).
+          robust proxy using asymptotic factor (pi/2)*sigma^2/n.
     """
     torch_mode = _is_torch(x)
-    # short path without rejection
+
     if not cosmic_reject:
         if agg == "mean":
             val = _nanmean(x, axis=axis, keepdims=False)
             std = _nanstd(x, axis=axis, keepdims=False)
         else:
             val = _nanmedian(x, axis=axis, keepdims=False)
-            # Robust std proxy for a normal distribution: sigma ≈ 1.4826 * MAD; median SE ~ 1.253*sigma/sqrt(n)
             mad = _nanmedian(_abs(x - _nanmedian(x, axis=axis, keepdims=True)), axis=axis, keepdims=False)
             std = 1.4826 * mad
-        # weights and variance of estimator
         if torch_mode:
             w = (~_torch().isnan(x)).sum(dim=axis)
+            w_clamped = w.clamp_min(1)
         else:
-            w = _np().sum(~_np().isnan(x), axis=axis)
-        w_clamped = w.clone() if torch_mode else w.copy()
-        if torch_mode:
-            w_clamped = w_clamped.clamp_min(1)
-        else:
+            np = _np()
+            w = np.sum(~np.isnan(x), axis=axis)
+            w_clamped = w.copy()
             w_clamped[w_clamped < 1] = 1
         if agg == "mean":
             var = (std ** 2) / w_clamped
         else:
-            # For median, asymptotic variance ~ (pi/2) * (sigma^2 / n) ~ (1.5708)*sigma^2/n
             var = (1.5708 * (std ** 2)) / w_clamped
         return val, w, var
 
@@ -434,15 +429,16 @@ def _robust_aggregate(
         val = _nanmedian(cur, axis=axis, keepdims=False)
         mad = _nanmedian(_abs(cur - _nanmedian(cur, axis=axis, keepdims=True)), axis=axis, keepdims=False)
         std = 1.4826 * mad
+
     if torch_mode:
         w = (~_torch().isnan(cur)).sum(dim=axis)
+        w_clamped = w.clamp_min(1)
     else:
-        w = _np().sum(~_np().isnan(cur), axis=axis)
-    w_clamped = w.clone() if torch_mode else w.copy()
-    if torch_mode:
-        w_clamped = w_clamped.clamp_min(1)
-    else:
+        np = _np()
+        w = np.sum(~np.isnan(cur), axis=axis)
+        w_clamped = w.copy()
         w_clamped[w_clamped < 1] = 1
+
     if agg == "mean":
         var = (std ** 2) / w_clamped
     else:
