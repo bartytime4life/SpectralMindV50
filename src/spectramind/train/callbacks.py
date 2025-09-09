@@ -33,7 +33,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List, Union
+from typing import Any, Dict, Optional, Tuple, List
 
 # --- Optional heavy deps (required only when building callbacks) ---
 try:  # pragma: no cover
