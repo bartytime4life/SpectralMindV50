@@ -3,7 +3,7 @@
 # SpectraMind V50 — Training Entrypoint
 # -----------------------------------------------------------------------------
 # Orchestrates model & datamodule construction, callbacks, Trainer creation,
-# checkpoint resume, and training using Hydra-configured settings.
+# loggers, checkpoint resume, and training using Hydra-configured settings.
 #
 # Design goals:
 #   • Clean separation of config → instantiate/build → fit
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # --- Hydra / OmegaConf
 try:
@@ -40,7 +40,6 @@ except Exception as _e:  # pragma: no cover
     def rank_zero_only(fn):  # type: ignore
         def _wrap(*a, **k):
             return fn(*a, **k)
-
         return _wrap
 
     _PL_IMPORT_ERROR = _e
@@ -62,8 +61,9 @@ from .config import (
     build_trainer_kwargs,
     TrainPaths,  # for typing
 )
-from .collate import build_collate_fn, CollateConfig
-from .datamodule import ArielDataModule  # NEW: first-class DataModule
+from .collate import CollateConfig
+from .datamodule import ArielDataModule
+from .loggers import add_loggers_to_trainer_kwargs
 
 
 # ----------------------------------------------------------------------------- #
@@ -79,7 +79,7 @@ def _ensure_pl() -> None:
 
 @rank_zero_only
 def _log_rank_zero(msg: str) -> None:
-    print(f"[SpectraMind][train] {msg}")
+    print(f"[SpectraMind][train] {msg}", flush=True)
 
 
 def _save_config_snapshot(cfg: DictConfig, run_dir: Path) -> None:
@@ -138,24 +138,14 @@ def _build_datamodule_from_cfg(cfg: DictConfig, _paths: TrainPaths) -> Any:
         return dm
 
     # 2) ArielDataModule fallback (covers Hydra datasets OR NPZ dirs OR single-dir split)
-    # Collate
+    collate_dict = None
     if "collate" in cfg.data:
-        try:
-            collate_cfg = CollateConfig(
-                **(OmegaConf.to_container(cfg.data.collate, resolve=True) if OmegaConf else dict(cfg.data.collate))
-            )
-        except Exception:
-            collate_cfg = CollateConfig()
         collate_dict = (
             OmegaConf.to_container(cfg.data.collate, resolve=True)
             if OmegaConf
             else dict(cfg.data.collate)
         )
-    else:
-        collate_cfg = CollateConfig()
-        collate_dict = None
 
-    # Loader knobs
     dm = ArielDataModule(
         batch_size=int(getattr(cfg.data, "batch_size", 32)),
         shuffle=bool(getattr(cfg.data, "shuffle", True)),
@@ -176,6 +166,13 @@ def _build_datamodule_from_cfg(cfg: DictConfig, _paths: TrainPaths) -> Any:
         # Single NPZ source with split (optional)
         split_npz_dir=getattr(cfg.data, "split_npz_dir", None),
         split=getattr(cfg.data, "split", None),
+        # Optional samplers / transforms if provided in cfg.data.datamodule
+        train_sampler=getattr(getattr(cfg.data, "datamodule", {}), "train_sampler", None),
+        val_sampler=getattr(getattr(cfg.data, "datamodule", {}), "val_sampler", None),
+        test_sampler=getattr(getattr(cfg.data, "datamodule", {}), "test_sampler", None),
+        train_transforms=getattr(getattr(cfg.data, "datamodule", {}), "train_transforms", None),
+        val_transforms=getattr(getattr(cfg.data, "datamodule", {}), "val_transforms", None),
+        test_transforms=getattr(getattr(cfg.data, "datamodule", {}), "test_transforms", None),
     )
     return dm
 
@@ -219,9 +216,8 @@ def _attach_optimizers_if_needed(model: Any, cfg: DictConfig) -> None:
         # Assume model fully handles optimizers; nothing to do.
         return
 
-    # Try registry builders first
-    opt_name = getattr(cfg.optimizer, "name", None) if hasattr(cfg, "optimizer") else None
-    sch_name = getattr(cfg.scheduler, "name", None) if hasattr(cfg, "scheduler") else None
+    opt_name = getattr(getattr(cfg, "optimizer", {}), "name", None) if hasattr(cfg, "optimizer") else None
+    sch_name = getattr(getattr(cfg, "scheduler", {}), "name", None) if hasattr(cfg, "scheduler") else None
 
     optimizer = None
     scheduler = None
@@ -230,13 +226,10 @@ def _attach_optimizers_if_needed(model: Any, cfg: DictConfig) -> None:
         optimizer_builder = get_optimizer_builder(opt_name)
         optimizer = optimizer_builder(cfg=cfg, params=model.parameters())
 
-    # Optional scheduler
     if sch_name:
         scheduler_builder = get_scheduler_builder(sch_name)
         scheduler = scheduler_builder(cfg=cfg, optimizer=optimizer)
 
-    # Attach to model; Lightning will pick it up if `configure_optimizers` inspects attributes,
-    # or the training loop wrapper can pass explicitly (custom wrappers).
     setattr(model, "_external_optimizer", optimizer)
     setattr(model, "_external_scheduler", scheduler)
 
@@ -271,8 +264,13 @@ def train_from_config(cfg: DictConfig) -> Dict[str, Any]:
     model = _build_model_from_cfg_or_registry(cfg)
     _attach_optimizers_if_needed(model, cfg)
 
-    # Trainer configuration
+    # Trainer configuration (kwargs include strategy/precision/accumulate, etc.)
     trainer_kwargs = build_trainer_kwargs(cfg, default_ckpt_dir=paths.ckpt_dir)
+
+    # Inject loggers built from cfg.logging if not explicitly provided
+    add_loggers_to_trainer_kwargs(trainer_kwargs, cfg, paths)
+
+    # Callbacks
     callbacks, ckpt_cb = build_callbacks(cfg, ckpt_dir=paths.ckpt_dir, logs_dir=paths.logs_dir)
     trainer = pl.Trainer(callbacks=callbacks, **trainer_kwargs)
 
@@ -288,16 +286,32 @@ def train_from_config(cfg: DictConfig) -> Dict[str, Any]:
 
     # Fit
     _log_rank_zero("Starting training...")
-    trainer.fit(model=model, datamodule=datamodule, ckpt_path=getattr(trainer, "ckpt_path", None))
-    _log_rank_zero("Training finished.")
+    try:
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=getattr(trainer, "ckpt_path", None))
+    except KeyboardInterrupt:
+        _log_rank_zero("Training interrupted by user (KeyboardInterrupt).")
+    finally:
+        _log_rank_zero("Training finished.")
 
     # Optional: Validate/Test after fit if configured
     do_validate = bool(getattr(getattr(cfg, "train", {}), "validate_after_fit", True))
     if do_validate:
         _log_rank_zero("Running validation...")
-        trainer.validate(model=model, datamodule=datamodule, ckpt_path="best")
+        try:
+            trainer.validate(model=model, datamodule=datamodule, ckpt_path="best")
+        except Exception as e:
+            _log_rank_zero(f"Validation failed: {e!r}")
 
-    summary = {
+    # Announce best checkpoint if available
+    try:
+        best_path = getattr(ckpt_cb, "best_model_path", None)
+        best_score = getattr(ckpt_cb, "best_model_score", None)
+        if best_path:
+            _log_rank_zero(f"Best checkpoint: {best_path} (score={best_score})")
+    except Exception:
+        pass
+
+    summary: Dict[str, Optional[str] | int] = {
         "run_dir": str(paths.run_dir),
         "ckpt_dir": str(paths.ckpt_dir),
         "logs_dir": str(paths.logs_dir),
@@ -312,8 +326,6 @@ def train_from_config(cfg: DictConfig) -> Dict[str, Any]:
 # ----------------------------------------------------------------------------- #
 
 if __name__ == "__main__":  # pragma: no cover
-    # We avoid hardcoding config_path because the spectramind CLI typically calls this
-    # function after Hydra composition. This block is provided for direct manual runs.
     try:
         import hydra
 
