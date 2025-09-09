@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union, Literal
+from typing import Any, Dict, Optional, Tuple, Union, Literal, cast
 
 BackendArray = Union["np.ndarray", "torch.Tensor"]  # noqa: F821
 
