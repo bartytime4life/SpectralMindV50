@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union, Literal, overload, Sequence, cast
+from typing import Any, Dict, Optional, Tuple, Union, Literal, cast
 
 __all__ = [
     "FlatBuildParams",
@@ -53,14 +53,38 @@ def _torch() -> Any:
     return torch
 
 
+def _resolve_dtype(backend: str, dtype: Optional[Union[str, Any]]) -> Any:
+    if dtype is None:
+        return None
+    if backend == "torch":
+        torch = _torch()
+        if isinstance(dtype, str):
+            m = {
+                "float32": torch.float32,
+                "float": torch.float32,
+                "float64": torch.float64,
+                "double": torch.float64,
+                "float16": torch.float16,
+                "half": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            return m.get(dtype.lower(), getattr(torch, dtype))
+        return dtype
+    # numpy
+    np = _np()
+    if isinstance(dtype, str):
+        return getattr(np, dtype)
+    return dtype
+
+
 def _to_float(x: BackendArray, dtype: Optional[Union[str, Any]] = None) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        target = getattr(torch, dtype) if isinstance(dtype, str) else (dtype or torch.float32)
+        target = _resolve_dtype("torch", dtype) or torch.float32
         return x.to(target)
     else:
         np = _np()
-        target = getattr(np, dtype) if isinstance(dtype, str) else (dtype or np.float32)
+        target = _resolve_dtype("numpy", dtype) or np.float32
         return x.astype(target, copy=False)
 
 
@@ -90,6 +114,8 @@ def _abs(x: BackendArray) -> BackendArray:
 def _nanmean(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
+        if hasattr(torch, "nanmean"):
+            return torch.nanmean(x, dim=axis, keepdim=keepdims)  # type: ignore[attr-defined]
         mask = ~torch.isnan(x)
         num = torch.where(mask, x, torch.tensor(0.0, dtype=x.dtype, device=x.device)).sum(dim=axis, keepdim=keepdims)
         den = mask.sum(dim=axis, keepdim=keepdims).clamp_min(1)
@@ -100,21 +126,56 @@ def _nanmean(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray
         return _np().nanmean(x, axis=axis, keepdims=keepdims)
 
 
+def _torch_nanmedian(x, axis=None, keepdims=False):
+    torch = _torch()
+    # Prefer native nanmedian when present
+    if hasattr(torch, "nanmedian"):
+        return torch.nanmedian(x, dim=axis, keepdim=keepdims).values  # type: ignore[attr-defined]
+    # Fallback: +inf masking + sort + take_along_dim
+    isnan = torch.isnan(x)
+    xf = torch.where(isnan, torch.full_like(x, float("inf")), x)
+    sorted_xf, _ = torch.sort(xf, dim=axis)
+    valid = (~isnan).sum(dim=axis, keepdim=True)
+    low_idx = (valid - 1) // 2
+    high_idx = valid // 2
+    if hasattr(torch, "take_along_dim"):
+        tl = torch.take_along_dim(sorted_xf, low_idx.long(), dim=axis)
+        th = torch.take_along_dim(sorted_xf, high_idx.long(), dim=axis)
+        med = 0.5 * (tl + th)
+        if not keepdims:
+            med = med.squeeze(dim=axis)  # type: ignore[arg-type]
+        all_nan = (valid == 0)
+        if all_nan.any():
+            med = torch.where(all_nan.squeeze(dim=axis), torch.full_like(med, float("nan")), med)
+        return med
+    return _to_numpy_and_back_nanmedian(x, axis=axis, keepdims=keepdims)
+
+
 def _nanmedian(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray:
     if _is_torch(x):
-        torch = _torch(); np = _np()
-        x_np = x.detach().cpu().numpy()
-        m_np = np.nanmedian(x_np, axis=axis, keepdims=keepdims)
-        return torch.from_numpy(m_np).to(device=x.device, dtype=x.dtype)
+        return _torch_nanmedian(x, axis=axis, keepdims=keepdims)
     else:
         return _np().nanmedian(x, axis=axis, keepdims=keepdims)
 
 
+def _to_numpy_and_back_nanmedian(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
+    if not _is_torch(x):
+        return _np().nanmedian(x, axis=axis, keepdims=keepdims)
+    torch = _torch()
+    np = _np()
+    x_np = x.detach().cpu().numpy()
+    m_np = np.nanmedian(x_np, axis=axis, keepdims=keepdims)
+    return torch.from_numpy(m_np).to(device=x.device, dtype=x.dtype)
+
+
 def _nanstd(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray:
     if _is_torch(x):
+        torch = _torch()
+        if hasattr(torch, "nanstd"):
+            return torch.nanstd(x, dim=axis, keepdim=keepdims)  # type: ignore[attr-defined]
         m = _nanmean(x, axis=axis, keepdims=True)
         v = _nanmean((x - m) ** 2, axis=axis, keepdims=keepdims)
-        return _torch().sqrt(v)
+        return torch.sqrt(v)
     else:
         return _np().nanstd(x, axis=axis, keepdims=keepdims)
 
@@ -135,7 +196,7 @@ def _clip(x: BackendArray, low: Optional[float], high: Optional[float]) -> Backe
 
 def _safe_div(n: BackendArray, d: BackendArray, eps: float) -> BackendArray:
     """
-    n / max(d, eps) with dtype/Device consistency; preserves NaNs in numerator/denominator.
+    n / max(|d|, eps) with dtype/device consistency; preserves NaNs.
     """
     if _is_torch(n) or _is_torch(d):
         torch = _torch()
@@ -145,7 +206,7 @@ def _safe_div(n: BackendArray, d: BackendArray, eps: float) -> BackendArray:
         return n / d2
     else:
         np = _np()
-        d2 = np.where(_np().abs(d) <= eps, np.array(eps, dtype=d.dtype), d)
+        d2 = np.where(np.abs(d) <= eps, np.array(eps, dtype=d.dtype), d)
         return n / d2
 
 
@@ -155,10 +216,8 @@ def _broadcast_to_hw(x: BackendArray, like_hw: BackendArray) -> BackendArray:
     """
     if _is_torch(like_hw) or _is_torch(x):
         torch = _torch()
-        x_t = x if _is_torch(x) else torch.as_tensor(x, device=getattr(like_hw, "device", None), dtype=getattr(like_hw, "dtype", None))
-        # Torch broadcasting will handle it; just return tensor.
-        return x_t
-    return x  # NumPy broadcast is implicit
+        return x if _is_torch(x) else torch.as_tensor(x, device=getattr(like_hw, "device", None), dtype=getattr(like_hw, "dtype", None))
+    return x
 
 
 # -----------------------------------------------------------------------------
@@ -294,8 +353,7 @@ def _robust_temporal(
         else:
             np = _np()
             w = np.sum(~np.isnan(cur), axis=axis)
-            val_exp = _np().expand_dims(val, axis=axis)
-            v = _nanmean((cur - val_exp) ** 2, axis=axis, keepdims=False)
+            v = _nanmean((cur - _np().expand_dims(val, axis=axis)) ** 2, axis=axis, keepdims=False)
         return val, v, w
 
     # Iterative MAD-based outlier rejection
@@ -330,8 +388,7 @@ def _robust_temporal(
     else:
         np = _np()
         w = np.sum(~np.isnan(cur), axis=axis)
-        val_exp = _np().expand_dims(val, axis=axis)
-        v = _nanmean((cur - val_exp) ** 2, axis=axis, keepdims=False)
+        v = _nanmean((cur - _np().expand_dims(val, axis=axis)) ** 2, axis=axis, keepdims=False)
 
     return val, v, w
 
@@ -423,12 +480,10 @@ def _make_masks_from_prnu_and_var(
 
     if _is_torch(prnu) or _is_torch(var):
         torch = _torch()
-        m = torch.nanmean(prnu)
-        s = torch.nanstd(prnu)
+        m = torch.nanmean(prnu); s = torch.nanstd(prnu)
         hot = (prnu > (m + (hot_sigma or 0.0) * s)) if hot_sigma is not None else None
 
-        vm = torch.nanmean(var)
-        vs = torch.nanstd(var)
+        vm = torch.nanmean(var); vs = torch.nanstd(var)
         bad = (var > (vm + (bad_sigma or 0.0) * vs)) if bad_sigma is not None else None
 
         meta.update(dict(prnu_mean=float(m), prnu_std=float(s), var_mean=float(vm), var_std=float(vs)))
@@ -484,7 +539,6 @@ def build_master_flat(flat_stack: BackendArray, build: FlatBuildParams) -> FlatB
     )
 
     # Large-scale illumination
-    illum: Optional[BackendArray]
     if build.illum_model == "gaussian":
         illum = _gaussian_blur(master_raw, float(build.illum_sigma))
         illum = _where(_abs(illum) <= 1e-12, _full_like(illum, 1e-12), illum)
