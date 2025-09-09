@@ -3,7 +3,8 @@
 SpectraMind V50 — Training Callbacks
 ------------------------------------
 Factory helpers to build PyTorch Lightning callbacks from config, plus
-lightweight custom callbacks for JSONL metrics logging and epoch timing.
+lightweight custom callbacks for JSONL metrics logging, epoch timing,
+and (optional) Kaggle artifacts export.
 
 Exports
 -------
@@ -15,11 +16,15 @@ Exports
 - get_lr_monitor(cfg: dict) -> Optional[LearningRateMonitor]
 - get_swa_callback(cfg: dict) -> Optional[StochasticWeightAveraging]
 - get_model_summary(cfg: dict) -> Optional[ModelSummary]
+- get_kaggle_artifacts_callback(cfg: dict, ckpt_dir: Path, logs_dir: Path)
+    -> Optional[KaggleArtifactsCallback]
 
 Custom callbacks
 ----------------
 - JsonlMetricsLogger: writes per-epoch metrics to a JSONL file (train/val/test)
 - EpochTimeCallback: measures epoch durations (sec) and logs them
+- KaggleArtifactsCallback: exports best checkpoint + run summary to a folder
+  (useful for downloading from Kaggle after the run)
 
 Notes
 -----
@@ -30,6 +35,7 @@ Notes
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -217,6 +223,77 @@ class EpochTimeCallback(pl.Callback):  # type: ignore[name-defined]
             pl_module.log_dict({"epoch_time_sec": float(dt)}, prog_bar=False, logger=True)
 
 
+class KaggleArtifactsCallback(pl.Callback):  # type: ignore[name-defined]
+    """
+    Export best checkpoint and a small run summary JSON into an artifacts directory,
+    so they can be downloaded easily from Kaggle after the run.
+
+    Config path:
+      callbacks.kaggle_artifacts:
+        enable: true
+        dir: "./artifacts"
+        best_name: "best.ckpt"
+        summary_name: "run_summary.json"
+    """
+    def __init__(self, artifacts_dir: Path, best_ckpt_name: str = "best.ckpt",
+                 summary_name: str = "run_summary.json") -> None:
+        super().__init__()
+        self.artifacts_dir = Path(artifacts_dir)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.best_ckpt_name = best_ckpt_name
+        self.summary_name = summary_name
+
+    @rank_zero_only
+    def _write_summary(self, trainer: "pl.Trainer") -> None:  # type: ignore[name-defined]
+        summary = {
+            "ts": _now_iso(),
+            "current_epoch": int(getattr(trainer, "current_epoch", -1) or -1),
+            "global_step": int(getattr(trainer, "global_step", 0) or 0),
+            "best_model_path": None,
+            "best_monitor": None,
+            "best_score": None,
+        }
+        # Try to resolve the active checkpoint callback
+        ckpt_cb = getattr(trainer, "checkpoint_callback", None)
+        if ckpt_cb and hasattr(ckpt_cb, "best_model_path"):
+            summary["best_model_path"] = getattr(ckpt_cb, "best_model_path", None)
+            summary["best_monitor"] = getattr(ckpt_cb, "monitor", None)
+            score = getattr(ckpt_cb, "best_model_score", None)
+            if score is not None:
+                try:
+                    summary["best_score"] = float(score.cpu().item())
+                except Exception:
+                    try:
+                        summary["best_score"] = float(score)
+                    except Exception:
+                        summary["best_score"] = None
+
+        with (self.artifacts_dir / self.summary_name).open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    @rank_zero_only
+    def _copy_best_checkpoint(self, trainer: "pl.Trainer") -> None:  # type: ignore[name-defined]
+        ckpt_cb = getattr(trainer, "checkpoint_callback", None)
+        if not ckpt_cb or not getattr(ckpt_cb, "best_model_path", None):
+            return
+        src = Path(ckpt_cb.best_model_path)
+        if not src.exists():
+            return
+        dst = self.artifacts_dir / self.best_ckpt_name
+        try:
+            shutil.copy2(src, dst)
+        except Exception:
+            # Best-effort fallback
+            try:
+                shutil.copy(src, dst)
+            except Exception:
+                pass
+
+    def on_fit_end(self, trainer, pl_module) -> None:
+        self._copy_best_checkpoint(trainer)
+        self._write_summary(trainer)
+
+
 # ---------------------------------------------------------------------
 # Factory functions (each individually buildable from cfg)
 # ---------------------------------------------------------------------
@@ -240,6 +317,12 @@ def get_checkpoint_callback(cfg: Dict[str, Any], ckpt_dir: Path) -> "ModelCheckp
     save_top_k = int(ck_cfg.get("save_top_k", 1))
     save_last = _as_bool(ck_cfg.get("save_last", True), True)
     every_n_epochs = int(ck_cfg.get("every_n_epochs", 1))
+    every_n_train_steps = ck_cfg.get("every_n_train_steps", None)
+    if every_n_train_steps is not None:
+        try:
+            every_n_train_steps = int(every_n_train_steps)
+        except Exception:
+            every_n_train_steps = None
     save_weights_only = _as_bool(ck_cfg.get("save_weights_only", False), False)
 
     return ModelCheckpoint(
@@ -250,7 +333,8 @@ def get_checkpoint_callback(cfg: Dict[str, Any], ckpt_dir: Path) -> "ModelCheckp
         save_top_k=save_top_k,
         save_last=save_last,
         auto_insert_metric_name=True,
-        every_n_epochs=every_n_epochs,
+        every_n_epochs=every_n_epochs if every_n_train_steps is None else 0,
+        every_n_train_steps=every_n_train_steps,
         enable_version_counter=enable_version_counter,
         save_weights_only=save_weights_only,
     )
@@ -321,6 +405,32 @@ def get_model_summary(cfg: Dict[str, Any]) -> Optional["ModelSummary"]:
     return ModelSummary(max_depth=max_depth)
 
 
+def get_kaggle_artifacts_callback(
+    cfg: Dict[str, Any],
+    ckpt_dir: Path,
+    logs_dir: Path,
+) -> Optional["KaggleArtifactsCallback"]:
+    """
+    Optional Kaggle artifacts exporter. Writes best checkpoint (+ a JSON summary)
+    into a folder (default: ./artifacts) for convenient download from Kaggle.
+
+    callbacks.kaggle_artifacts:
+      enable: true
+      dir: "./artifacts"
+      best_name: "best.ckpt"
+      summary_name: "run_summary.json"
+    """
+    _require_pl()
+    ka_cfg = _cfg_get(cfg, "callbacks.kaggle_artifacts", {}) or {}
+    enable = _as_bool(ka_cfg.get("enable", False), False)
+    if not enable:
+        return None
+    artifacts_dir = Path(ka_cfg.get("dir", "./artifacts"))
+    best_name = str(ka_cfg.get("best_name", "best.ckpt"))
+    summary_name = str(ka_cfg.get("summary_name", "run_summary.json"))
+    return KaggleArtifactsCallback(artifacts_dir=artifacts_dir, best_ckpt_name=best_name, summary_name=summary_name)
+
+
 # ---------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------
@@ -340,6 +450,7 @@ def build_callbacks(
       - optional ModelSummary
       - JsonlMetricsLogger at logs_dir/metrics.jsonl (always)
       - EpochTimeCallback (always)
+      - optional KaggleArtifactsCallback (if enabled)
     """
     _require_pl()
     callbacks: List["pl.Callback"] = []
@@ -371,5 +482,10 @@ def build_callbacks(
 
     # Epoch timing (helps profiling in Kaggle/CI)
     callbacks.append(EpochTimeCallback())
+
+    # Optional: export artifacts for Kaggle
+    ka_cb = get_kaggle_artifacts_callback(cfg, ckpt_dir, logs_dir)
+    if ka_cb:
+        callbacks.append(ka_cb)
 
     return callbacks, ckpt_cb
