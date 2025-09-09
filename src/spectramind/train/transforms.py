@@ -3,7 +3,10 @@
 # SpectraMind V50 — Transform Utilities (Hydra-friendly)
 # -----------------------------------------------------------------------------
 # - Stateless transforms: clip, log1p, normalize [min/max], standardize [μ/σ]
+# - Robust standardize: median/MAD option (robust to outliers)
 # - Lightweight augmentations: gaussian noise, jitter along axis, dropout
+# - SpecAugment-inspired: RandomTime/Bin mask, RandomSpectralCutout
+# - Smoothing: 1D conv (moving-average/gaussian-like)
 # - Compose pipeline + apply_to_batch(dict) utilities
 # - OnlinePerBinStandardizer: fit/update across batches, then call in pipeline
 #
@@ -13,10 +16,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, Mapping
 
-import math
 import torch
 import torch.nn.functional as F
 
@@ -29,27 +31,10 @@ MaybeTensor = Optional[Tensor]
 # Helpers
 # -----------------------------------------------------------------------------
 
-def _as_tensor(x: Union[float, int, Tensor], device: Optional[torch.device] = None) -> Tensor:
+def _as_tensor(x: Union[float, int, Tensor], device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None) -> Tensor:
     if isinstance(x, torch.Tensor):
-        return x.to(device=device) if device is not None else x
-    return torch.as_tensor(x, device=device)
-
-
-def _take_along_axis(x: Tensor, indices: Tensor, axis: int) -> Tensor:
-    """
-    Equivalent to np.take_along_axis for PyTorch.
-    x: [..., D, ...], indices: same rank as x except size D on 'axis' replaced by K
-    """
-    # Move axis to last
-    axis = axis if axis >= 0 else x.ndim + axis
-    x_perm = list(range(x.ndim))
-    x_perm[axis], x_perm[-1] = x_perm[-1], x_perm[axis]
-    x_t = x.permute(*x_perm)
-    idx_t = indices.permute(*x_perm)
-    out = x_t.gather(dim=-1, index=idx_t)
-    # Undo perm
-    x_perm[axis], x_perm[-1] = x_perm[-1], x_perm[axis]
-    return out.permute(*x_perm)
+        return x.to(device=device or x.device, dtype=dtype or x.dtype)
+    return torch.as_tensor(x, device=device, dtype=dtype)
 
 
 def _axis_size(x: Tensor, axis: int) -> int:
@@ -60,8 +45,16 @@ def _axis_size(x: Tensor, axis: int) -> int:
 def _broadcast_mask(mask: Optional[Tensor], x: Tensor) -> Optional[Tensor]:
     if mask is None:
         return None
-    # try to broadcast to x shape
-    return mask.to(device=x.device, dtype=x.dtype).expand_as(x) if mask.ndim == 0 else mask.to(x.device, dtype=x.dtype)
+    if mask.dtype != x.dtype:
+        mask = mask.to(dtype=x.dtype)
+    if mask.device != x.device:
+        mask = mask.to(device=x.device)
+    # allow broadcasting e.g. [B,1] over [B,D]
+    if mask.ndim < x.ndim:
+        view = [1] * x.ndim
+        view[-1] = mask.shape[-1] if mask.ndim == 1 else mask.shape[-1]
+        mask = mask.view(*view)
+    return mask
 
 
 def _safe_div(num: Tensor, den: Tensor, eps: float = 1e-12) -> Tensor:
@@ -115,54 +108,64 @@ class Log1p:
 class StandardizeConfig:
     mean: Optional[float] = None         # scalar mean or None (estimate per-batch)
     std: Optional[float] = None          # scalar std or None (estimate per-batch)
-    per_bin: bool = False                # if True: compute per-bin mean/std along batch axis
+    per_bin: bool = False                # if True: compute per-bin stats across batch_axis
+    robust: bool = False                 # if True: use median/MAD (robust) instead of mean/std
     batch_axis: Optional[int] = 0        # axis treated as batch axis for per_bin stats
     eps: float = 1e-6
-    axis: int = -1                       # transform along this axis (just for symmetry)
+    axis: int = -1                       # reserved for future; ops already along last dim
 
 
 class Standardize:
     """
-    μ/σ standardization. If mean/std provided: use as constants; else compute on the fly.
-    If per_bin=True, compute mean/std across batch axis for each bin along 'axis'.
+    μ/σ standardization. If mean/std provided: use constants; else compute on the fly.
+    If per_bin=True, compute stats across batch axis per-bin.
+    If robust=True, use median/MAD instead of mean/std.
     """
     def __init__(self, cfg: StandardizeConfig):
         self.mean = cfg.mean
         self.std = cfg.std
         self.per_bin = bool(cfg.per_bin)
+        self.robust = bool(cfg.robust)
         self.batch_axis = cfg.batch_axis
         self.eps = float(cfg.eps)
-        self.axis = cfg.axis
 
     def __call__(self, x: Tensor, mask: MaybeTensor = None) -> Tensor:
-        # dispenses along axis but stats are computed either scalar or per_bin across batch
         if self.mean is not None and self.std is not None:
-            m = _as_tensor(self.mean, device=x.device)
-            s = _as_tensor(self.std, device=x.device)
+            m = _as_tensor(self.mean, device=x.device, dtype=x.dtype)
+            s = _as_tensor(self.std, device=x.device, dtype=x.dtype)
             y = (x - m) / s.clamp_min(self.eps)
             if mask is not None:
                 y = mask * y + (1 - mask) * x
             return y
 
-        # compute on-the-fly stats
         if self.per_bin:
             if self.batch_axis is None:
-                raise ValueError("Standardize(per_bin=True) requires a batch_axis to compute stats.")
-            # compute μ,σ over batch axis for each bin (keep dims for broadcasting)
-            dims = list(range(x.ndim))
-            reduce_dims = [self.batch_axis]
-            m = x.mean(dim=reduce_dims, keepdim=True)
-            v = x.var(dim=reduce_dims, unbiased=False, keepdim=True)
-            s = torch.sqrt(v + self.eps)
+                raise ValueError("Standardize(per_bin=True) requires batch_axis.")
+            dims = [self.batch_axis]
+            if not self.robust:
+                m = x.mean(dim=dims, keepdim=True)
+                v = x.var(dim=dims, unbiased=False, keepdim=True)
+                s = torch.sqrt(v + self.eps)
+            else:
+                med = x.median(dim=self.batch_axis, keepdim=True).values
+                mad = (x - med).abs().median(dim=self.batch_axis, keepdim=True).values
+                # consistent with normal scale: 1.4826 * MAD
+                s = (mad * 1.4826).clamp_min(self.eps)
+                m = med
             y = (x - m) / s
             if mask is not None:
                 y = mask * y + (1 - mask) * x
             return y
 
-        # scalar stats from entire tensor
-        m = x.mean()
-        v = x.var(unbiased=False)
-        s = torch.sqrt(v + self.eps)
+        if not self.robust:
+            m = x.mean()
+            v = x.var(unbiased=False)
+            s = torch.sqrt(v + self.eps)
+        else:
+            med = x.median().values if hasattr(x.median(), "values") else x.median()
+            mad = (x - med).abs().median().values if hasattr((x - med).abs().median(), "values") else (x - med).abs().median()
+            s = (mad * 1.4826).clamp_min(self.eps)
+            m = med
         y = (x - m) / s
         if mask is not None:
             y = mask * y + (1 - mask) * x
@@ -176,7 +179,6 @@ class NormalizeConfig:
     per_bin: bool = False
     batch_axis: Optional[int] = 0
     eps: float = 1e-12
-    axis: int = -1
 
 
 class Normalize:
@@ -190,12 +192,11 @@ class Normalize:
         self.per_bin = bool(cfg.per_bin)
         self.batch_axis = cfg.batch_axis
         self.eps = float(cfg.eps)
-        self.axis = cfg.axis
 
     def __call__(self, x: Tensor, mask: MaybeTensor = None) -> Tensor:
         if self.min_val is not None and self.max_val is not None:
-            lo = _as_tensor(self.min_val, device=x.device)
-            hi = _as_tensor(self.max_val, device=x.device)
+            lo = _as_tensor(self.min_val, device=x.device, dtype=x.dtype)
+            hi = _as_tensor(self.max_val, device=x.device, dtype=x.dtype)
             y = _safe_div(x - lo, (hi - lo), eps=self.eps)
             if mask is not None:
                 y = mask * y + (1 - mask) * x
@@ -203,10 +204,9 @@ class Normalize:
 
         if self.per_bin:
             if self.batch_axis is None:
-                raise ValueError("Normalize(per_bin=True) requires a batch_axis to compute stats.")
-            dims = [self.batch_axis]
-            lo = x.amin(dim=dims, keepdim=True)
-            hi = x.amax(dim=dims, keepdim=True)
+                raise ValueError("Normalize(per_bin=True) requires batch_axis.")
+            lo = x.amin(dim=[self.batch_axis], keepdim=True)
+            hi = x.amax(dim=[self.batch_axis], keepdim=True)
             y = _safe_div(x - lo, hi - lo, eps=self.eps)
             if mask is not None:
                 y = mask * y + (1 - mask) * x
@@ -221,7 +221,7 @@ class Normalize:
 
 
 # -----------------------------------------------------------------------------
-# Augmentations (stateless)
+# Augmentations (stateless or epoch-aware)
 # -----------------------------------------------------------------------------
 
 @dataclass
@@ -250,11 +250,8 @@ class AdditiveGaussianNoise:
         seed = (self.seed or 0) + self._epoch * 911
         g.manual_seed(seed)
         if self.per_bin:
-            shape = list(x.shape)
-            # noise independent per bin; same shape as x
-            noise = torch.randn(shape, generator=g, device=x.device, dtype=x.dtype) * self.std
+            noise = torch.randn_like(x, generator=g) * self.std
         else:
-            # one noise scalar per item along 'axis'
             n = _axis_size(x, self.axis)
             shape = [1] * x.ndim
             shape[self.axis] = n
@@ -289,16 +286,14 @@ class JitterAlongAxis:
         if self.mag <= 0:
             return x
         g = torch.Generator(device=x.device)
-        seed = (self.seed or 0) + self._epoch * 977
-        g.manual_seed(seed)
-        # draw integer shifts uniformly for each item in batch-subspace (everything except 'axis')
+        g.manual_seed((self.seed or 0) + self._epoch * 977)
         axis_len = _axis_size(x, self.axis)
-        # flatten all dims except axis to one
+        # Move target axis to last; apply per item
         axis = self.axis if self.axis >= 0 else x.ndim + self.axis
         perm = list(range(x.ndim))
         perm[axis], perm[-1] = perm[-1], perm[axis]
-        xt = x.permute(*perm)  # [..., axis_len]
-        flat = xt.reshape(-1, axis_len)  # [M, axis_len]
+        xt = x.permute(*perm).contiguous()  # [..., axis_len]
+        flat = xt.reshape(-1, axis_len)      # [M, axis_len]
         M = flat.shape[0]
         shifts = torch.randint(low=-self.mag, high=self.mag + 1, size=(M,), generator=g, device=x.device)
         out = torch.empty_like(flat)
@@ -333,17 +328,102 @@ class DropoutAlongAxis:
     def __call__(self, x: Tensor, mask: MaybeTensor = None) -> Tensor:
         if self.p <= 0:
             return x
-        axis_len = _axis_size(x, self.axis)
-        shape = list(x.shape)
-        # mask with same shape as x for IID per element along axis
         g = torch.Generator(device=x.device)
-        seed = (self.seed or 0) + self._epoch * 997
-        g.manual_seed(seed)
-        drop_mask = (torch.rand(shape, generator=g, device=x.device, dtype=x.dtype) > self.p).to(x.dtype)
+        g.manual_seed((self.seed or 0) + self._epoch * 997)
+        drop_mask = (torch.rand_like(x, generator=g) > self.p).to(x.dtype)
         y = x * drop_mask
         if mask is not None:
             y = mask * y + (1 - mask) * x
         return y
+
+
+# --- SpecAugment-style masks --------------------------------------------------
+
+@dataclass
+class TimeMaskConfig:
+    max_width: int = 0     # number of consecutive elements to mask along axis
+    axis: int = -1
+    p: float = 0.0         # probability of applying per sample
+    seed: Optional[int] = None
+    value: float = 0.0     # fill value when masked
+
+
+class RandomTimeMask:
+    """Masks a random contiguous segment (width<=max_width) along axis."""
+    def __init__(self, cfg: TimeMaskConfig):
+        self.max_width = int(cfg.max_width)
+        self.axis = int(cfg.axis)
+        self.p = float(cfg.p)
+        self.value = float(cfg.value)
+        self.seed = cfg.seed
+        self._epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+
+    def __call__(self, x: Tensor, mask: MaybeTensor = None) -> Tensor:
+        if self.max_width <= 0 or self.p <= 0:
+            return x
+        g = torch.Generator(device=x.device)
+        g.manual_seed((self.seed or 0) + self._epoch * 1013)
+        axis_len = _axis_size(x, self.axis)
+        if axis_len <= 1:
+            return x
+        # Decide per item if we apply
+        # Flatten non-axis dims
+        axis = self.axis if self.axis >= 0 else x.ndim + self.axis
+        perm = list(range(x.ndim))
+        perm[axis], perm[-1] = perm[-1], perm[axis]
+        xt = x.permute(*perm).contiguous()
+        flat = xt.reshape(-1, axis_len)  # [M, D]
+        M = flat.shape[0]
+        apply_mask = torch.rand(M, generator=g, device=x.device) < self.p
+        out = flat.clone()
+        for i in range(M):
+            if not apply_mask[i]:
+                continue
+            width = int(torch.randint(1, self.max_width + 1, (1,), generator=g, device=x.device).item())
+            start = int(torch.randint(0, max(1, axis_len - width + 1), (1,), generator=g, device=x.device).item())
+            out[i, start:start + width] = self.value
+        out = out.view(*xt.shape).permute(*perm)
+        if mask is not None:
+            out = mask * out + (1 - mask) * x
+        return out
+
+
+# --- Smoothing ---------------------------------------------------------------
+
+@dataclass
+class Smooth1DConfig:
+    kernel_size: int = 3     # odd
+    axis: int = -1
+
+
+class Smooth1D:
+    """Simple moving-average smoothing along axis via 1D conv."""
+    def __init__(self, cfg: Smooth1DConfig):
+        ks = int(cfg.kernel_size) if cfg.kernel_size % 2 == 1 else int(cfg.kernel_size) + 1
+        self.kernel_size = max(1, ks)
+        self.axis = int(cfg.axis)
+
+    def __call__(self, x: Tensor, mask: MaybeTensor = None) -> Tensor:
+        if self.kernel_size <= 1:
+            return x
+        # move axis to last, apply depthwise conv1d on flattened batch
+        axis = self.axis if self.axis >= 0 else x.ndim + self.axis
+        perm = list(range(x.ndim))
+        perm[axis], perm[-1] = perm[-1], perm[axis]
+        xt = x.permute(*perm).contiguous()  # [..., D]
+        Bflat, D = int(torch.prod(torch.tensor(xt.shape[:-1]))), xt.shape[-1]
+        y = xt.view(Bflat, 1, D)
+        kernel = torch.ones(1, 1, self.kernel_size, device=x.device, dtype=x.dtype) / float(self.kernel_size)
+        pad = (self.kernel_size // 2, self.kernel_size // 2)
+        y = F.pad(y, (pad[0], pad[1]), mode="replicate")
+        y = F.conv1d(y, kernel, groups=1)
+        out = y.view(*xt.shape).permute(*perm)
+        if mask is not None:
+            out = mask * out + (1 - mask) * x
+        return out
 
 
 # -----------------------------------------------------------------------------
@@ -369,23 +449,27 @@ class Compose:
 
 @dataclass
 class TransformsConfig:
-    # Optional sub-transforms (None -> skip)
+    # Preprocess
     standardize: Optional[StandardizeConfig] = None
     normalize: Optional[NormalizeConfig] = None
     clip: Optional[ClipConfig] = None
     log1p: Optional[Log1pConfig] = None
+    smooth1d: Optional[Smooth1DConfig] = None
+    # Augment
     noise: Optional[NoiseConfig] = None
     jitter: Optional[JitterConfig] = None
     dropout: Optional[DropoutConfig] = None
+    timemask: Optional[TimeMaskConfig] = None
 
 
 def build_transforms(cfg: TransformsConfig) -> Compose:
     """
-    Build a Compose pipeline from config (order below is typical):
+    Build a Compose pipeline from config (typical order):
     1) log1p
     2) clip
     3) normalize / standardize (choose one or both as desired)
-    4) augmentations: noise, jitter, dropout
+    4) smoothing
+    5) augmentations: noise, jitter, dropout, timemask
     """
     chain: List[Callable[[Tensor, Optional[Tensor]], Tensor]] = []
     if cfg.log1p is not None:
@@ -396,12 +480,16 @@ def build_transforms(cfg: TransformsConfig) -> Compose:
         chain.append(Normalize(cfg.normalize))
     if cfg.standardize is not None:
         chain.append(Standardize(cfg.standardize))
+    if cfg.smooth1d is not None and cfg.smooth1d.kernel_size > 1:
+        chain.append(Smooth1D(cfg.smooth1d))
     if cfg.noise is not None and cfg.noise.std > 0:
         chain.append(AdditiveGaussianNoise(cfg.noise))
     if cfg.jitter is not None and cfg.jitter.magnitude > 0:
         chain.append(JitterAlongAxis(cfg.jitter))
     if cfg.dropout is not None and cfg.dropout.p > 0:
         chain.append(DropoutAlongAxis(cfg.dropout))
+    if cfg.timemask is not None and cfg.timemask.max_width > 0 and cfg.timemask.p > 0:
+        chain.append(RandomTimeMask(cfg.timemask))
     return Compose(chain)
 
 
@@ -431,7 +519,6 @@ class OnlinePerBinStandardizer:
 
     @torch.no_grad()
     def update(self, x: Tensor, mask: MaybeTensor = None) -> None:
-        # reshape to [N, BINS] where N = product of dims except 'axis'
         axis = self.axis if self.axis >= 0 else x.ndim + self.axis
         perm = list(range(x.ndim))
         perm[axis], perm[-1] = perm[-1], perm[axis]
@@ -442,22 +529,16 @@ class OnlinePerBinStandardizer:
         else:
             mt = torch.ones_like(flat)
 
-        # masked batch stats: per bin
-        # count per bin:
-        count = mt.sum(dim=0)                   # [BINS]
-        # mean:
-        sum_x = (flat * mt).sum(dim=0)          # [BINS]
+        count = mt.sum(dim=0)
+        sum_x = (flat * mt).sum(dim=0)
         mean = _safe_div(sum_x, count.clamp_min(1.0))
-        # sum of squared diffs:
-        sum_sq = (mt * (flat - mean)**2).sum(dim=0)  # [BINS]
+        sum_sq = (mt * (flat - mean)**2).sum(dim=0)
 
-        # Welford merge
         if self._count is None:
             self._count = count.clone()
             self._mean = mean.clone()
             self._M2 = sum_sq.clone()
         else:
-            # merge current (mean, M2, count) with new batch
             c0, m0, M0 = self._count, self._mean, self._M2
             c1, m1, M1 = count, mean, sum_sq
             c = c0 + c1
@@ -478,11 +559,10 @@ class OnlinePerBinStandardizer:
         self._count = state.get("count", None)
         self._mean = state.get("mean", None)
         self._M2 = state.get("M2", None)
-        # axis not strictly required to match; kept for debugging
 
     def _stats(self, device: torch.device) -> Tuple[Tensor, Tensor]:
         if self._count is None or self._mean is None or self._M2 is None:
-            raise RuntimeError("OnlinePerBinStandardizer: stats are empty; call update(...) before using.")
+            raise RuntimeError("OnlinePerBinStandardizer: stats are empty; call update(...) first.")
         mean = self._mean.to(device=device)
         var = _safe_div(self._M2, self._count.clamp_min(1.0)).to(device=device)
         std = torch.sqrt(var + self.eps)
@@ -490,7 +570,6 @@ class OnlinePerBinStandardizer:
 
     def __call__(self, x: Tensor, mask: MaybeTensor = None) -> Tensor:
         mean, std = self._stats(x.device)
-        # expand mean/std to broadcast across all dims except axis
         axis = self.axis if self.axis >= 0 else x.ndim + self.axis
         shape = [1] * x.ndim
         shape[axis] = mean.shape[0]
@@ -513,7 +592,7 @@ def apply_to_batch(
     masks: Optional[Dict[str, Tensor]] = None,
 ) -> Dict[str, Tensor]:
     """
-    Apply per-key transforms to a dict batch. Common keys: 'fgs1', 'airs', 'target', 'mask', etc.
+    Apply per-key transforms to a dict batch. Common keys: 'fgs1', 'airs', 'mu', 'sigma', 'target', etc.
     Example:
         t = build_transforms(cfg.transforms)   # returns Compose
         out = apply_to_batch(
