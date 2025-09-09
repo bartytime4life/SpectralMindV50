@@ -33,7 +33,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List, Union
 
 # --- Optional heavy deps (required only when building callbacks) ---
 try:  # pragma: no cover
@@ -43,7 +43,7 @@ try:  # pragma: no cover
         EarlyStopping,
         LearningRateMonitor,
     )
-    # Optional extras: SWA, ModelSummary
+    # Optional extras: SWA, ModelSummary (version-dependent)
     try:
         from pytorch_lightning.callbacks import StochasticWeightAveraging, ModelSummary
     except Exception:  # older PL
@@ -114,10 +114,22 @@ def _now_iso() -> str:
 
 def _is_number_like(x: Any) -> bool:
     try:
+        if x is None:
+            return False
+        # torch / numpy safety without importing them at module import time
+        if hasattr(x, "item"):  # torch.Tensor / numpy scalar
+            x = x.item()
         float(x)
         return True
     except Exception:
         return False
+
+
+def _to_float(x: Any) -> float:
+    if hasattr(x, "item"):
+        # torch / numpy scalar
+        return float(x.item())
+    return float(x)
 
 
 # ---------------------------------------------------------------------
@@ -143,19 +155,23 @@ class JsonlMetricsLogger(pl.Callback):  # type: ignore[name-defined]
             f.write(json.dumps(row, ensure_ascii=False))
             f.write("\n")
 
-    def _collect_metrics(self, trainer) -> Dict[str, float]:
+    def _collect_metrics(self, trainer: "pl.Trainer") -> Dict[str, float]:  # type: ignore[name-defined]
         # callback_metrics may contain tensors; coerce scalars only
         out: Dict[str, float] = {}
-        for k, v in dict(trainer.callback_metrics).items():
+        for k, v in dict(getattr(trainer, "callback_metrics", {})).items():
             if _is_number_like(v):
-                out[k] = float(v)  # type: ignore[arg-type]
+                try:
+                    out[k] = _to_float(v)
+                except Exception:
+                    # be defensive: skip weird/unserializable metrics
+                    continue
         return out
 
     def on_train_epoch_end(self, trainer, pl_module) -> None:
         row = {
             "ts": _now_iso(),
             "phase": "train",
-            "epoch": int(trainer.current_epoch),
+            "epoch": int(getattr(trainer, "current_epoch", -1) or -1),
             "global_step": int(getattr(trainer, "global_step", 0) or 0),
             **self._collect_metrics(trainer),
         }
@@ -165,7 +181,7 @@ class JsonlMetricsLogger(pl.Callback):  # type: ignore[name-defined]
         row = {
             "ts": _now_iso(),
             "phase": "val",
-            "epoch": int(trainer.current_epoch),
+            "epoch": int(getattr(trainer, "current_epoch", -1) or -1),
             "global_step": int(getattr(trainer, "global_step", 0) or 0),
             **self._collect_metrics(trainer),
         }
@@ -175,7 +191,7 @@ class JsonlMetricsLogger(pl.Callback):  # type: ignore[name-defined]
         row = {
             "ts": _now_iso(),
             "phase": "test",
-            "epoch": int(trainer.current_epoch),
+            "epoch": int(getattr(trainer, "current_epoch", -1) or -1),
             "global_step": int(getattr(trainer, "global_step", 0) or 0),
             **self._collect_metrics(trainer),
         }
@@ -204,29 +220,43 @@ class EpochTimeCallback(pl.Callback):  # type: ignore[name-defined]
 # ---------------------------------------------------------------------
 # Factory functions (each individually buildable from cfg)
 # ---------------------------------------------------------------------
-def get_checkpoint_callback(cfg: Dict[str, Any], ckpt_dir: Path) -> ModelCheckpoint:
+def get_checkpoint_callback(cfg: Dict[str, Any], ckpt_dir: Path) -> "ModelCheckpoint":
     """Construct a ModelCheckpoint from config."""
     _require_pl()
     ck_cfg = _cfg_get(cfg, "callbacks.checkpoint", {}) or {}
+    enable = _as_bool(ck_cfg.get("enable", True), True)
+    if not enable:
+        # Still return a checkpoint object with disabled saving to keep type stable
+        return ModelCheckpoint(dirpath=str(ckpt_dir), save_top_k=0, monitor=None)
+
     monitor = ck_cfg.get("monitor", "val_loss")
     mode = ck_cfg.get("mode", "min")
     filename = ck_cfg.get("filename", "epoch{epoch:03d}-{monitor:.5f}")
 
-    ckpt = ModelCheckpoint(
+    # Some PL versions expect None to disable version counter
+    enable_version_counter = _as_bool(ck_cfg.get("enable_version_counter", True), True)
+
+    # Optional advanced toggles with sensible defaults
+    save_top_k = int(ck_cfg.get("save_top_k", 1))
+    save_last = _as_bool(ck_cfg.get("save_last", True), True)
+    every_n_epochs = int(ck_cfg.get("every_n_epochs", 1))
+    save_weights_only = _as_bool(ck_cfg.get("save_weights_only", False), False)
+
+    return ModelCheckpoint(
         dirpath=str(ckpt_dir),
         filename=filename,
         monitor=monitor,
         mode=mode,
-        save_top_k=int(ck_cfg.get("save_top_k", 1)),
-        save_last=_as_bool(ck_cfg.get("save_last", True), True),
+        save_top_k=save_top_k,
+        save_last=save_last,
         auto_insert_metric_name=True,
-        every_n_epochs=int(ck_cfg.get("every_n_epochs", 1)),
-        enable_version_counter=_as_bool(ck_cfg.get("enable_version_counter", True), True),
+        every_n_epochs=every_n_epochs,
+        enable_version_counter=enable_version_counter,
+        save_weights_only=save_weights_only,
     )
-    return ckpt
 
 
-def get_early_stopping_callback(cfg: Dict[str, Any]) -> Optional[EarlyStopping]:
+def get_early_stopping_callback(cfg: Dict[str, Any]) -> Optional["EarlyStopping"]:
     """Construct an EarlyStopping callback if enabled."""
     _require_pl()
     es_cfg = _cfg_get(cfg, "callbacks.early_stopping", {}) or {}
@@ -243,7 +273,7 @@ def get_early_stopping_callback(cfg: Dict[str, Any]) -> Optional[EarlyStopping]:
     )
 
 
-def get_lr_monitor(cfg: Dict[str, Any]) -> Optional[LearningRateMonitor]:
+def get_lr_monitor(cfg: Dict[str, Any]) -> Optional["LearningRateMonitor"]:
     """Construct a LearningRateMonitor callback if enabled."""
     _require_pl()
     lr_cfg = _cfg_get(cfg, "callbacks.lr_monitor", {}) or {}
@@ -266,11 +296,14 @@ def get_swa_callback(cfg: Dict[str, Any]) -> Optional["StochasticWeightAveraging
     enable = _as_bool(swa_cfg.get("enable", False), False)
     if not enable:
         return None
-    # Defaults follow PL recommendations; user may override in cfg
     swa_lrs = float(swa_cfg.get("swa_lrs", 1e-3))
     anneal_epochs = int(swa_cfg.get("anneal_epochs", 10))
     anneal_strategy = swa_cfg.get("anneal_strategy", "cos")
-    return StochasticWeightAveraging(swa_lrs=swa_lrs, anneal_epochs=anneal_epochs, anneal_strategy=anneal_strategy)
+    return StochasticWeightAveraging(
+        swa_lrs=swa_lrs,
+        anneal_epochs=anneal_epochs,
+        anneal_strategy=anneal_strategy,
+    )
 
 
 def get_model_summary(cfg: Dict[str, Any]) -> Optional["ModelSummary"]:
