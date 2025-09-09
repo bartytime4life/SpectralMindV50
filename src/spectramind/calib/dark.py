@@ -55,14 +55,37 @@ def _torch() -> Any:
     return torch
 
 
+def _resolve_dtype(backend: str, dtype: Optional[Union[str, Any]]) -> Any:
+    if dtype is None:
+        return None
+    if backend == "torch":
+        torch = _torch()
+        if isinstance(dtype, str):
+            m = {
+                "float32": torch.float32,
+                "float": torch.float32,
+                "float64": torch.float64,
+                "double": torch.float64,
+                "float16": torch.float16,
+                "half": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            return m.get(dtype.lower(), getattr(torch, dtype))
+        return dtype
+    np = _np()
+    if isinstance(dtype, str):
+        return getattr(np, dtype)
+    return dtype
+
+
 def _to_float(x: BackendArray, dtype: Optional[Union[str, Any]] = None) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        target = getattr(torch, dtype) if isinstance(dtype, str) else (dtype or torch.float32)
+        target = _resolve_dtype("torch", dtype) or torch.float32
         return x.to(target)
     else:
         np = _np()
-        target = getattr(np, dtype) if isinstance(dtype, str) else (dtype or np.float32)
+        target = _resolve_dtype("numpy", dtype) or np.float32
         return x.astype(target, copy=False)
 
 
@@ -92,6 +115,8 @@ def _abs(x: BackendArray) -> BackendArray:
 def _nanmean(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
+        if hasattr(torch, "nanmean"):
+            return torch.nanmean(x, dim=axis, keepdim=keepdims)  # type: ignore[attr-defined]
         mask = ~torch.isnan(x)
         num = torch.where(mask, x, torch.tensor(0.0, dtype=x.dtype, device=x.device)).sum(dim=axis, keepdim=keepdims)
         den = mask.sum(dim=axis, keepdim=keepdims).clamp_min(1)
@@ -102,14 +127,47 @@ def _nanmean(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray
         return _np().nanmean(x, axis=axis, keepdims=keepdims)
 
 
+def _torch_nanmedian(x, axis=None, keepdims=False):
+    torch = _torch()
+    # Prefer native nanmedian if present
+    if hasattr(torch, "nanmedian"):
+        return torch.nanmedian(x, dim=axis, keepdim=keepdims).values  # type: ignore[attr-defined]
+    # Fallback: mask nans by +inf, sort, use middle index among valid count
+    isnan = torch.isnan(x)
+    xf = torch.where(isnan, torch.full_like(x, float("inf")), x)
+    sorted_xf, _ = torch.sort(xf, dim=axis)
+    valid = (~isnan).sum(dim=axis, keepdim=True)
+    low_idx = (valid - 1) // 2
+    high_idx = valid // 2
+    if hasattr(torch, "take_along_dim"):
+        tl = torch.take_along_dim(sorted_xf, low_idx.long(), dim=axis)
+        th = torch.take_along_dim(sorted_xf, high_idx.long(), dim=axis)
+        med = 0.5 * (tl + th)
+        if not keepdims:
+            med = med.squeeze(dim=axis)  # type: ignore[arg-type]
+        all_nan = (valid == 0)
+        if all_nan.any():
+            med = torch.where(all_nan.squeeze(dim=axis), torch.full_like(med, float("nan")), med)
+        return med
+    # Last resort: NumPy bridge
+    return _to_numpy_and_back_nanmedian(x, axis=axis, keepdims=keepdims)
+
+
 def _nanmedian(x: BackendArray, axis=None, keepdims: bool = False) -> BackendArray:
     if _is_torch(x):
-        torch = _torch(); np = _np()
-        x_np = x.detach().cpu().numpy()
-        m_np = np.nanmedian(x_np, axis=axis, keepdims=keepdims)
-        return torch.from_numpy(m_np).to(device=x.device, dtype=x.dtype)
+        return _torch_nanmedian(x, axis=axis, keepdims=keepdims)
     else:
         return _np().nanmedian(x, axis=axis, keepdims=keepdims)
+
+
+def _to_numpy_and_back_nanmedian(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
+    if not _is_torch(x):
+        return _np().nanmedian(x, axis=axis, keepdims=keepdims)
+    torch = _torch()
+    np = _np()
+    x_np = x.detach().cpu().numpy()
+    m_np = np.nanmedian(x_np, axis=axis, keepdims=keepdims)
+    return torch.from_numpy(m_np).to(device=x.device, dtype=x.dtype)
 
 
 def _clip(x: BackendArray, low: Optional[float], high: Optional[float]) -> BackendArray:
@@ -400,7 +458,6 @@ def _scaling_factors(
         * 'arrhenius'→ k *= exp(Ea_over_k * (1/T_target - 1/T_ref))
     """
     k = 1.0
-    b: BackendArray
     if _is_torch(backend_like):
         torch = _torch()
         b = torch.tensor(0.0, dtype=backend_like.dtype, device=backend_like.device)
@@ -454,8 +511,7 @@ def _scale_dark(master: BackendArray, scale: DarkScaleParams, exposure_target: f
         Ea_over_k=scale.Ea_over_k,
         backend_like=master,
     )
-    # k * master + b (broadcast b safely)
-    scaled = master * (k if isinstance(k, float) else k)  # k is float
+    scaled = master * k  # k is float
     b_cast = _broadcast_to_hw(b, master)
     if _is_torch(scaled) or _is_torch(b_cast):
         scaled = scaled + (b_cast if _is_torch(b_cast) else _torch().as_tensor(b_cast, dtype=scaled.dtype, device=scaled.device))
@@ -581,11 +637,7 @@ def apply_dark(science: BackendArray, model: DarkModel, apply: ApplyDarkParams) 
     # Variance propagation: var_out = var_science + k^2 * var_master  (we don't know var_science → only dark term)
     var_out: Optional[BackendArray] = None
     if apply.propagate_var and (model.var is not None):
-        if _is_torch(model.var):
-            torch = _torch()
-            var_out = model.var * (k ** 2)
-        else:
-            var_out = model.var * (k ** 2)
+        var_out = model.var * (k ** 2)
 
     meta: Dict[str, Any] = {}
     if apply.return_intermediate:
