@@ -1,9 +1,19 @@
 # -----------------------------------------------------------------------------
-# SpectraMind V50 — Mission-grade Makefile (Upgraded)
+# SpectraMind V50 — Mission-grade Makefile (Ultra-Upgraded)
 # -----------------------------------------------------------------------------
+# Design goals:
+#   • One-command, reproducible DX for local dev, CI, and Kaggle
+#   • Fast installs (uv when available), clean fallbacks
+#   • Safety rails (clean git, version sync, schema checks)
+#   • Rich targets for docs, diagrams, Docker, DVC, security, and Kaggle
+# -----------------------------------------------------------------------------
+
+# Core shell hygiene
 SHELL := /usr/bin/env bash
 .ONESHELL:
 .SHELLFLAGS := -Eeuo pipefail -c
+MAKEFLAGS += --warn-undefined-variables
+MAKEFLAGS += --no-builtin-rules
 
 # Colors (safe in CI)
 C_RESET := \033[0m
@@ -13,59 +23,89 @@ C_WARN  := \033[33m
 C_ERR   := \033[31m
 notice  = @printf "$(C_INFO)» $(1)$(C_RESET)\n"
 
-# Python / package
-PKG        ?= spectramind
-PY         ?= python3
-VENV       ?= .venv
-VENV_BIN   := $(VENV)/bin
-PIP        := $(VENV_BIN)/pip
-PYTHON     := $(VENV_BIN)/python
-PRECOMMIT  := $(VENV_BIN)/pre-commit
+# -----------------------------------------------------------------------------
+# Project / Python
+# -----------------------------------------------------------------------------
+PKG          ?= spectramind
+PY_MIN       ?= 3.11
+PY           ?= python3
+VENV         ?= .venv
+VENV_BIN     := $(VENV)/bin
+PIP          := $(VENV_BIN)/pip
+PYTHON       := $(VENV_BIN)/python
+PRECOMMIT    := $(VENV_BIN)/pre-commit
+
+# Requirements (auto-detected if files exist)
+REQ_MAIN     ?= requirements.txt
+REQ_DEV      ?= requirements-dev.txt
+REQ_KAGGLE   ?= requirements-kaggle.txt
+REQ_LOCK     ?= requirements.lock.txt
 
 # Optional: load .env into environment (no error if missing)
 ifneq ("$(wildcard .env)","")
   export $(shell sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env)
 endif
 
+# -----------------------------------------------------------------------------
 # DVC
+# -----------------------------------------------------------------------------
 DVC_REMOTE       ?= localcache
 DVC_REMOTE_PATH  ?= ./dvc-remote
 
+# -----------------------------------------------------------------------------
 # Release & versioning
+# -----------------------------------------------------------------------------
 VERSION_FILE ?= VERSION
 TAG          ?=
 GPG_SIGN     ?= 0
 TAG_MSG      ?= "Release $(TAG)"
 
+# -----------------------------------------------------------------------------
 # Kaggle bundle
+# -----------------------------------------------------------------------------
 ARTIFACTS_DIR     ?= artifacts
 SUBMISSION_DIR    ?= $(ARTIFACTS_DIR)
 SUBMISSION_ZIP    ?= $(SUBMISSION_DIR)/submission.zip
 SUBMISSION_SCHEMA ?= schemas/submission.schema.json
 
+# -----------------------------------------------------------------------------
 # Docker
-IMAGE_NAME     ?= spectramind-v50
-IMAGE_TAG      ?= local
-INSTALL_EXTRAS ?= gpu,dev
-DOCKER_BUILDKIT?= 1
-GPU_FLAG       ?= $(shell (command -v nvidia-smi >/dev/null 2>&1 && echo "--gpus all") || echo "")
+# -----------------------------------------------------------------------------
+IMAGE_NAME      ?= spectramind-v50
+IMAGE_TAG       ?= local
+INSTALL_EXTRAS  ?= gpu,dev
+DOCKER_BUILDKIT ?= 1
+GPU_FLAG        ?= $(shell (command -v nvidia-smi >/dev/null 2>&1 && echo "--gpus all") || echo "")
+UIDGID_FLAGS    ?= -u $$(id -u):$$(id -g)
 
+# -----------------------------------------------------------------------------
 # Pipeline config for scripts/run_pipeline.sh
+# -----------------------------------------------------------------------------
 CFG ?= train
 
+# -----------------------------------------------------------------------------
 # Diagrams
+# -----------------------------------------------------------------------------
 DIAGRAMS_THEME ?= neutral
 DIAGRAMS_CONC  ?= 8
 
-# Misc
+# -----------------------------------------------------------------------------
+# Misc / defaults
+# -----------------------------------------------------------------------------
 export PYTHONHASHSEED = 0
 .DEFAULT_GOAL := help
+
+# Detection flags
+IS_CI     := $(if $(CI),1,0)
+IS_KAGGLE := $(if $(wildcard /kaggle),1,0)
+IS_DOCKER := $(shell test -f /.dockerenv && echo 1 || echo 0)
 
 # -----------------------------------------------------------------------------
 # Phony targets
 # -----------------------------------------------------------------------------
-.PHONY: help about env ensure-venv ensure-tools ensure-precommit dev precommit \
-        lint fmt-check format type test test-fast coverage check \
+.PHONY: help help-verbose about where env ensure-venv ensure-tools ensure-precommit \
+        dev precommit hooks \
+        lint fmt-check format type test test-fast test-k coverage check \
         docs docs-serve \
         calibrate preprocess train predict diagnose submit pipeline \
         dvc-setup dvc-repro dvc-push dvc-pull \
@@ -73,7 +113,8 @@ export PYTHONHASHSEED = 0
         sbom pip-audit trivy scan licenses schema-check yaml-lint md-lint nb-clean \
         kaggle-boot kaggle-package kaggle-verify kaggle-clean kaggle \
         docker-build docker-build-cpu docker-run docker-shell \
-        version tag push-tag release bump ensure-clean \
+        build wheel sdist install develop uninstall \
+        version tag push-tag release bump ensure-clean freeze sync-tools \
         diagrams diagrams-dark diagrams-clean clean distclean ci
 
 # -----------------------------------------------------------------------------
@@ -81,35 +122,56 @@ export PYTHONHASHSEED = 0
 # -----------------------------------------------------------------------------
 help:
 	@awk 'BEGIN{FS=":.*##"; printf "\n$(C_INFO)Available targets$(C_RESET)\n"} \
-	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  $(C_INFO)%-22s$(C_RESET) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	/^[a-zA-Z0-9_\-]+:.*##/ { printf "  $(C_INFO)%-24s$(C_RESET) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+help-verbose:
+	@sed -n '1,120p' $(lastword $(MAKEFILE_LIST))
 
 about: ## Show environment diagnostics
-	$(call notice,Python: $$($(PY) --version 2>/dev/null || echo "missing"))
-	$(call notice,VENV:   $(VENV)  Exists? $$([ -d "$(VENV)" ] && echo yes || echo no))
-	$(call notice,GPU:    $$([ -n "$(GPU_FLAG)" ] && echo "NVIDIA detected" || echo "CPU only"))
-	$(call notice,Docker: $$((command -v docker >/dev/null 2>&1 && docker --version) || echo "missing"))
+	$(call notice,Repo   : $$([ -d .git ] && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "not-a-git-repo"))
+	$(call notice,Python : $$($(PY) --version 2>/dev/null || echo "missing"))
+	$(call notice,VENV   : $(VENV)  Exists? $$([ -d "$(VENV)" ] && echo yes || echo no))
+	$(call notice,CI/KGL : CI=$(IS_CI)  Kaggle=$(IS_KAGGLE)  Docker=$(IS_DOCKER))
+	$(call notice,GPU    : $$([ -n "$(GPU_FLAG)" ] && echo "NVIDIA detected" || echo "CPU only"))
+	$(call notice,Docker : $$((command -v docker >/dev/null 2>&1 && docker --version) || echo "missing"))
+
+where: ## Print important paths
+	@echo "PYTHON=$(PYTHON)  PIP=$(PIP)"
+	@echo "VENV_BIN=$(VENV_BIN)  ARTIFACTS_DIR=$(ARTIFACTS_DIR)"
+	@echo "DVC_REMOTE=$(DVC_REMOTE)  DVC_REMOTE_PATH=$(DVC_REMOTE_PATH)"
 
 # -----------------------------------------------------------------------------
 # Environment bootstrapping
 # -----------------------------------------------------------------------------
 env: ensure-venv ensure-tools ensure-precommit ## Create .venv and install dev tools
 
-ensure-venv: ## Create virtualenv if missing
+ensure-venv: ## Create virtualenv if missing (guards Python ≥ $(PY_MIN))
+	@if ! command -v $(PY) >/dev/null 2>&1; then echo "::error::$(PY) not found"; exit 1; fi
+	@v="$$($(PY) -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"; \
+	awk 'BEGIN{want="$(PY_MIN)";have="'"$$v"'"; \
+	      split(want,w,"."); split(have,h,"."); \
+	      if ((h[1]<w[1]) || (h[1]==w[1] && h[2]<w[2])) { \
+	        printf "::error::Python %s+ required, found %s\n", want, have; exit 1 } }'
 	@if [ ! -d "$(VENV)" ]; then \
 	  echo ">> Creating venv: $(VENV)"; \
 	  $(PY) -m venv "$(VENV)"; \
 	fi
+	@$(PIP) -q install -U pip wheel || true
 
-ensure-tools: ensure-venv ## Install dev dependencies and tools (prefers uv, falls back to pip)
+ensure-tools: ensure-venv ## Install deps (prefers uv; falls back to pip). Respects *.txt presence.
 	@if command -v uv >/dev/null 2>&1; then \
 	  echo ">> Using uv for fast installs"; \
 	  uv pip install --system --python $(PYTHON) -U pip wheel || true; \
-	  uv pip install --system --python $(PYTHON) -r requirements-dev.txt -e . || true; \
+	  [ -f $(REQ_MAIN) ]   && uv pip install --system --python $(PYTHON) -r $(REQ_MAIN)   || true; \
+	  [ -f $(REQ_DEV) ]    && uv pip install --system --python $(PYTHON) -r $(REQ_DEV)    || true; \
+	  [ -f $(REQ_KAGGLE) ] && uv pip install --system --python $(PYTHON) -r $(REQ_KAGGLE) || true; \
+	  uv pip install --system --python $(PYTHON) -e . || true; \
 	else \
-	  $(PIP) install -U pip wheel || true; \
-	  $(PIP) install -r requirements-dev.txt -e . || true; \
+	  [ -f $(REQ_MAIN) ]   && $(PIP) install -r $(REQ_MAIN)   || true; \
+	  [ -f $(REQ_DEV) ]    && $(PIP) install -r $(REQ_DEV)    || true; \
+	  [ -f $(REQ_KAGGLE) ] && $(PIP) install -r $(REQ_KAGGLE) || true; \
+	  $(PIP) install -e . || true; \
 	fi
-	@if [ -f requirements-kaggle.txt ]; then $(PIP) install -r requirements-kaggle.txt || true; fi
 	@echo "$(C_OK)Env ready$(C_RESET)"
 
 ensure-precommit: ## Install pre-commit hooks (if available)
@@ -117,8 +179,13 @@ ensure-precommit: ## Install pre-commit hooks (if available)
 
 dev: env precommit ## Setup local dev env & run pre-commit (once)
 
-precommit: ## Run pre-commit hooks on all files
-	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) run --all-files; else echo "::warning::pre-commit not installed"; fi
+hooks: ## Install all dev hooks (pre-commit + nbstripout if present)
+	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) install; fi
+	@if [ -x "$(VENV_BIN)/nbstripout" ]; then git ls-files '*.ipynb' | xargs -r $(VENV_BIN)/nbstripout --install; fi
+
+sync-tools: ## Update dev tools (pre-commit autoupdate + ruff/mypy upgrades)
+	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) autoupdate || true; fi
+	@$(PIP) install -U ruff mypy mdformat toml-sort pip-tools || true
 
 # -----------------------------------------------------------------------------
 # Code quality
@@ -139,11 +206,16 @@ format: ## Auto-format code & docs (Ruff + mdformat)
 type: ## Type-check (mypy)
 	@if [ -x "$(VENV_BIN)/mypy" ]; then $(VENV_BIN)/mypy src; else echo "::warning::mypy not found"; fi
 
-test: ## Run tests (pytest -q)
-	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest -q; else echo "::warning::pytest not found"; fi
+TESTS ?= -q
+test: ## Run tests (pytest $(TESTS))
+	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest $(TESTS); else echo "::warning::pytest not found"; fi
 
-test-fast: ## Run fast tests (unit only, -k 'not integration')
+test-fast: ## Run fast tests (unit only)
 	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest -q -k "not integration"; else echo "::warning::pytest not found"; fi
+
+K ?=
+test-k: ## Run tests filtered by -k "<expr>" (e.g., make test-k K="calib and not slow")
+	@if [ -x "$(VENV_BIN)/pytest" ]; then $(VENV_BIN)/pytest -q -k "$(K)"; else echo "::warning::pytest not found"; fi
 
 coverage: ## Run tests with coverage HTML report
 	@if [ -x "$(VENV_BIN)/pytest" ]; then \
@@ -230,6 +302,32 @@ cuda-parity: ## Enforce CUDA parity with Kaggle (fails on mismatch)
 	else echo "::error::Python venv missing. Run 'make env'."; exit 1; fi
 
 # -----------------------------------------------------------------------------
+# Packaging / install
+# -----------------------------------------------------------------------------
+build: ## Build sdist+wheel into dist/
+	@$(PYTHON) -m build
+
+wheel: ## Build wheel only
+	@$(PYTHON) -m build --wheel
+
+sdist: ## Build source distribution only
+	@$(PYTHON) -m build --sdist
+
+install: ## Install project into venv (non-editable)
+	@$(PIP) install .
+
+develop: ## Install project in editable mode
+	@$(PIP) install -e .
+
+uninstall: ## Uninstall package from venv
+	@$(PIP) uninstall -y $(PKG) || true
+
+freeze: ## Write fully resolved environment to $(REQ_LOCK)
+	@mkdir -p $(ARTIFACTS_DIR)
+	@$(PIP) freeze | tee $(REQ_LOCK) >/dev/null
+	@echo "::notice::Locked requirements -> $(REQ_LOCK)"
+
+# -----------------------------------------------------------------------------
 # Security / Supply Chain
 # -----------------------------------------------------------------------------
 licenses: ## Export 3rd-party license manifest (pip-licenses)
@@ -237,7 +335,7 @@ licenses: ## Export 3rd-party license manifest (pip-licenses)
 	@if [ -x "$(VENV_BIN)/pip-licenses" ]; then \
 	  $(VENV_BIN)/pip-licenses --format=json --with-authors --with-urls > $(ARTIFACTS_DIR)/licenses.json; \
 	  echo "::notice::Licenses -> $(ARTIFACTS_DIR)/licenses.json"; \
-	else echo "::warning::pip-licenses not installed (add to requirements-dev.txt)"; fi
+	else echo "::warning::pip-licenses not installed (add to $(REQ_DEV))"; fi
 
 sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
 	mkdir -p "$(ARTIFACTS_DIR)"
@@ -250,8 +348,9 @@ sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
 
 pip-audit: ## Audit Python deps (pip-audit)
 	@if [ -x "$(VENV_BIN)/pip-audit" ]; then \
-	  $(VENV_BIN)/pip-audit -r requirements-dev.txt || true; \
-	  if [ -f requirements-kaggle.txt ]; then $(VENV_BIN)/pip-audit -r requirements-kaggle.txt || true; fi; \
+	  $(VENV_BIN)/pip-audit -r $(REQ_MAIN) || true; \
+	  [ -f $(REQ_DEV) ]    && $(VENV_BIN)/pip-audit -r $(REQ_DEV)    || true; \
+	  [ -f $(REQ_KAGGLE) ] && $(VENV_BIN)/pip-audit -r $(REQ_KAGGLE) || true; \
 	else echo "::warning::pip-audit not installed"; fi
 
 yaml-lint: ## Lint YAML (yamllint)
@@ -374,12 +473,12 @@ docker-build-cpu: ## Build CPU-only image (target=cpu in Dockerfile)
 docker-run: ## Run container (GPU if available) -> spectramind --help
 	@if docker info >/dev/null 2>&1; then \
 	  echo ">> Running container"; \
-	  docker run --rm $(GPU_FLAG) -it $(IMAGE_NAME):$(IMAGE_TAG) --help; \
+	  docker run --rm $(GPU_FLAG) -it $(UIDGID_FLAGS) -v "$$PWD:/work" -w /work $(IMAGE_NAME):$(IMAGE_TAG) --help; \
 	else echo "::error::Docker not available."; exit 1; fi
 
-docker-shell: ## Interactive shell inside image
+docker-shell: ## Interactive shell inside image (mount PWD)
 	@if docker info >/dev/null 2>&1; then \
-	  docker run --rm $(GPU_FLAG) -it $(IMAGE_NAME):$(IMAGE_TAG) /bin/bash; \
+	  docker run --rm $(GPU_FLAG) -it $(UIDGID_FLAGS) -v "$$PWD:/work" -w /work $(IMAGE_NAME):$(IMAGE_TAG) /bin/bash; \
 	else echo "::error::Docker not available."; exit 1; fi
 
 # -----------------------------------------------------------------------------
@@ -481,7 +580,7 @@ bump: ## Bump semver (BUMP=patch|minor|major) & update CHANGELOG header
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
-	rm -rf "$(ARTIFACTS_DIR)/coverage"
+	rm -rf "$(ARTIFACTS_DIR)/coverage" dist build
 
 distclean: clean ## Remove venv and artifacts
 	rm -rf "$(VENV)" "$(ARTIFACTS_DIR)"
