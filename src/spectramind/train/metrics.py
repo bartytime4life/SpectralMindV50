@@ -4,16 +4,17 @@ SpectraMind V50 — Training Metrics
 ----------------------------------
 
 Implements metrics for the NeurIPS Ariel Data Challenge:
-- Gaussian Negative Log-Likelihood (NLL/GLL) with dominant FGS1 weight on bin 0 (~58×)
+- Gaussian Negative Log-Likelihood (NLL/GLL) with dominant FGS1 weight
 - MAE / RMSE
 - Uncertainty diagnostics: empirical coverage, sharpness (avg sigma)
+- Extra diagnostics: z2_mean (avg squared z-score), bins_used
 
 Design goals
 ------------
 - Kaggle/CI-safe: NumPy required; PyTorch is optional (auto-detected).
 - Batched + broadcast-friendly; robust masking that never divides by zero.
-- Deterministic, numerically-stable; eps clamps for log/variance.
-- Flexible per-bin weighting (default: w[0]≈58 for FGS1; others 1.0).
+- Deterministic, numerically-stable; dtype-aware eps clamps for log/variance.
+- Flexible per-bin weighting (default: w[fgs1_index]≈58 for FGS1; others 1.0).
 - Consistent return types: NumPy float or 0-D torch.Tensor (matching backend).
 """
 
@@ -42,6 +43,8 @@ __all__ = [
     "rmse",
     "coverage",
     "sharpness",
+    "z2_mean",
+    "bins_used",
     "compute_all",
 ]
 
@@ -92,6 +95,12 @@ def _broadcast_torch(*xs: "torch.Tensor") -> Tuple["torch.Tensor", ...]:
     return torch.broadcast_tensors(*xs)
 
 
+def _nan_like(x: ArrayLike) -> ArrayLike:
+    if _is_tensor(x):
+        return torch.tensor(float("nan"), device=x.device, dtype=x.dtype)
+    return np.nan
+
+
 def _reduce(values: ArrayLike, reduction: str = "mean") -> Union[float, "torch.Tensor", np.ndarray]:
     """
     Reduce with NaN-safety.
@@ -107,7 +116,6 @@ def _reduce(values: ArrayLike, reduction: str = "mean") -> Union[float, "torch.T
             return torch.nansum(v)
         finite = torch.isfinite(v)
         denom = finite.sum()
-        # Avoid dtype mismatch creating new scalar on CPU by mirroring device/dtype
         zero = torch.zeros((), device=v.device, dtype=v.dtype)
         return torch.nansum(torch.where(finite, v, zero)) / torch.clamp(denom, min=1)
     v = np.asarray(values)
@@ -128,7 +136,7 @@ def _weighted_reduce(values: ArrayLike, weights: ArrayLike, reduction: str = "me
     For 'mean', computes sum(w*v)/sum(w) over finite v and w.
     """
     if reduction == "none":
-        return values if not _is_tensor(values) else values  # pass-through
+        return values
 
     if _same_backend(values, weights) == "torch":
         v = values if _is_tensor(values) else torch.as_tensor(values)
@@ -168,7 +176,7 @@ def gaussian_nll(
     *,
     mask: MaybeMask = None,
     reduction: str = "mean",
-    eps: float = 1e-8,
+    eps: Optional[float] = None,
     min_sigma: Optional[float] = None,
     max_sigma: Optional[float] = None,
 ) -> Union[float, np.ndarray, "torch.Tensor"]:
@@ -179,7 +187,7 @@ def gaussian_nll(
     Args:
         mask: bool mask of valid elements (broadcastable to inputs).
         reduction: {"mean","sum","none"}.
-        eps: small stabilization added as σ ← max(σ, eps).
+        eps: small stabilization added as σ ← max(σ, eps). If None, use dtype finfo(eps).
         min_sigma / max_sigma: optional clamps on σ after eps.
     """
     backend = _same_backend(y, mu, sigma, mask)
@@ -190,14 +198,14 @@ def gaussian_nll(
         mu_t = mu if _is_tensor(mu) else torch.as_tensor(mu, device=device, dtype=y_t.dtype)
         sg_t = sigma if _is_tensor(sigma) else torch.as_tensor(sigma, device=device, dtype=y_t.dtype)
 
-        sg_t = torch.clamp(sg_t, min=max(eps, 0.0))
+        eps_t = torch.finfo(y_t.dtype).eps if eps is None else float(eps)
+        sg_t = torch.clamp(sg_t, min=max(eps_t, 0.0))
         if min_sigma is not None:
             sg_t = torch.clamp(sg_t, min=float(min_sigma))
         if max_sigma is not None:
             sg_t = torch.clamp(sg_t, max=float(max_sigma))
 
         var = sg_t * sg_t
-        # log(2πσ²) is numerically more stable than 2*log(σ) at tiny σ
         nll = 0.5 * (torch.log(2.0 * math.pi * var) + (y_t - mu_t) ** 2 / var)
 
         if mask is not None:
@@ -209,8 +217,9 @@ def gaussian_nll(
     y_n = np.asarray(y, dtype=np.float64)
     mu_n = np.asarray(mu, dtype=np.float64)
     sg_n = np.asarray(sigma, dtype=np.float64)
+    eps_n = np.finfo(y_n.dtype).eps if eps is None else float(eps)
 
-    sg_n = np.maximum(sg_n, max(eps, 0.0))
+    sg_n = np.maximum(sg_n, max(eps_n, 0.0))
     if min_sigma is not None:
         sg_n = np.maximum(sg_n, float(min_sigma))
     if max_sigma is not None:
@@ -231,11 +240,12 @@ def _build_weights(
     D: int,
     *,
     fgs1_weight: float = 58.0,
+    fgs1_index: int = 0,
     custom: Optional[ArrayLike] = None,
     like: Optional[ArrayLike] = None,
 ) -> ArrayLike:
     """
-    Build per-bin weights of length D. By default, sets w[0]=fgs1_weight and w[1:]=1.
+    Build per-bin weights of length D. Default: w[fgs1_index]=fgs1_weight and others=1.
     If 'custom' is provided, it overrides the entire vector (must be length D).
     """
     if custom is not None:
@@ -252,12 +262,13 @@ def _build_weights(
             raise ValueError(f"custom weights length {c.size} != D={D}")
         return c
 
+    fgs1_index = max(0, min(int(fgs1_index), D - 1))
     if _is_tensor(like):
         w = torch.ones(D, dtype=like.dtype, device=like.device)
-        w[0] = float(fgs1_weight)
+        w[fgs1_index] = float(fgs1_weight)
         return w
     w = np.ones(D, dtype=np.float64)
-    w[0] = float(fgs1_weight)
+    w[fgs1_index] = float(fgs1_weight)
     return w
 
 
@@ -268,8 +279,9 @@ def weighted_gll(
     *,
     weights: Optional[ArrayLike] = None,
     fgs1_weight: float = 58.0,
+    fgs1_index: int = 0,
     reduction: str = "mean",
-    eps: float = 1e-8,
+    eps: Optional[float] = None,
     min_sigma: Optional[float] = None,
     max_sigma: Optional[float] = None,
     mask: MaybeMask = None,
@@ -278,32 +290,35 @@ def weighted_gll(
     """
     Gaussian NLL with per-bin weights (applied on the last dimension D).
 
-    - If 'weights' is None, uses default challenge weights (w[0]=~58, others=1).
+    - If 'weights' is None, uses default challenge weights (w[fgs1_index]=~58, others=1).
     - Supports broadcasting of weights over batch dims (e.g., (D,) → (N,D)).
     - 'sample_weights' may weight each element (broadcastable to nll shape without last dim).
     - Reductions:
-        * 'mean' → weighted mean: sum(w * nll)/sum(w) (optionally with sample_weights)
+        * 'mean' → weighted mean: sum(w*v)/sum(w) (optionally with sample_weights)
         * 'sum'  → sum of weighted nll
         * 'none' → elementwise nll (unreduced)
     """
-    # Elementwise NLL (no reduction)
-    nll = gaussian_nll(y, mu, sigma, mask=mask, reduction="none", eps=eps, min_sigma=min_sigma, max_sigma=max_sigma)
+    nll = gaussian_nll(
+        y, mu, sigma, mask=mask, reduction="none",
+        eps=eps, min_sigma=min_sigma, max_sigma=max_sigma
+    )
 
+    # Torch
     if _is_tensor(nll):
         if nll.dim() == 0:
             raise ValueError("Expected at least 1D for NLL; got scalar.")
         D = nll.shape[-1]
-        w = _build_weights(D, fgs1_weight=fgs1_weight, custom=weights, like=nll)
-        # expand per-bin weights to nll shape
+        w = _build_weights(D, fgs1_weight=fgs1_weight, fgs1_index=fgs1_index, custom=weights, like=nll)
+
+        # Expand per-bin weights to nll shape
         w_exp = w
         while w_exp.dim() < nll.dim():
             w_exp = w_exp.unsqueeze(0)
         w_exp = w_exp.expand_as(nll)
 
-        # optional sample weights (must NOT include last dim)
+        # Optional sample weights (must NOT include last dim)
         if sample_weights is not None:
             sw = sample_weights if _is_tensor(sample_weights) else torch.as_tensor(sample_weights, device=nll.device, dtype=nll.dtype)
-            # expand to all dims except last; then tile last dim to D
             while sw.dim() < nll.dim() - 1:
                 sw = sw.unsqueeze(0)
             sw = sw.expand(*nll.shape[:-1]).unsqueeze(-1).expand_as(nll)
@@ -311,12 +326,12 @@ def weighted_gll(
 
         return _weighted_reduce(nll, w_exp, reduction=reduction)
 
-    # NumPy path
+    # NumPy
     nll_n = np.asarray(nll, dtype=np.float64)
     if nll_n.ndim == 0:
         raise ValueError("Expected at least 1D for NLL; got scalar.")
     D = nll_n.shape[-1]
-    w = _build_weights(D, fgs1_weight=fgs1_weight, custom=weights, like=None)
+    w = _build_weights(D, fgs1_weight=fgs1_weight, fgs1_index=fgs1_index, custom=weights, like=None)
     w_shape = (1,) * (nll_n.ndim - 1) + (D,)
     w_b = np.broadcast_to(np.reshape(w, w_shape), nll_n.shape)
 
@@ -334,9 +349,10 @@ def challenge_gll(
     mu: ArrayLike,
     sigma: ArrayLike,
     *,
-    fgs1_weight: float = 58.0,   # default ~58× for bin 0 (FGS1)
+    fgs1_weight: float = 58.0,   # default ~58× for FGS1
+    fgs1_index: int = 0,
     reduction: str = "mean",
-    eps: float = 1e-8,
+    eps: Optional[float] = None,
     min_sigma: Optional[float] = None,
     max_sigma: Optional[float] = None,
     mask: MaybeMask = None,
@@ -344,12 +360,13 @@ def challenge_gll(
 ) -> Union[float, "torch.Tensor", np.ndarray]:
     """
     Convenience wrapper for weighted GLL using the Ariel challenge default:
-    w = [fgs1_weight, 1, 1, ..., 1].
+    w = all-ones except w[fgs1_index]=fgs1_weight.
     """
     return weighted_gll(
         y, mu, sigma,
         weights=None,
         fgs1_weight=fgs1_weight,
+        fgs1_index=fgs1_index,
         reduction=reduction,
         eps=eps,
         min_sigma=min_sigma,
@@ -377,7 +394,7 @@ def mae(
         diff = torch.abs(y_t - m_t)
         if mask is not None:
             mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
-            diff = torch.where(mm, diff, torch.tensor(float("nan"), device=y_t.device, dtype=diff.dtype))
+            diff = torch.where(mm, diff, _nan_like(diff))
         return _reduce(diff, reduction=reduction)
     diff = np.abs(np.asarray(y) - np.asarray(mu))
     if mask is not None:
@@ -399,7 +416,7 @@ def rmse(
         sq = (y_t - m_t) ** 2
         if mask is not None:
             mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
-            sq = torch.where(mm, sq, torch.tensor(float("nan"), device=y_t.device, dtype=sq.dtype))
+            sq = torch.where(mm, sq, _nan_like(sq))
         if reduction == "none":
             return torch.sqrt(sq)
         return _reduce(torch.sqrt(sq), reduction=reduction)
@@ -474,12 +491,61 @@ def sharpness(
         s = sigma
         if mask is not None:
             mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=s.device, dtype=torch.bool)
-            s = torch.where(mm, s, torch.tensor(float("nan"), device=s.device, dtype=s.dtype))
+            s = torch.where(mm, s, _nan_like(s))
         return _reduce(s, reduction=reduction)
     s = np.asarray(sigma)
     if mask is not None:
         s = np.where(np.asarray(mask, dtype=bool), s, np.nan)
     return _reduce(s, reduction=reduction)
+
+
+def z2_mean(
+    y: ArrayLike,
+    mu: ArrayLike,
+    sigma: ArrayLike,
+    *,
+    mask: MaybeMask = None,
+    reduction: str = "mean",
+    eps: Optional[float] = None,
+) -> Union[float, "torch.Tensor", np.ndarray]:
+    """
+    Mean(z^2) with z = (y - μ)/σ; useful calibration diagnostic
+    (1.0 is ideal under correct σ if errors are Normal).
+    """
+    backend = _same_backend(y, mu, sigma, mask)
+    if backend == "torch":
+        y_t = y if _is_tensor(y) else torch.as_tensor(y)
+        m_t = mu if _is_tensor(mu) else torch.as_tensor(mu, device=y_t.device, dtype=y_t.dtype)
+        s_t = sigma if _is_tensor(sigma) else torch.as_tensor(sigma, device=y_t.device, dtype=y_t.dtype)
+        eps_t = torch.finfo(y_t.dtype).eps if eps is None else float(eps)
+        z2 = ((y_t - m_t) / torch.clamp(s_t, min=eps_t)).square()
+        if mask is not None:
+            mm = mask if _is_tensor(mask) else torch.as_tensor(mask, device=y_t.device, dtype=torch.bool)
+            z2 = torch.where(mm, z2, _nan_like(z2))
+        return _reduce(z2, reduction=reduction)
+    y_n = np.asarray(y, dtype=np.float64)
+    m_n = np.asarray(mu, dtype=np.float64)
+    s_n = np.asarray(sigma, dtype=np.float64)
+    eps_n = np.finfo(y_n.dtype).eps if eps is None else float(eps)
+    z2 = ((y_n - m_n) / np.maximum(s_n, eps_n)) ** 2
+    if mask is not None:
+        z2 = np.where(np.asarray(mask, dtype=bool), z2, np.nan)
+    return _reduce(z2, reduction=reduction)
+
+
+def bins_used(mask: MaybeMask, reduction: str = "mean") -> Union[float, "torch.Tensor", np.ndarray]:
+    """
+    Count number of valid bins per-sample (expects boolean mask with last dim=bin).
+    """
+    if mask is None:
+        return float("nan") if reduction == "mean" else np.nan
+    if _is_tensor(mask):
+        m = mask.to(dtype=torch.bool)
+        per = m.sum(dim=-1)
+        return _reduce(per, reduction=reduction)
+    m = np.asarray(mask, dtype=bool)
+    per = m.sum(axis=-1)
+    return _reduce(per, reduction=reduction)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -531,6 +597,7 @@ def compute_all(
     mask: MaybeMask = None,
     alpha: float = 0.95,
     fgs1_weight: float = 58.0,
+    fgs1_index: int = 0,
     min_sigma: Optional[float] = None,
     max_sigma: Optional[float] = None,
     sample_weights: Optional[ArrayLike] = None,
@@ -545,11 +612,14 @@ def compute_all(
         min_sigma=min_sigma, max_sigma=max_sigma,
     )
     results["challenge_gll"] = challenge_gll(
-        y, mu, sigma, mask=mask, fgs1_weight=fgs1_weight, reduction="mean",
-        min_sigma=min_sigma, max_sigma=max_sigma, sample_weights=sample_weights,
+        y, mu, sigma, mask=mask, fgs1_weight=fgs1_weight, fgs1_index=fgs1_index,
+        reduction="mean", min_sigma=min_sigma, max_sigma=max_sigma,
+        sample_weights=sample_weights,
     )
     results["mae"] = mae(y, mu, mask=mask, reduction="mean")
     results["rmse"] = rmse(y, mu, mask=mask, reduction="mean")
     results["coverage"] = coverage(y, mu, sigma, alpha=alpha, mask=mask)
     results["sharpness"] = sharpness(sigma, mask=mask, reduction="mean")
+    results["z2_mean"] = z2_mean(y, mu, sigma, mask=mask, reduction="mean")
+    results["bins_used"] = bins_used(mask, reduction="mean") if mask is not None else float("nan")
     return results
