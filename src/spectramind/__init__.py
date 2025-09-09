@@ -12,6 +12,8 @@ Public API
 - get_logger(name): Logger → project-scoped logger (Rich if available)
 - open_resource(relpath):  → context manager returning a binary file handle
 - read_text(relpath): str  → read small, text resources packaged with the module
+- package_root(): Path     → path to installed package root
+- repo_root(): Path        → best-effort path to repository root (source checkouts)
 """
 from __future__ import annotations
 
@@ -19,8 +21,10 @@ from contextlib import contextmanager
 from importlib import resources as _resources
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
+import io
 import logging
 import os
+import sys
 from typing import BinaryIO, Iterator, Optional
 
 __all__ = [
@@ -29,6 +33,8 @@ __all__ = [
     "get_logger",
     "open_resource",
     "read_text",
+    "package_root",
+    "repo_root",
     "PKG_NAME",
 ]
 
@@ -38,11 +44,31 @@ __all__ = [
 # Keep this aligned with pyproject.toml [project].name
 PKG_NAME = "spectramind-v50"
 
+
+def package_root() -> Path:
+    """Return the installed package root (…/site-packages/spectramind)."""
+    return Path(__file__).resolve().parent
+
+
+def repo_root() -> Path:
+    """
+    Best-effort location of the repository root. In editable installs / source checkouts
+    this is typically 2 levels up from this file (…/repo/src/spectramind/__init__.py).
+    Falls back to package_root() if heuristics fail.
+    """
+    p = package_root()
+    # Common source layout: repo/src/spectramind/__init__.py
+    candidate = p.parent.parent
+    if (candidate / ".git").exists() or (candidate / "pyproject.toml").exists():
+        return candidate
+    return p
+
+
 def _read_version_file() -> Optional[str]:
     # Search common locations for a VERSION file (repo root or package root)
     candidates = [
-        Path(__file__).resolve().parent.parent.parent / "VERSION",  # repo root when running from source
-        Path(__file__).resolve().parent / "VERSION",                # package directory (rare)
+        repo_root() / "VERSION",   # repo root when running from source
+        package_root() / "VERSION" # package directory (rare)
     ]
     for c in candidates:
         try:
@@ -54,8 +80,9 @@ def _read_version_file() -> Optional[str]:
             pass
     return None
 
+
 def _resolve_version() -> str:
-    # 1) installed metadata (wheel/sdist)
+    # 1) Installed metadata (wheel/sdist)
     try:
         return _pkg_version(PKG_NAME)
     except PackageNotFoundError:
@@ -64,23 +91,27 @@ def _resolve_version() -> str:
     v = _read_version_file()
     if v:
         return v
-    # 3) explicit env override (useful in Kaggle/CI)
+    # 3) Explicit env override (useful in Kaggle/CI)
     v = os.environ.get("SPECTRAMIND_VERSION")
     if v:
         return v
-    # 4) last resort—keep in sync with pyproject for sanity
+    # 4) Last resort—keep in sync with pyproject for sanity
     return "0.1.0"
 
+
 __version__ = _resolve_version()
+
 
 def get_version() -> str:
     """Return the best-known package version."""
     return __version__
 
+
 # --------------------------------------------------------------------------------------
 # Logging (Rich if available), idempotent configuration
 # --------------------------------------------------------------------------------------
 _LOGGER_CONFIGURED = False
+
 
 def _desired_level_from_env(default: str = "INFO") -> int:
     level_str = os.environ.get("SPECTRAMIND_LOGLEVEL", default).upper()
@@ -91,33 +122,45 @@ def _desired_level_from_env(default: str = "INFO") -> int:
         "WARNING": logging.WARNING,
         "INFO": logging.INFO,
         "DEBUG": logging.DEBUG,
-        "TRACE": logging.DEBUG,  # no TRACE in stdlib; map to DEBUG
+        "TRACE": logging.DEBUG,  # stdlib lacks TRACE; map to DEBUG
     }.get(level_str, logging.INFO)
 
+
 def _configure_logging_once() -> None:
+    """
+    Configure logging exactly once.
+
+    Rules:
+    - If the root logger already has handlers, only set its level (do not add).
+    - Prefer RichHandler when available; otherwise use stdlib basicConfig.
+    - Honors env SPECTRAMIND_LOGLEVEL.
+    """
     global _LOGGER_CONFIGURED
     if _LOGGER_CONFIGURED:
         return
 
     level = _desired_level_from_env()
+    root = logging.getLogger()
+    if root.handlers:
+        # Respect existing handlers (e.g., notebooks, host apps, pytest)
+        root.setLevel(level)
+        _LOGGER_CONFIGURED = True
+        return
+
     try:
         from rich.logging import RichHandler  # type: ignore
-        # Avoid double handlers if user code pre-configured logging.basicConfig
-        root = logging.getLogger()
-        if not any(isinstance(h, RichHandler) for h in root.handlers):
-            handler = RichHandler(
-                show_time=True,
-                show_path=False,
-                rich_tracebacks=False,
-                markup=True,
-            )
-            logging.basicConfig(
-                level=level,
-                format="%(message)s",
-                handlers=[handler],
-            )
-        else:
-            root.setLevel(level)
+
+        handler = RichHandler(
+            show_time=True,
+            show_path=False,
+            rich_tracebacks=False,
+            markup=True,
+        )
+        logging.basicConfig(
+            level=level,
+            format="%(message)s",
+            handlers=[handler],
+        )
     except Exception:
         # Fallback to plain logging
         logging.basicConfig(
@@ -126,6 +169,7 @@ def _configure_logging_once() -> None:
         )
 
     _LOGGER_CONFIGURED = True
+
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     """
@@ -145,6 +189,7 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     _configure_logging_once()
     return logging.getLogger(name or "spectramind")
 
+
 # --------------------------------------------------------------------------------------
 # Resource helpers (work both installed and from source tree)
 # --------------------------------------------------------------------------------------
@@ -156,20 +201,19 @@ def _resource_path(relpath: str) -> Path:
     # Attempt importlib.resources (installed packages and editable installs)
     try:
         res = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
-        # On some Python versions, .is_file() may need a try/except due to lazy traversals
         try:
+            # As of 3.11, Traversable supports .is_file/.exists; guard anyway
             if res.is_file() or res.exists():
                 return Path(res)
         except Exception:
-            # If we cannot probe, still try to open via the context manager caller
+            # If we cannot probe, still return the virtual path; callers will use as_file()
             return Path(res)
     except Exception:
         pass
 
     # Fallback to filesystem paths relative to package directory
-    pkg_dir = Path(__file__).resolve().parent
-    fs_path = (pkg_dir / relpath).resolve()
-    return fs_path
+    return (package_root() / relpath).resolve()
+
 
 @contextmanager
 def open_resource(relpath: str) -> Iterator[BinaryIO]:
@@ -186,19 +230,21 @@ def open_resource(relpath: str) -> Iterator[BinaryIO]:
     FileNotFoundError
         If the resource does not exist.
     """
-    # Try via importlib.resources first (works for packages and zip-imports)
+    # 1) Use importlib.resources for packages/zip-imports
     try:
-        with _resources.as_file(_resources.files(__package__).joinpath(relpath)) as p:  # type: ignore[arg-type]
+        traversable = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
+        with _resources.as_file(traversable) as p:
             with open(p, "rb") as fp:
                 yield fp
-            return
+        return
     except Exception:
-        # Fall back to direct FS path when running from source
+        # 2) Fall back to direct FS path when running from source
         fs_path = _resource_path(relpath)
         if not fs_path.exists():
             raise FileNotFoundError(f"Resource not found: {relpath} ({fs_path})")
         with fs_path.open("rb") as fp:
             yield fp
+
 
 def read_text(relpath: str, encoding: str = "utf-8") -> str:
     """
@@ -209,10 +255,16 @@ def read_text(relpath: str, encoding: str = "utf-8") -> str:
     >>> schema = read_text("schemas/submission.schema.json")
     >>> cfg = read_text("configs/train.yaml")
     """
-    # Go through importlib.resources first for zip/egg safety
+    # Prefer importlib.resources for zip/egg safety
     try:
-        return _resources.files(__package__).joinpath(relpath).read_text(encoding=encoding)  # type: ignore[arg-type]
+        traversable = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
+        # Traversable.read_text exists in 3.11+, but use a robust path in case
+        try:
+            return traversable.read_text(encoding=encoding)  # type: ignore[attr-defined]
+        except Exception:
+            with _resources.as_file(traversable) as p:
+                return Path(p).read_text(encoding=encoding)
     except Exception:
-        # Fall back to FS
+        # Fallback to FS
         fs_path = _resource_path(relpath)
         return fs_path.read_text(encoding=encoding)
