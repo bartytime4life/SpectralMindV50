@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
     --torch) TARGET_TORCH="${2:-}"; shift 2 ;;
     --quiet) QUIET=true; shift ;;
     *) echo "[BOOT] Unknown option: $1" >&2; exit 2 ;;
-  case esac
+  esac
 done
 
 # ---------------------------- PRINT UTILS ------------------------------------
@@ -61,13 +61,13 @@ mkdir -p "$PIP_CACHE_DIR"
 
 # Simple internet check (Kaggle often runs with internet disabled)
 INTERNET_OK=0
-python - <<'PY' && INTERNET_OK=1 || INTERNET_OK=0
-import socket; 
-try:
-    socket.gethostbyname("pypi.org"); print("ok")
-except Exception as e:
-    raise SystemExit(1)
+if python - <<'PY' >/dev/null 2>&1; then
+import socket
+socket.gethostbyname("pypi.org")
+print("ok")
 PY
+then INTERNET_OK=1; else INTERNET_OK=0; fi
+
 if [[ $INTERNET_OK -eq 0 ]]; then
   note "Internet appears disabled. Will verify existing installs and exit if satisfied."
 fi
@@ -93,15 +93,17 @@ torch_ready() {
   python - "$1" <<'PY'
 import sys, torch
 want = sys.argv[1]
-cuda = (torch.cuda.is_available() and torch.version.cuda) or "cpu"
-ok = (want=="cpu" and (not torch.cuda.is_available())) or (want!="cpu" and torch.cuda.is_available())
+if want == "cpu":
+    ok = not torch.cuda.is_available()
+else:
+    ok = torch.cuda.is_available()
 sys.exit(0 if ok else 1)
 PY
 }
 
 pyg_needed() {
   python - <<'PY'
-import importlib, sys
+import importlib
 mods = ["torch_geometric","torch_scatter","torch_sparse","torch_cluster","torch_spline_conv"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 sys.exit(0 if not missing else 1)
@@ -168,13 +170,12 @@ else
       pip_retry torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
     fi
   else
-    # Detect the CUDA that Kaggle image supports; prefer CUDA 12 wheels; fallback to cu118
+    # Prefer CUDA 12.1 wheels; fallback to cu118
     CUDA_URL="https://download.pytorch.org/whl/cu121"
     if command -v nvidia-smi >/dev/null 2>&1; then
       RAW="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || true)"
       note "nvidia-smi present (driver ${RAW:-unknown})"
     fi
-    # Try cu121 first; if that fails later, user can re-run with --cpu-only
     note "Installing CUDA-enabled torch ${TARGET_TORCH:+(target $TARGET_TORCH)} via ${CUDA_URL}"
     if [[ -n "$TARGET_TORCH" ]]; then
       pip_retry "torch==${TARGET_TORCH}" torchvision torchaudio --index-url "$CUDA_URL" || {
@@ -209,7 +210,6 @@ PY
       [[ "$CUDA_VER" == "cpu" ]] && CUDA_TAG="cpu"
       WHEEL_INDEX="https://data.pyg.org/whl/torch-${TORCH_BASE}+${CUDA_TAG}.html"
       note "Resolved PyG wheel index: ${WHEEL_INDEX}"
-      # Install core ops first, then torch-geometric
       pip_retry torch-scatter torch-sparse torch-cluster torch-spline-conv -f "$WHEEL_INDEX"
       pip_retry torch-geometric
       ok "PyG installed."
@@ -237,16 +237,16 @@ fi
 banner "Environment summary"
 python - <<'PY'
 import sys
-def safe(ver): return ver if ver else "n/a"
+def safe(x): return x if x else "n/a"
 try:
     import torch
-    tver = getattr(torch, "__version__", "n/a")
-    tcuda = getattr(getattr(torch, "version", None), "cuda", None) or ("cuda" if torch.cuda.is_available() else "cpu")
+    tver = safe(getattr(torch, "__version__", None))
+    tcuda = safe(getattr(getattr(torch, "version", None), "cuda", None)) or ("cuda" if torch.cuda.is_available() else "cpu")
 except Exception:
     tver, tcuda = "n/a", "n/a"
 try:
     import dvc
-    dver = dvc.__version__
+    dver = safe(dvc.__version__)
 except Exception:
     dver = "n/a"
 print(f"Torch: {tver} (CUDA {tcuda})")
