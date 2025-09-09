@@ -2,31 +2,35 @@
   "$id": "https://spectramind-v50.org/schemas/metrics.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Experiment Metrics Snapshot",
-  "description": "Structured record of metrics and timings from a pipeline stage (train, predict, diagnose, submit). Ensures reproducibility, comparability, and lineage tracking across runs.",
+  "description": "Structured record of metrics, timings, and config lineage from a pipeline stage (train, predict, diagnose, submit). Ensures reproducibility, comparability, and auditability across runs.",
   "type": "object",
   "additionalProperties": false,
 
-  "required": ["run_id", "stage", "metrics", "timings"],
+  "required": ["run_id", "stage", "metrics", "timings", "created_at"],
 
   "properties": {
     "run_id": {
       "type": "string",
-      "description": "Unique identifier for the run/session (UUID or hash)."
+      "description": "Unique identifier for the run/session (UUID, timestamp, or hash)."
     },
 
     "stage": {
       "type": "string",
-      "enum": ["train", "predict", "diagnose", "submit"],
+      "enum": ["calibrate", "preprocess", "train", "predict", "diagnose", "submit"],
       "description": "Pipeline stage this snapshot corresponds to."
     },
 
     "metrics": {
       "type": "object",
-      "description": "Key numeric metrics. Includes competition score (GLL) and training diagnostics if available.",
+      "description": "Key numeric metrics. Includes competition score (GLL), training/validation losses, and physics-informed diagnostics.",
       "properties": {
-        "gll": { "type": "number", "description": "Gaussian Log-Likelihood (competition metric)." },
-        "loss": { "type": "number", "description": "Training loss (if applicable)." },
-        "val_loss": { "type": "number", "description": "Validation loss (if applicable)." }
+        "gll":        { "type": "number", "description": "Gaussian Log-Likelihood (competition metric, with FGS1 weighting)." },
+        "loss":       { "type": "number", "description": "Training loss (composite if physics-informed)." },
+        "val_loss":   { "type": "number", "description": "Validation loss (if applicable)." },
+        "smoothness": { "type": "number", "description": "Smoothness prior penalty (FFT/curvature)." },
+        "nonneg":     { "type": "number", "description": "Non-negativity prior penalty." },
+        "band_coh":   { "type": "number", "description": "Band-coherence prior penalty." },
+        "calib_prior":{ "type": "number", "description": "Calibration prior penalty (FGS1 ↔ AIRS alignment)." }
       },
       "additionalProperties": { "type": "number" }
     },
@@ -37,8 +41,8 @@
       "additionalProperties": false,
       "properties": {
         "wall_ms": { "type": "integer", "minimum": 0, "description": "Elapsed wall-clock time (ms)." },
-        "cpu_ms": { "type": "integer", "minimum": 0, "description": "CPU time (ms)." },
-        "gpu_ms": { "type": "integer", "minimum": 0, "description": "GPU time (ms)." }
+        "cpu_ms":  { "type": "integer", "minimum": 0, "description": "CPU time (ms)." },
+        "gpu_ms":  { "type": "integer", "minimum": 0, "description": "GPU time (ms)." }
       }
     },
 
@@ -50,7 +54,24 @@
 
     "config_hash": {
       "type": "string",
-      "description": "Hash of Hydra/DVC config snapshot used for this run."
+      "description": "Stable hash of Hydra/DVC config snapshot used for this run."
+    },
+
+    "git_rev": {
+      "type": "string",
+      "description": "Git commit SHA (or tag) at which the run was executed."
+    },
+
+    "env": {
+      "type": "object",
+      "description": "Environment metadata for CI ↔ Kaggle parity and determinism.",
+      "properties": {
+        "python": { "type": "string" },
+        "torch": { "type": "string" },
+        "torch_cuda": { "type": "string" },
+        "cudnn": { "type": ["string", "integer"] }
+      },
+      "additionalProperties": true
     },
 
     "created_at": {
