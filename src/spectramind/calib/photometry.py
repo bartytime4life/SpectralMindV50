@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union, Literal
+from typing import Any, Dict, Optional, Tuple, Union, Literal, cast
 
 BackendArray = Union["np.ndarray", "torch.Tensor"]  # noqa: F821
 
@@ -39,14 +39,34 @@ def _torch() -> Any:
     import torch
     return torch
 
+def _resolve_dtype(backend: str, dtype: Optional[Union[str, Any]]) -> Any:
+    if dtype is None:
+        return None
+    if backend == "torch":
+        torch = _torch()
+        if isinstance(dtype, str):
+            m = {
+                "float32": torch.float32, "float": torch.float32,
+                "float64": torch.float64, "double": torch.float64,
+                "float16": torch.float16, "half": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            return m.get(dtype.lower(), getattr(torch, dtype))
+        return dtype
+    # numpy
+    np = _np()
+    if isinstance(dtype, str):
+        return getattr(np, dtype)
+    return dtype
+
 def _to_float(x: BackendArray, dtype: Optional[Union[str, Any]] = None) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        tdtype = getattr(torch, dtype) if isinstance(dtype, str) else (dtype or torch.float32)
+        tdtype = _resolve_dtype("torch", dtype) or torch.float32
         return x.to(tdtype)
     else:
         np = _np()
-        ndtype = getattr(np, dtype) if isinstance(dtype, str) else (dtype or np.float32)
+        ndtype = _resolve_dtype("numpy", dtype) or np.float32
         return x.astype(ndtype, copy=False)
 
 def _zeros_like(x: BackendArray) -> BackendArray:
@@ -82,6 +102,8 @@ def _nansum(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
 def _nanmean(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
+        if hasattr(torch, "nanmean"):
+            return torch.nanmean(x, dim=axis, keepdim=keepdims)  # type: ignore[attr-defined]
         m = ~torch.isnan(x)
         num = torch.where(m, x, torch.tensor(0., dtype=x.dtype, device=x.device)).sum(dim=axis, keepdim=keepdims) if axis is not None else torch.where(m, x, torch.tensor(0., dtype=x.dtype, device=x.device)).sum()
         den = m.sum(dim=axis, keepdim=keepdims) if axis is not None else m.sum()
@@ -97,10 +119,14 @@ def _nanmean(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
 def _nanmedian(x: BackendArray, axis=None, keepdims=False) -> BackendArray:
     if _is_torch(x):
         torch = _torch()
-        # torch.nanmedian exists in recent versions; prefer it to keep gradients on device
-        if hasattr(torch, "nanmedian"):
-            return torch.nanmedian(x, dim=axis, keepdim=keepdims).values if axis is not None else torch.nanmedian(x)
-        # Fallback via NumPy (breaks grad): last resort for old Torch
+        if axis is None:
+            # torch.nanmedian returns a Tensor when no dim is given in newer torch, keep symmetry
+            if hasattr(torch, "nanmedian"):
+                return torch.nanmedian(x)
+        else:
+            if hasattr(torch, "nanmedian"):
+                return torch.nanmedian(x, dim=axis, keepdim=keepdims).values  # type: ignore[attr-defined]
+        # Fallback via NumPy (last resort)
         np = _np()
         x_np = x.detach().cpu().numpy()
         m_np = np.nanmedian(x_np, axis=axis, keepdims=keepdims)
@@ -419,13 +445,8 @@ def photometry(frames: BackendArray, params: PhotometryParams) -> PhotometryResu
     for s in Pshape:
         B *= int(s)
     # reshape to [B, T, H, W]
-    if torch_mode:
-        F2 = F.reshape(B, T, H, W)
-        V2 = V.reshape(B, T, H, W) if V is not None else None
-    else:
-        import numpy as np
-        F2 = F.reshape(B, T, H, W)
-        V2 = V.reshape(B, T, H, W) if V is not None else None
+    F2 = F.reshape(B, T, H, W)
+    V2 = V.reshape(B, T, H, W) if V is not None else None
 
     # Allocate outputs in [B, T]
     if torch_mode:
@@ -518,10 +539,7 @@ def photometry(frames: BackendArray, params: PhotometryParams) -> PhotometryResu
                 # Mask PSF to aperture & normalize by NaN-safe sum
                 P = _where(ap_mask > 0, P, _nan_like(P))
                 Psum = _nansum(_abs(P))
-                if _is_torch(Psum):
-                    Psum_val = float(Psum.item())
-                else:
-                    Psum_val = float(Psum)
+                Psum_val = float(Psum.item()) if _is_torch(Psum) else float(Psum)
                 if Psum_val <= 1e-20:
                     # degenerate → fallback to uniform within aperture
                     P = _where(ap_mask > 0, _ones_like(P), _nan_like(P))
@@ -552,10 +570,7 @@ def photometry(frames: BackendArray, params: PhotometryParams) -> PhotometryResu
     def _reshape_bt(xBT: Optional[BackendArray]) -> Optional[BackendArray]:
         if xBT is None:
             return None
-        if torch_mode:
-            return xBT.reshape(*Pshape, T)
-        else:
-            return xBT.reshape(*Pshape, T)
+        return xBT.reshape(*Pshape, T)
 
     flux = _reshape_bt(flux)
     sky = _reshape_bt(sky)
@@ -565,10 +580,7 @@ def photometry(frames: BackendArray, params: PhotometryParams) -> PhotometryResu
     fwhm = _reshape_bt(fwhm)
 
     # aperture area per batch (effective pixel count at last frame)
-    if torch_mode:
-        area_out = area_eff.reshape(*Pshape)
-    else:
-        area_out = area_eff.reshape(*Pshape)
+    area_out = area_eff.reshape(*Pshape)
 
     meta: Dict[str, Any] = {}
     if params.return_intermediate:
