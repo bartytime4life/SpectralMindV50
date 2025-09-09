@@ -18,6 +18,7 @@ from spectramind.submit.package import package_submission
 try:
     import torch
     from torch.utils.data import Dataset, DataLoader
+
     _HAS_TORCH = True
 except Exception:  # pragma: no cover
     _HAS_TORCH = False
@@ -25,9 +26,9 @@ except Exception:  # pragma: no cover
     DataLoader = object  # type: ignore
 
 
-# -------------------------------------------------------------------------
+# =============================================================================
 # Config
-# -------------------------------------------------------------------------
+# =============================================================================
 
 @dataclass
 class PredictConfig:
@@ -63,25 +64,48 @@ class PredictConfig:
     make_zip: bool = True
     report_meta: Optional[Dict[str, Any]] = None
 
+    # Numerical guards
+    sigma_floor: float = 1e-9  # minimum σ (avoid zero/neg and NLL blowups)
 
-# -------------------------------------------------------------------------
+
+# =============================================================================
 # Dataset / Loader
-# -------------------------------------------------------------------------
+# =============================================================================
 
 class DualChannelNPY(Dataset):
     """
     Minimal dual-channel dataset:
       - ids_csv: must contain 'sample_id' column (strings)
-      - fgs1.npy:  arbitrary shape with first dim N
-      - airs.npy:  arbitrary shape with first dim N
+      - fgs1.npy: arbitrary shape with first dim N
+      - airs.npy: arbitrary shape with first dim N
     """
     def __init__(self, root: Union[str, Path], ids_csv: Union[str, Path],
                  fgs1_path: Union[str, Path], airs_path: Union[str, Path]) -> None:
         self.root = Path(root)
-        self.ids = pd.read_csv(self.root / ids_csv, dtype={"sample_id": str})["sample_id"].tolist()
+        ids_fp = self.root / ids_csv
+        fgs_fp = self.root / fgs1_path
+        airs_fp = self.root / airs_path
+        for fp, desc in [(ids_fp, "ids.csv"), (fgs_fp, "FGS1 .npy"), (airs_fp, "AIRS .npy")]:
+            if not fp.exists():
+                raise FileNotFoundError(f"Missing {desc}: {fp}")
 
-        self.fgs1 = np.load(self.root / fgs1_path, mmap_mode="r")
-        self.airs = np.load(self.root / airs_path, mmap_mode="r")
+        # ids
+        df_ids = pd.read_csv(ids_fp, dtype={"sample_id": str})
+        if "sample_id" not in df_ids.columns:
+            raise ValueError(f"ids file {ids_fp} must contain a 'sample_id' column, got columns={list(df_ids.columns)}")
+        self.ids: List[str] = df_ids["sample_id"].tolist()
+        if len(self.ids) == 0:
+            raise ValueError(f"No sample_id rows found in ids file {ids_fp}")
+
+        # memmap npy
+        try:
+            self.fgs1 = np.load(fgs_fp, mmap_mode="r")
+            self.airs = np.load(airs_fp, mmap_mode="r")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load npy arrays: {e}")
+
+        if self.fgs1.ndim < 1 or self.airs.ndim < 1:
+            raise ValueError(f"Expected arrays with first dimension N; got shapes fgs1={self.fgs1.shape}, airs={self.airs.shape}")
         if self.fgs1.shape[0] != len(self.ids) or self.airs.shape[0] != len(self.ids):
             raise ValueError(
                 f"Length mismatch: ids={len(self.ids)}, fgs1[0]={self.fgs1.shape[0]}, airs[0]={self.airs.shape[0]}"
@@ -91,6 +115,7 @@ class DualChannelNPY(Dataset):
         return len(self.ids)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # NOTE: slices into memmap; do not modify arrays in-place
         return {
             "sample_id": self.ids[idx],
             "fgs1": self.fgs1[idx],
@@ -108,21 +133,26 @@ def _collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-# -------------------------------------------------------------------------
+# =============================================================================
 # Utilities
-# -------------------------------------------------------------------------
+# =============================================================================
 
 def _ensure_torch() -> None:
     if not _HAS_TORCH:
         raise RuntimeError("PyTorch is required for prediction but was not found.")
 
+
 def _seed_everything(seed: int) -> None:
+    # numpy
+    np.random.seed(seed)
+    # torch
     if _HAS_TORCH:
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.benchmark = False
+        # cuDNN determinism trade-offs; benchmark disabled unless explicitly set
         torch.backends.cudnn.deterministic = True
-    np.random.seed(seed)
+        torch.backends.cudnn.benchmark = False
+
 
 def _resolve_device(d: str) -> torch.device:
     d = d.lower()
@@ -132,13 +162,18 @@ def _resolve_device(d: str) -> torch.device:
         return torch.device("mps")
     return torch.device("cpu")
 
+
 def _load_json(path: Optional[Union[str, Path]]) -> Dict[str, Any]:
     if not path:
         return {}
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"model_init_json not found: {p}")
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse JSON {p}: {e}")
+
 
 def _import_obj(path: str) -> Any:
     """Import an object from 'module:obj' or 'module.obj'."""
@@ -149,6 +184,7 @@ def _import_obj(path: str) -> Any:
     m = importlib.import_module(mod)
     return getattr(m, obj)
 
+
 def _amp_dtype(precision: str) -> Optional[torch.dtype]:
     p = precision.lower()
     if p == "fp16":
@@ -158,9 +194,25 @@ def _amp_dtype(precision: str) -> Optional[torch.dtype]:
     return None  # fp32
 
 
-# -------------------------------------------------------------------------
+def _safe_numpy(x: np.ndarray, name: str) -> np.ndarray:
+    """Ensure output has finite values."""
+    if not np.all(np.isfinite(x)):
+        raise ValueError(f"Non-finite values detected in {name}")
+    return x
+
+
+def _check_model_output(mu: torch.Tensor, sigma: torch.Tensor, n_bins: int) -> None:
+    if mu.ndim != 2 or sigma.ndim != 2:
+        raise RuntimeError(f"Model outputs must be 2D [B, n_bins], got mu={mu.shape}, sigma={sigma.shape}")
+    if mu.shape != sigma.shape:
+        raise RuntimeError(f"mu and sigma shapes must match, got mu={mu.shape}, sigma={sigma.shape}")
+    if mu.shape[1] < n_bins or sigma.shape[1] < n_bins:
+        raise RuntimeError(f"Model produced fewer bins than requested n_bins={n_bins}: mu={mu.shape}, sigma={sigma.shape}")
+
+
+# =============================================================================
 # Model loading
-# -------------------------------------------------------------------------
+# =============================================================================
 
 def _load_model(cfg: PredictConfig, device: torch.device) -> Any:
     """
@@ -170,7 +222,10 @@ def _load_model(cfg: PredictConfig, device: torch.device) -> Any:
     """
     _ensure_torch()
     if cfg.jit_path:
-        model = torch.jit.load(str(cfg.jit_path), map_location=device)
+        p = Path(cfg.jit_path)
+        if not p.exists():
+            raise FileNotFoundError(f"TorchScript model not found: {p}")
+        model = torch.jit.load(str(p), map_location=device)
         model.eval()
         return model
 
@@ -187,30 +242,36 @@ def _load_model(cfg: PredictConfig, device: torch.device) -> Any:
     state = torch.load(str(cfg.ckpt_paths[0]), map_location="cpu")
     if isinstance(state, Mapping) and "state_dict" in state:
         state = state["state_dict"]
-    model.load_state_dict(state, strict=cfg.strict_load)
+    missing, unexpected = model.load_state_dict(state, strict=cfg.strict_load)
+    if not cfg.strict_load and (missing or unexpected):  # type: ignore[truthy-function]
+        # provide a soft warning via exception message
+        raise RuntimeError(f"Non-strict load had missing={missing} unexpected={unexpected}")
     model.eval()
     return model
 
 
-# -------------------------------------------------------------------------
+# =============================================================================
 # Predict loop (with optional checkpoint ensembling)
-# -------------------------------------------------------------------------
+# =============================================================================
 
 @torch.no_grad()
-def _forward_one(model: Any, batch: Dict[str, Any], device: torch.device, amp_dtype: Optional[torch.dtype]) -> Tuple[np.ndarray, np.ndarray]:
+def _forward_one(model: Any, batch: Dict[str, Any], device: torch.device, amp_dtype: Optional[torch.dtype], n_bins: int) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Expects model to return (mu, sigma) as torch tensors of shape [B, n_bins].
+    Expects model to return (mu, sigma) as torch tensors of shape [B, n_bins] (or more bins).
     Converts inputs:
       - batch['fgs1'], batch['airs'] -> torch tensors on device
     """
     f = torch.from_numpy(batch["fgs1"]).to(device)
     a = torch.from_numpy(batch["airs"]).to(device)
 
-    if amp_dtype is None:
-        out = model({"fgs1": f, "airs": a})
-    else:
-        with torch.autocast(device_type=device.type, dtype=amp_dtype):
+    # CPU autocast is supported in modern PyTorch; guard if unavailable
+    use_amp = amp_dtype is not None and (device.type in ("cuda", "cpu"))
+
+    if use_amp:
+        with torch.autocast(device_type=device.type, dtype=amp_dtype):  # type: ignore[arg-type]
             out = model({"fgs1": f, "airs": a})
+    else:
+        out = model({"fgs1": f, "airs": a})
 
     if isinstance(out, (tuple, list)) and len(out) == 2:
         mu_t, sigma_t = out
@@ -219,9 +280,15 @@ def _forward_one(model: Any, batch: Dict[str, Any], device: torch.device, amp_dt
     else:
         raise RuntimeError("Model output must be (mu, sigma) or dict with keys 'mu' and 'sigma'.")
 
-    mu = mu_t.detach().cpu().float().numpy()
-    sigma = sigma_t.detach().cpu().float().numpy()
-    return mu, sigma
+    if not isinstance(mu_t, torch.Tensor) or not isinstance(sigma_t, torch.Tensor):
+        raise RuntimeError("Model outputs must be torch.Tensor")
+
+    _check_model_output(mu_t, sigma_t, n_bins=n_bins)
+
+    # Slice to requested n_bins (in case the model returns more)
+    mu = mu_t[:, :n_bins].detach().cpu().float().numpy()
+    sigma = sigma_t[:, :n_bins].detach().cpu().float().numpy()
+    return _safe_numpy(mu, "mu"), _safe_numpy(sigma, "sigma")
 
 
 def predict_to_dataframe(cfg: PredictConfig) -> pd.DataFrame:
@@ -234,7 +301,7 @@ def predict_to_dataframe(cfg: PredictConfig) -> pd.DataFrame:
 
     device = _resolve_device(cfg.device)
     if _HAS_TORCH and device.type == "cuda":
-        torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
+        torch.backends.cudnn.benchmark = cfg.cudnn_benchmark  # user-controlled
 
     ds = DualChannelNPY(cfg.inputs_dir, cfg.ids_csv, cfg.fgs1_path, cfg.airs_path)
     dl = DataLoader(
@@ -252,11 +319,7 @@ def predict_to_dataframe(cfg: PredictConfig) -> pd.DataFrame:
 
     # optional multi-ckpt ensembling (average in model space)
     ckpts = list(cfg.ckpt_paths or []) if not cfg.jit_path else []
-    if cfg.jit_path:
-        ckpts = []  # TorchScript path: single model
-    else:
-        # ensure first one already loaded; others will be loaded iteratively
-        ckpts = ckpts
+    # First model already loaded from ckpts[0] (if eager)
 
     all_ids: List[str] = []
     all_mu: List[np.ndarray] = []
@@ -264,22 +327,18 @@ def predict_to_dataframe(cfg: PredictConfig) -> pd.DataFrame:
 
     for batch in dl:
         all_ids.extend(batch["sample_id"])
-        mu_ens: Optional[np.ndarray] = None
-        sg_ens: Optional[np.ndarray] = None
 
-        # First: current model (already has ckpt_paths[0] loaded)
-        mu, sg = _forward_one(model, batch, device, amp_dtype)
-        mu_ens = mu
-        sg_ens = sg
+        # Start with current model (with ckpt_paths[0] loaded if eager)
+        mu_ens, sg_ens = _forward_one(model, batch, device, amp_dtype, n_bins=cfg.n_bins)
 
-        # Ensembling with remaining ckpts
+        # Ensembling with remaining ckpts (eager)
         for ck in ckpts[1:]:
             state = torch.load(str(ck), map_location="cpu")
             if isinstance(state, Mapping) and "state_dict" in state:
                 state = state["state_dict"]
             model.load_state_dict(state, strict=cfg.strict_load)
             model.eval()
-            mu_i, sg_i = _forward_one(model, batch, device, amp_dtype)
+            mu_i, sg_i = _forward_one(model, batch, device, amp_dtype, n_bins=cfg.n_bins)
             mu_ens += mu_i
             sg_ens += sg_i
 
@@ -291,7 +350,12 @@ def predict_to_dataframe(cfg: PredictConfig) -> pd.DataFrame:
         all_sigma.append(sg_ens)
 
     mu_np = np.concatenate(all_mu, axis=0)
-    sigma_np = np.clip(np.concatenate(all_sigma, axis=0), 1e-9, None)  # guard: non-negative sigma
+    sigma_np = np.concatenate(all_sigma, axis=0)
+
+    # numeric guards
+    sigma_np = np.clip(sigma_np, cfg.sigma_floor, None)  # guard: non-negative, non-zero
+    if not np.all(np.isfinite(mu_np)) or not np.all(np.isfinite(sigma_np)):
+        raise ValueError("Non-finite values encountered in predictions.")
 
     df = format_predictions(all_ids, mu_np[:, :cfg.n_bins], sigma_np[:, :cfg.n_bins], n_bins=cfg.n_bins)
     return df
@@ -300,19 +364,28 @@ def predict_to_dataframe(cfg: PredictConfig) -> pd.DataFrame:
 def predict_to_submission(cfg: PredictConfig) -> Path:
     """
     Produce a submission directory with CSV + manifest (+ optional ZIP).
-    Validates by default.
+    Validates by default and writes a predict_config.json snapshot for reproducibility.
     """
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Save config snapshot (minimal JSON-serializable)
+    cfg_snapshot = {
+        k: (str(v) if isinstance(v, Path) else v)
+        for k, v in asdict(cfg).items()
+    }
+    (out_dir / "predict_config.json").write_text(json.dumps(cfg_snapshot, indent=2), encoding="utf-8")
+
     df = predict_to_dataframe(cfg)
 
     if cfg.validate:
-        report = validate_dataframe(df, n_bins=cfg.n_bins, strict_order=True, check_unique_ids=True, id_field="sample_id")
+        report = validate_dataframe(df, n_bins=cfg.n_bins, strict_order=True, check_unique_ids=True)
         report.raise_if_failed()
 
     # package (CSV + manifest + zip)
-    extra = {"predict_config": asdict(cfg)}
+    extra_meta = dict(cfg.report_meta or {})
+    extra_meta.setdefault("predict_config", cfg_snapshot)
+
     out_zip_or_csv = package_submission(
         df,
         out_dir=out_dir,
@@ -320,6 +393,6 @@ def predict_to_submission(cfg: PredictConfig) -> Path:
         make_zip=cfg.make_zip,
         zip_name=cfg.out_zip_name,
         n_bins=cfg.n_bins,
-        extra_meta=(cfg.report_meta or extra),
+        extra_meta=extra_meta,
     )
     return out_zip_or_csv
