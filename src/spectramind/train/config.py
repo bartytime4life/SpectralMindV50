@@ -1,333 +1,484 @@
-# src/spectramind/train/config.py
+# src/spectramind/train/ckpt.py
 # =============================================================================
-# SpectraMind V50 — Training Config Utilities
+# SpectraMind V50 — Checkpoint Utilities
 # -----------------------------------------------------------------------------
-# Utilities to:
-#   • resolve training output directories (run_dir / ckpt_dir / logs_dir)
-#   • seed all RNGs deterministically from config
-#   • translate a Hydra-style config dict into pl.Trainer(**kwargs)
+# Lightning/PyTorch-agnostic helpers for saving/loading checkpoints,
+# resuming training, discovering best/last checkpoints in a directory,
+# and averaging multiple checkpoints into a single weights file.
 #
-# Design notes:
-#   • Guarded imports: module is import-safe without torch/lightning/numpy
-#   • No logger construction here (loggers are configured elsewhere);
-#     this module returns Trainer kwargs and filesystem paths only.
-#   • Matches repo’s CLI-first, config-driven, reproducible workflow.
+# Design goals:
+#   • Guarded imports (module is import-safe without torch/lightning).
+#   • Works with PL Trainer when available, falls back to torch-only.
+#   • Repro-friendly: explicit map_location, strict toggle, ignore/include prefixes.
+#   • Robust "best" selection (mode=min|max) compatible with filename schema
+#     like:  epoch{epoch:03d}-{monitor:.5f}.ckpt  (our default).
+#   • Utilities to average (mean or EMA) multiple ckpts for inference stability.
+#   • Small, composable API for Kaggle/CI and local dev.
 # =============================================================================
 
 from __future__ import annotations
 
-import os
-import time
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-# --- Optional heavy deps (import only at runtime) --------------------------------
+# --- Optional heavy deps (import only when needed) --------------------------------
 try:  # pragma: no cover
-    import numpy as _np  # type: ignore
+    import torch
 except Exception:  # pragma: no cover
-    _np = None  # type: ignore
-
-try:  # pragma: no cover
-    import torch as _torch  # type: ignore
-except Exception:  # pragma: no cover
-    _torch = None  # type: ignore
+    torch = None  # type: ignore
 
 try:  # pragma: no cover
-    import pytorch_lightning as _pl  # type: ignore
-    from pytorch_lightning.utilities.seed import seed_everything as _pl_seed  # type: ignore
+    import pytorch_lightning as pl
 except Exception:  # pragma: no cover
-    _pl = None  # type: ignore
-    _pl_seed = None  # type: ignore
+    pl = None  # type: ignore
 
 
 # =============================================================================
-# Dataclasses
+# Types / dataclasses
 # =============================================================================
 @dataclass(frozen=True)
-class TrainPaths:
-    root: Path          # experiment root (e.g., artifacts/)
-    exp_name: str       # experiment group
-    run_name: str       # run identifier (human-friendly)
-    timestamp: str      # YYYYmmdd-HHMMSS
-    run_dir: Path       # root/exp_name/run_name__YYYYmmdd-HHMMSS/
-    ckpt_dir: Path      # run_dir/checkpoints/
-    logs_dir: Path      # run_dir/logs/
+class CkptPick:
+    path: Path
+    score: Optional[float] = None
+    epoch: Optional[int] = None
 
 
 # =============================================================================
 # Internal helpers
 # =============================================================================
-def _cfg_get(cfg: Mapping[str, Any], path: str, default: Any = None) -> Any:
-    cur: Any = cfg
-    for key in path.split("."):
-        if not isinstance(cur, Mapping):
-            return default
-        cur = cur.get(key, default)
-    return cur
+def _require_torch() -> None:
+    if torch is None:
+        raise RuntimeError(
+            "This operation requires `torch` at runtime. Install PyTorch to proceed."
+        )
 
 
-def _now_stamp() -> str:
-    # UTC-like stable timestamp (local tz, but reproducible format)
-    return time.strftime("%Y%m%d-%H%M%S", time.localtime())
+def _is_ckpt(p: Path) -> bool:
+    return p.is_file() and p.suffix == ".ckpt"
 
 
-def _ensure_dir(p: Union[str, Path]) -> Path:
-    path = Path(p)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def _cpu_map_location() -> Any:
+    # Works on CUDA/CPU nodes; keeps CPU for deterministic resume if desired.
+    return "cpu"
 
 
-def _normalize_experiment_name(s: Optional[str]) -> str:
-    if not s:
-        return "experiment"
-    s = str(s).strip()
-    return s or "experiment"
+_MONITOR_FLOAT_RE = re.compile(r"[-_](?P<val>[-+]?\d+(?:\.\d+)?)(?:\.ckpt)$")
+_EPOCH_FROM_NAME_RE = re.compile(r"epoch(?P<ep>\d+)")
+_EPOCH_FROM_STATE_RE_KEYS = ("epoch", "global_step")
 
 
-def _normalize_run_name(s: Optional[str]) -> str:
-    if not s:
-        return "run"
-    s = str(s).strip()
-    return s or "run"
-
-
-def _normalize_precision(x: Any) -> Union[int, str]:
-    """
-    Map user precision config to something Trainer understands.
-    Accepts: 32|16|64, '32', '16', 'bf16', 'bf16-mixed', '16-mixed', '64-true', etc.
-    Defaults to 32-bit if unset.
-    """
-    if x is None:
-        return 32
-    if isinstance(x, (int, float)):
-        v = int(x)
-        return v if v in (16, 32, 64) else 32
-    s = str(x).strip().lower()
-    # Common aliases
-    if s in {"32", "fp32", "float32"}:
-        return 32
-    if s in {"64", "fp64", "float64"}:
-        return 64
-    if s in {"16", "fp16", "float16", "16-mixed"}:
-        # PL 2.x: '16-mixed' or 16 (AMP) both acceptable
-        return "16-mixed"
-    if s in {"bf16", "bf16-mixed", "bfloat16"}:
-        return "bf16-mixed"
-    return 32
-
-
-def _infer_devices(devices: Any) -> Any:
-    """
-    Return devices value compatible with Trainer. Handles:
-      - None: auto (1 if cpu)
-      - int/str: pass through if sensible
-      - 'auto' => 'auto'
-      - list => pass-through
-    """
-    if devices is None:
-        # If torch cuda available and env allows, leaving None lets PL choose; otherwise fallback to 1
+def _try_parse_monitor_from_name(p: Path) -> Optional[float]:
+    # expects filenames like epoch012-0.12345.ckpt (default template)
+    m = _MONITOR_FLOAT_RE.search(p.name)
+    if m:
         try:
-            if _torch is not None and _torch.cuda.is_available():
-                return "auto"
+            return float(m.group("val"))
         except Exception:
-            pass
-        return 1
-    return devices
+            return None
+    return None
 
 
-def _parse_bool(x: Any, default: bool) -> bool:
-    if x is None:
-        return default
-    if isinstance(x, bool):
-        return x
-    s = str(x).strip().lower()
-    return s in {"1", "true", "yes", "y", "on"}
+def _try_parse_epoch_from_name(p: Path) -> Optional[int]:
+    m = _EPOCH_FROM_NAME_RE.search(p.stem)
+    if m:
+        try:
+            return int(m.group("ep"))
+        except Exception:
+            return None
+    return None
+
+
+def _best_by_mode(items: Sequence[CkptPick], mode: str) -> Optional[CkptPick]:
+    mode = (mode or "min").strip().lower()
+    candidates = [x for x in items if x.score is not None]
+    if not candidates:
+        return None
+    if mode == "max":
+        return max(candidates, key=lambda x: (x.score, x.epoch or -1))
+    # default min
+    return min(candidates, key=lambda x: (x.score, x.epoch or -1))
+
+
+def _load_torch_file(path: Path, map_location: Any) -> Dict[str, Any]:
+    _require_torch()
+    return torch.load(str(path), map_location=map_location)  # type: ignore[no-any-return]
+
+
+def _state_dict_from_checkpoint(ckpt: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    # Lightning checkpoints typically store model state under 'state_dict'
+    if "state_dict" in ckpt and isinstance(ckpt["state_dict"], Mapping):
+        return ckpt["state_dict"]
+    # Plain state dict checkpoint (torch.save(model.state_dict()))
+    maybe = {k: v for k, v in ckpt.items() if hasattr(v, "size") or hasattr(v, "shape")}
+    # Heuristic: if enough tensor-like keys present, treat as state_dict
+    if len(maybe) >= 10 or all(isinstance(v, (list, tuple)) is False for v in maybe.values()):
+        return ckpt  # type: ignore[return-value]
+    return None
+
+
+def _strip_prefix(state: Mapping[str, Any], prefix: str) -> Dict[str, Any]:
+    plen = len(prefix)
+    out: Dict[str, Any] = {}
+    for k, v in state.items():
+        out[k[plen:] if k.startswith(prefix) else k] = v
+    return out
+
+
+def _filter_ignore_prefixes(
+    state: Mapping[str, Any],
+    ignore_prefixes: Optional[Sequence[str]],
+) -> Dict[str, Any]:
+    if not ignore_prefixes:
+        return dict(state)
+    out: Dict[str, Any] = {}
+    for k, v in state.items():
+        if any(k.startswith(pref) for pref in ignore_prefixes):
+            continue
+        out[k] = v
+    return out
+
+
+def _filter_include_prefixes(
+    state: Mapping[str, Any],
+    include_prefixes: Optional[Sequence[str]],
+) -> Dict[str, Any]:
+    if not include_prefixes:
+        return dict(state)
+    out: Dict[str, Any] = {}
+    for k, v in state.items():
+        if any(k.startswith(pref) for pref in include_prefixes):
+            out[k] = v
+    return out
 
 
 # =============================================================================
-# Public: resolve output paths
+# Public: discovery (best/last)
 # =============================================================================
-def resolve_train_paths(cfg: Mapping[str, Any]) -> TrainPaths:
+def find_all_checkpoints(ckpt_dir: Union[str, Path]) -> List[Path]:
+    d = Path(ckpt_dir)
+    if not d.exists():
+        return []
+    return sorted([p for p in d.iterdir() if _is_ckpt(p)])
+
+
+def find_checkpoints_by_glob(ckpt_dir: Union[str, Path], pattern: str = "*.ckpt") -> List[Path]:
+    """Find checkpoints using a glob pattern (e.g., 'epoch*.ckpt' or '*-val_loss*.ckpt')."""
+    d = Path(ckpt_dir)
+    if not d.exists():
+        return []
+    return sorted([p for p in d.glob(pattern) if _is_ckpt(p)])
+
+
+def find_best_checkpoint(
+    ckpt_dir: Union[str, Path],
+    monitor: Optional[str] = None,
+    mode: str = "min",
+) -> Optional[Path]:
     """
-    Resolve run output directories from config. Sane defaults:
-      root:   cfg.paths.artifacts or cfg.train.output_dir or "./artifacts"
-      exp:    cfg.experiment.name or cfg.train.experiment or "experiment"
-      run:    cfg.run.name or cfg.train.run_name or derived from model name
-      stamp:  cfg.run.timestamp or generated (YYYYmmdd-HHMMSS)
+    Try to choose a 'best' checkpoint from a directory.
+
+    Strategy:
+      1) If filenames encode the monitor value (default template "epoch{epoch}-{monitor}.ckpt"),
+         parse and select min/max accordingly.
+      2) If parsing fails for all, return None.
     """
-    root = _cfg_get(cfg, "paths.artifacts") or _cfg_get(cfg, "train.output_dir") or "artifacts"
-    exp_name = (
-        _cfg_get(cfg, "experiment.name")
-        or _cfg_get(cfg, "train.experiment")
-        or _cfg_get(cfg, "model.name")
-        or "experiment"
-    )
-    run_name = _cfg_get(cfg, "run.name") or _cfg_get(cfg, "train.run_name") or "run"
-    stamp = _cfg_get(cfg, "run.timestamp") or _now_stamp()
-
-    exp_name = _normalize_experiment_name(exp_name)
-    run_name = _normalize_run_name(run_name)
-
-    root_p = _ensure_dir(root)
-    run_dir = _ensure_dir(root_p / exp_name / f"{run_name}__{stamp}")
-    ckpt_dir = _ensure_dir(run_dir / "checkpoints")
-    logs_dir = _ensure_dir(run_dir / "logs")
-
-    return TrainPaths(
-        root=root_p,
-        exp_name=exp_name,
-        run_name=run_name,
-        timestamp=stamp,
-        run_dir=run_dir,
-        ckpt_dir=ckpt_dir,
-        logs_dir=logs_dir,
-    )
+    items: List[CkptPick] = []
+    for p in find_all_checkpoints(ckpt_dir):
+        score = _try_parse_monitor_from_name(p)
+        epoch = _try_parse_epoch_from_name(p)
+        items.append(CkptPick(path=p, score=score, epoch=epoch))
+    pick = _best_by_mode(items, mode=mode)
+    return pick.path if pick else None
 
 
-# =============================================================================
-# Public: seeding
-# =============================================================================
-def seed_everything_from_cfg(cfg: Mapping[str, Any]) -> int:
+def find_last_checkpoint(ckpt_dir: Union[str, Path]) -> Optional[Path]:
     """
-    Seed Python, NumPy, (optional) Torch and PL deterministically from cfg.train.seed.
-    Returns the seed actually used.
+    Best-effort "last" checkpoint:
+      • Prefer higher epoch parsed from filename.
+      • Fallback to most recently modified file.
     """
-    seed = int(_cfg_get(cfg, "train.seed", 42) or 42)
-
-    # Python
-    try:
-        import random as _random  # local
-        _random.seed(seed)
-        os.environ["PYTHONHASHSEED"] = str(seed)
-    except Exception:
-        pass
-
-    # NumPy
-    try:
-        if _np is not None:
-            _np.random.seed(seed)  # type: ignore[attr-defined]
-    except Exception:
-        pass
-
-    # Torch
-    try:
-        if _torch is not None:
-            _torch.manual_seed(seed)
-            if _torch.cuda.is_available():
-                _torch.cuda.manual_seed_all(seed)
-            # optional torch backends deterministic flags (can be slow)
-            if _parse_bool(_cfg_get(cfg, "train.deterministic", False), False):
-                _torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
-                _torch.backends.cudnn.benchmark = False    # type: ignore[attr-defined]
-    except Exception:
-        pass
-
-    # Lightning
-    try:
-        if _pl_seed is not None:
-            # PL controls python + numpy + torch in one go (we keep prior steps for robustness)
-            _pl_seed(seed, workers=_parse_bool(_cfg_get(cfg, "train.seed_workers", True), True))
-    except Exception:
-        pass
-
-    return seed
+    cks = find_all_checkpoints(ckpt_dir)
+    if not cks:
+        return None
+    scored: List[Tuple[int, Path]] = []
+    for p in cks:
+        ep = _try_parse_epoch_from_name(p)
+        if ep is not None:
+            scored.append((ep, p))
+    if scored:
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return scored[0][1]
+    # fallback: newest by mtime
+    return max(cks, key=lambda p: p.stat().st_mtime)
 
 
 # =============================================================================
-# Public: translate config -> Trainer kwargs
+# Public: save / load / resume
 # =============================================================================
-def build_trainer_kwargs(
-    cfg: Mapping[str, Any],
+def save_checkpoint(
+    trainer: Optional["pl.Trainer"],  # type: ignore[name-defined]
+    path: Union[str, Path],
+    *,  # kw-only
+    weights_only: bool = False,
+) -> None:
+    """
+    Save a checkpoint via Lightning if trainer provided; otherwise raises.
+
+    Note:
+      • For torch-only model saving, call `torch.save(model.state_dict(), path)`.
+    """
+    path = Path(path)
+    if trainer is None or pl is None:
+        raise RuntimeError("Lightning Trainer is required to save a full checkpoint.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    trainer.save_checkpoint(str(path), weights_only=weights_only)
+
+
+def save_state_dict(
+    state_dict: Mapping[str, Any],
+    path: Union[str, Path],
+) -> None:
+    """Save a raw state_dict (torch-only) to disk."""
+    _require_torch()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(dict(state_dict), str(path))
+
+
+def load_weights_into_model(
+    model: Any,
+    ckpt_path: Union[str, Path],
     *,
-    default_ckpt_dir: Optional[Union[str, Path]] = None,
+    map_location: Any = None,
+    strict: bool = False,
+    ignore_prefixes: Optional[Sequence[str]] = None,
+    include_prefixes: Optional[Sequence[str]] = None,
+    strip_module_prefix: bool = True,
+    report: bool = True,
 ) -> Dict[str, Any]:
     """
-    Translate Hydra-style config dict into `pytorch_lightning.Trainer` kwargs.
+    Load (Lightning or raw) checkpoint weights into a torch.nn.Module.
 
-    Examples of read keys:
-      train:
-        max_epochs: 50
-        accelerator: "auto"
-        strategy: null
-        devices: "auto"
-        precision: "bf16"
-        gradient_clip_val: 1.0
-        accumulate_grad_batches: 1
-        deterministic: false
-        detect_anomaly: false
-        log_every_n_steps: 50
-        check_val_every_n_epoch: 1
-        val_check_interval: null
-        enable_checkpointing: true
-        num_sanity_val_steps: 2
-        overfit_batches: 0.0
-        limit_train_batches: 1.0
-        limit_val_batches: 1.0
-        limit_test_batches: 1.0
-        profiler: null|"simple"|"advanced"
+    Args:
+      model: torch.nn.Module-like with `load_state_dict`.
+      ckpt_path: file path to .ckpt
+      map_location: map location (default: CPU)
+      strict: pass-through to `load_state_dict`
+      ignore_prefixes: skip any state_dict entries whose keys start with these prefixes
+      include_prefixes: if provided, only keep entries with these prefixes
+      strip_module_prefix: remove 'module.' (DDP) prefix if present
+      report: print missing/unexpected keys to help debugging (rank-zero assumed)
+
+    Returns:
+      The return value from `model.load_state_dict` (Missing/Unexpected keys).
     """
-    # Core scheduling
-    max_epochs = int(_cfg_get(cfg, "train.max_epochs", 50))
-    max_steps = _cfg_get(cfg, "train.max_steps", None)
-    if max_steps is not None:
-        max_steps = int(max_steps)
+    _require_torch()
+    import torch.nn as nn  # local to avoid import at module import time
 
-    # Resources / performance
-    accelerator = _cfg_get(cfg, "train.accelerator", "auto")
-    strategy = _cfg_get(cfg, "train.strategy", None)
-    devices = _infer_devices(_cfg_get(cfg, "train.devices", None))
-    precision = _normalize_precision(_cfg_get(cfg, "train.precision", 32))
+    if not isinstance(model, nn.Module):
+        raise TypeError("`model` must be a `torch.nn.Module`.")
 
-    gradient_clip_val = float(_cfg_get(cfg, "train.gradient_clip_val", 0.0) or 0.0)
-    accumulate_grad_batches = int(_cfg_get(cfg, "train.accumulate_grad_batches", 1))
+    map_location = map_location or _cpu_map_location()
+    ckpt = _load_torch_file(Path(ckpt_path), map_location=map_location)
 
-    # Determinism / debugging
-    deterministic = _parse_bool(_cfg_get(cfg, "train.deterministic", False), False)
-    detect_anomaly = _parse_bool(_cfg_get(cfg, "train.detect_anomaly", False), False)
+    state = _state_dict_from_checkpoint(ckpt)
+    if state is None:
+        # Not a Lightning "state_dict" style; assume it's raw state_dict
+        if isinstance(ckpt, Mapping):
+            state = ckpt  # type: ignore[assignment]
+        else:
+            raise RuntimeError(f"Unrecognized checkpoint structure at {ckpt_path}.")
 
-    # Logging cadence
-    log_every_n_steps = int(_cfg_get(cfg, "train.log_every_n_steps", 50))
-    check_val_every_n_epoch = int(_cfg_get(cfg, "train.check_val_every_n_epoch", 1))
-    val_check_interval = _cfg_get(cfg, "train.val_check_interval", None)  # float | int | None
+    # Optional DP unwrap
+    if strip_module_prefix and any(k.startswith("module.") for k in state.keys()):
+        state = _strip_prefix(state, "module.")
 
-    # Data limits / sanity checks
-    limit_train_batches = _cfg_get(cfg, "train.limit_train_batches", 1.0)
-    limit_val_batches = _cfg_get(cfg, "train.limit_val_batches", 1.0)
-    limit_test_batches = _cfg_get(cfg, "train.limit_test_batches", 1.0)
-    overfit_batches = _cfg_get(cfg, "train.overfit_batches", 0.0)
-    num_sanity_val_steps = int(_cfg_get(cfg, "train.num_sanity_val_steps", 2))
-    enable_checkpointing = _parse_bool(_cfg_get(cfg, "train.enable_checkpointing", True), True)
+    # Optional include/ignore filters
+    state = _filter_include_prefixes(state, include_prefixes)
+    state = _filter_ignore_prefixes(state, ignore_prefixes)
 
-    profiler = _cfg_get(cfg, "train.profiler", None)
+    result = model.load_state_dict(state, strict=strict)
+    if report and hasattr(result, "missing_keys") and hasattr(result, "unexpected_keys"):
+        missing = list(getattr(result, "missing_keys"))
+        unexpected = list(getattr(result, "unexpected_keys"))
+        if missing or unexpected:
+            print(f"[ckpt] load report for: {ckpt_path}")
+            if missing:
+                print(f"  - missing_keys ({len(missing)}): {missing[:8]}{' ...' if len(missing) > 8 else ''}")
+            if unexpected:
+                print(f"  - unexpected_keys ({len(unexpected)}): {unexpected[:8]}{' ...' if len(unexpected) > 8 else ''}")
+    return result  # type: ignore[return-value]
 
-    # Checkpointing directory (Lightning uses this if checkpoint callbacks are constructed)
-    default_root_dir = str(default_ckpt_dir) if default_ckpt_dir is not None else None
 
-    kwargs: Dict[str, Any] = {
-        "max_epochs": max_epochs,
-        "max_steps": max_steps,
-        "accelerator": accelerator,
-        "strategy": strategy,
-        "devices": devices,
-        "precision": precision,
-        "gradient_clip_val": gradient_clip_val,
-        "accumulate_grad_batches": accumulate_grad_batches,
-        "deterministic": deterministic,
-        "detect_anomaly": detect_anomaly,
-        "log_every_n_steps": log_every_n_steps,
-        "check_val_every_n_epoch": check_val_every_n_epoch,
-        "val_check_interval": val_check_interval,
-        "limit_train_batches": limit_train_batches,
-        "limit_val_batches": limit_val_batches,
-        "limit_test_batches": limit_test_batches,
-        "overfit_batches": overfit_batches,
-        "num_sanity_val_steps": num_sanity_val_steps,
-        "enable_checkpointing": enable_checkpointing,
-        "profiler": profiler,
-        "default_root_dir": default_root_dir,
-    }
+def load_lightning_checkpoint(
+    ckpt_path: Union[str, Path],
+    *,
+    map_location: Any = None,
+) -> Dict[str, Any]:
+    """
+    Load a Lightning checkpoint (dict) safely with map_location.
+    Returns the full checkpoint mapping.
+    """
+    map_location = map_location or _cpu_map_location()
+    return _load_torch_file(Path(ckpt_path), map_location=map_location)
 
-    # Drop Nones so Trainer doesn’t complain
-    kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    return kwargs
+
+def resume_trainer_if_available(
+    trainer: "pl.Trainer",  # type: ignore[name-defined]
+    ckpt_dir: Union[str, Path],
+    *,
+    prefer: str = "best",  # 'best' | 'last'
+    monitor: Optional[str] = None,
+    mode: str = "min",
+) -> Optional[Path]:
+    """
+    If a checkpoint exists, set `trainer.ckpt_path` (PL >= 2) and return the chosen path.
+
+    Args:
+      prefer: 'best' or 'last'
+      monitor/mode: used for 'best' selection
+
+    Returns:
+      The checkpoint path chosen, or None if none found.
+    """
+    if pl is None:
+        return None
+    ckpt_path: Optional[Path] = None
+    if prefer == "best":
+        ckpt_path = find_best_checkpoint(ckpt_dir, monitor=monitor, mode=mode)
+    if ckpt_path is None:
+        ckpt_path = find_last_checkpoint(ckpt_dir)
+
+    if ckpt_path is None:
+        return None
+
+    # Lightning 2.x accepts `ckpt_path` in Trainer.fit(...); here we store on trainer for later.
+    try:
+        setattr(trainer, "ckpt_path", str(ckpt_path))
+    except Exception:
+        pass
+    return ckpt_path
+
+
+# =============================================================================
+# Public: averaging checkpoints
+# =============================================================================
+def average_checkpoints(
+    ckpt_paths: Sequence[Union[str, Path]],
+    *,
+    out_path: Optional[Union[str, Path]] = None,
+    map_location: Any = None,
+    ema_beta: Optional[float] = None,
+    cast_dtype: Optional[str] = None,        # e.g., "float32", "float16", "bfloat16"
+    device: Optional[str] = None,            # e.g., "cpu", "cuda"
+) -> Dict[str, Any]:
+    """
+    Average multiple checkpoints' `state_dict` into a single weights dict.
+
+    Modes:
+      • Mean (default): simple arithmetic mean across all provided ckpts.
+      • EMA: if `ema_beta` in (0,1) is given, computes exponential moving average across
+             checkpoints sorted by epoch (ascending). Useful for stabilizing inference.
+
+    Args:
+      ckpt_paths: list of .ckpt files
+      out_path: optional file to write the resulting raw `state_dict` via `torch.save`
+      map_location: map location (default CPU)
+      ema_beta: optional EMA factor in (0, 1). If None => mean.
+      cast_dtype: optionally cast resulting tensors to dtype (name string)
+      device: optionally move resulting state to device name
+
+    Returns:
+      The averaged `state_dict` (a dict of tensor weights).
+    """
+    _require_torch()
+    map_location = map_location or _cpu_map_location()
+    paths: List[Path] = [Path(p) for p in ckpt_paths if p]
+    if not paths:
+        raise ValueError("No checkpoints provided for averaging.")
+
+    # Load all state dicts
+    pieces: List[Tuple[Path, Dict[str, Any], Optional[int]]] = []
+    for p in paths:
+        ckpt = _load_torch_file(p, map_location=map_location)
+        state = _state_dict_from_checkpoint(ckpt)
+        if state is None:
+            if isinstance(ckpt, Mapping):
+                state = ckpt  # type: ignore
+            else:
+                raise RuntimeError(f"Unrecognized checkpoint structure: {p}")
+        # Epoch provenance (if present)
+        epoch = _try_parse_epoch_from_name(p)
+        for key in _EPOCH_FROM_STATE_RE_KEYS:
+            if epoch is None and isinstance(ckpt, Mapping) and key in ckpt:
+                try:
+                    epoch = int(ckpt[key])  # type: ignore[arg-type]
+                except Exception:
+                    pass
+        pieces.append((p, dict(state), epoch))
+
+    # Sort for EMA if needed
+    if ema_beta is not None:
+        if not (0.0 < ema_beta < 1.0):
+            raise ValueError("ema_beta must be in (0, 1).")
+        pieces.sort(key=lambda t: (t[2] if t[2] is not None else -1))
+
+        avg: Dict[str, Any] = {}
+        for _, sd, _ in pieces:
+            if not avg:
+                avg = {k: v.clone() if hasattr(v, "clone") else v for k, v in sd.items()}
+                continue
+            for k, v in sd.items():
+                if k not in avg:
+                    avg[k] = v.clone() if hasattr(v, "clone") else v
+                else:
+                    # avg = beta * avg + (1 - beta) * v
+                    if hasattr(avg[k], "mul_") and hasattr(v, "mul"):
+                        avg[k].mul_(ema_beta).add_(v, alpha=(1.0 - ema_beta))
+                    else:  # fallback (not in-place)
+                        avg[k] = ema_beta * avg[k] + (1.0 - ema_beta) * v  # type: ignore[operator]
+        out_state = avg
+    else:
+        # Arithmetic mean
+        sum_state: Dict[str, Any] = {}
+        counts: Dict[str, int] = {}
+        for _, sd, _ in pieces:
+            for k, v in sd.items():
+                if k not in sum_state:
+                    sum_state[k] = v.clone() if hasattr(v, "clone") else v
+                    counts[k] = 1
+                else:
+                    if hasattr(sum_state[k], "add_"):
+                        sum_state[k].add_(v)
+                    else:
+                        sum_state[k] = sum_state[k] + v  # type: ignore[operator]
+                    counts[k] += 1
+        out_state: Dict[str, Any] = {}
+        for k, v in sum_state.items():
+            c = counts.get(k, 1)
+            if hasattr(v, "div_"):
+                out_state[k] = v.div(c)
+            else:
+                out_state[k] = v / c  # type: ignore[operator]
+
+    # Optional dtype/device cast
+    if cast_dtype is not None:
+        to_dtype = getattr(torch, cast_dtype, None)
+        if to_dtype is None:
+            raise ValueError(f"Unknown cast_dtype: {cast_dtype}")
+        for k, v in out_state.items():
+            if hasattr(v, "to"):
+                out_state[k] = v.to(dtype=to_dtype)
+    if device is not None:
+        for k, v in out_state.items():
+            if hasattr(v, "to"):
+                out_state[k] = v.to(device=device)
+
+    # Optional write
+    if out_path is not None:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(out_state, str(out_path))  # type: ignore[arg-type]
+
+    return out_state
