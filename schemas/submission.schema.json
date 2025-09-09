@@ -2,77 +2,135 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://spectramind-v50.org/schemas/submission.schema.json",
   "title": "Ariel Submission (SpectraMind V50)",
-  "description": "Single-record JSON representation of a Kaggle submission row for the Ariel Data Challenge. Exactly one of `sample_id` (preferred) or legacy `id` must be present. Includes 283 mean values and 283 non-negative uncertainty values.",
+  "description": "Single-record JSON representation of a Kaggle submission row for the Ariel Data Challenge. Exactly one of `sample_id` (preferred) or legacy `id` must be present. Two equivalent shapes are valid: (1) compact arrays (mu/sigma) or (2) flattened fields mu_000..mu_282 and sigma_000..sigma_282.",
 
   "type": "object",
   "additionalProperties": false,
 
-  "properties": {
-    "sample_id": {
-      "type": "string",
-      "description": "Preferred ID field for a submission row. Must use alphanumerics, underscore, or hyphen.",
-      "pattern": "^[A-Za-z0-9_\\-]+$",
-      "examples": ["00012345", "row_000001", "planet-42"]
-    },
-
-    "id": {
-      "type": "string",
-      "description": "Legacy ID field for backward compatibility with earlier CSVs. Prefer `sample_id`.",
-      "pattern": "^[A-Za-z0-9_\\-]+$",
-      "examples": ["00012345", "row_000001", "planet-42"]
-    },
-
-    "mu": {
-      "type": "array",
-      "description": "Mean transmission spectrum across exactly 283 wavelength bins (mu_000 … mu_282).",
-      "items": {
-        "type": "number",
-        "description": "Mean transit depth for a single wavelength bin."
+  "$defs": {
+    "idFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sample_id": {
+          "type": "string",
+          "description": "Preferred ID field for a submission row. Must use alphanumerics, underscore, or hyphen.",
+          "pattern": "^[A-Za-z0-9_\\-]+$",
+          "examples": ["00012345", "row_000001", "planet-42"]
+        },
+        "id": {
+          "type": "string",
+          "description": "Legacy ID field for backward compatibility with earlier CSVs. Prefer `sample_id`.",
+          "pattern": "^[A-Za-z0-9_\\-]+$",
+          "examples": ["00012345", "row_000001", "planet-42"]
+        }
       },
-      "minItems": 283,
-      "maxItems": 283,
-      "examples": [[0.0012, 0.0013, 0.0011]]
+      "oneOf": [
+        { "required": ["sample_id"] },
+        { "required": ["id"] }
+      ]
     },
 
-    "sigma": {
-      "type": "array",
-      "description": "Uncertainty (standard deviation) per wavelength bin (sigma_000 … sigma_282). Must be non-negative.",
-      "items": {
-        "type": "number",
-        "minimum": 0,
-        "description": "Non-negative standard deviation for a single wavelength bin."
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config_hash": {
+          "type": "string",
+          "description": "Optional SHA256 hash of the Hydra/DVC config snapshot that produced this row.",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional UTC timestamp of when this record was generated."
+        }
+      }
+    },
+
+    "compactForm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sample_id": { "$ref": "#/$defs/idFields/properties/sample_id" },
+        "id": { "$ref": "#/$defs/idFields/properties/id" },
+        "mu": {
+          "type": "array",
+          "description": "Mean transmission spectrum across exactly 283 wavelength bins (mu_000 … mu_282).",
+          "items": {
+            "type": "number",
+            "description": "Mean transit depth for a single wavelength bin."
+          },
+          "minItems": 283,
+          "maxItems": 283
+        },
+        "sigma": {
+          "type": "array",
+          "description": "Uncertainty (standard deviation) per wavelength bin (sigma_000 … sigma_282). Must be non-negative.",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Non-negative standard deviation for a single wavelength bin."
+          },
+          "minItems": 283,
+          "maxItems": 283
+        },
+        "config_hash": { "$ref": "#/$defs/provenance/properties/config_hash" },
+        "created_at": { "$ref": "#/$defs/provenance/properties/created_at" }
       },
-      "minItems": 283,
-      "maxItems": 283,
-      "examples": [[0.0001, 0.0001, 0.0002]]
+      "required": ["mu", "sigma"],
+      "allOf": [
+        { "$ref": "#/$defs/idFields" }
+      ]
     },
 
-    "config_hash": {
-      "type": "string",
-      "description": "Optional SHA256 hash of the Hydra/DVC config snapshot that produced this row.",
-      "pattern": "^[A-Fa-f0-9]{64}$"
-    },
-
-    "created_at": {
-      "type": "string",
-      "format": "date-time",
-      "description": "Optional UTC timestamp of when this record was generated."
+    "flattenedForm": {
+      "type": "object",
+      "description": "Flattened object mirroring CSV columns: id + mu_000..mu_282 + sigma_000..sigma_282.",
+      "properties": {
+        "sample_id": { "$ref": "#/$defs/idFields/properties/sample_id" },
+        "id": { "$ref": "#/$defs/idFields/properties/id" },
+        "config_hash": { "$ref": "#/$defs/provenance/properties/config_hash" },
+        "created_at": { "$ref": "#/$defs/provenance/properties/created_at" }
+      },
+      "patternProperties": {
+        "^mu_\\d{3}$": {
+          "type": "number",
+          "description": "Mean transit depth for a single wavelength bin (e.g., mu_000)."
+        },
+        "^sigma_\\d{3}$": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Non-negative standard deviation for a single wavelength bin (e.g., sigma_000)."
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/idFields" }
+      ]
     }
   },
 
-  "required": ["mu", "sigma"],
   "oneOf": [
-    { "required": ["sample_id"] },
-    { "required": ["id"] }
+    { "$ref": "#/$defs/compactForm" },
+    { "$ref": "#/$defs/flattenedForm" }
   ],
 
   "examples": [
     {
       "sample_id": "row_000001",
-      "mu": [0.0012, 0.0013, 0.0011, 0.0010, 0.0012, 0.0013, 0.0011, 0.0012, 0.0012, 0.0013, "... x283"],
-      "sigma": [0.0001, 0.0001, 0.0002, 0.0002, 0.0001, 0.0001, 0.0002, 0.0002, 0.0001, 0.0001, "... x283"],
+      "mu": [0.0012, 0.0013, 0.0011, 0.0010, 0.0012],
+      "sigma": [0.0001, 0.0001, 0.0002, 0.0002, 0.0001],
       "config_hash": "5f2d6f4e5b8c4a91d23e9c1f3aa4d80f29e613a768e345a91c1de7bb14a02a8b",
       "created_at": "2025-09-07T23:55:00Z"
+    },
+    {
+      "id": "planet-42",
+      "mu_000": 0.0012,
+      "mu_001": 0.0013,
+      "sigma_000": 0.0001,
+      "sigma_001": 0.0001,
+      "created_at": "2025-09-08T00:05:00Z"
     }
   ]
 }
