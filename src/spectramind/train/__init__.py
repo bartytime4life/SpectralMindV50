@@ -14,18 +14,36 @@
 #   • Compatible with NASA-grade reproducibility standards (MCP).
 # =============================================================================
 
-from .trainer import train_from_config
+from .train import train_from_config
+
 from .registry import (
+    # getters
     get_model_builder,
     get_loss_builder,
     get_optimizer_builder,
     get_scheduler_builder,
+    # decorators (optional but useful for modular registration)
+    register_model,
+    register_loss,
+    register_optimizer,
+    register_scheduler,
+    # debug/introspection
+    debug_dump_registries,
 )
 
-__all__: list[str] = [
+__all__ = [
+    # entrypoint
     "train_from_config",
+    # registry getters
     "get_model_builder",
     "get_loss_builder",
     "get_optimizer_builder",
     "get_scheduler_builder",
+    # registry decorators (for user-side registration)
+    "register_model",
+    "register_loss",
+    "register_optimizer",
+    "register_scheduler",
+    # optional debug/introspection
+    "debug_dump_registries",
 ]
