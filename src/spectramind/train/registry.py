@@ -3,24 +3,25 @@
 # SpectraMind V50 — Lightweight Registry for Builders
 # -----------------------------------------------------------------------------
 # Exposes decorators & getters for:
-#   • Models:     (cfg, *, criterion) -> LightningModule
-#   • Losses:     (cfg)               -> callable / nn.Module / loss_fn
-#   • Optimizers: (cfg, *, params)    -> torch.optim.Optimizer
-#   • Schedulers: (cfg, optimizer, **kw) -> torch.optim.lr_scheduler or Lightning dict
+#   • Models:     (cfg, *, criterion=None) -> LightningModule
+#   • Losses:     (cfg)                    -> callable / nn.Module / loss_fn
+#   • Optimizers: (cfg, *, params)         -> torch.optim.Optimizer
+#   • Schedulers: (cfg, optimizer, **kw)   -> torch.optim.lr_scheduler | Lightning dict
 #
 # Notes:
 # - Used by train/train.py: get_model_builder, get_loss_builder,
 #   get_optimizer_builder, get_scheduler_builder.
 # - Includes default optimizer/scheduler builders backed by train.optim.
-# - Model & Loss registries start empty; register yours via decorators or call `.register()`.
+# - Model & Loss registries start empty; register yours via decorators or `.add()`.
+# - Thread-safe, alias-friendly, Hydra-friendly (builders accept dict-like cfg).
 # =============================================================================
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
-
 import difflib
+from dataclasses import dataclass
+from threading import RLock
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 # -----------------------------------------------------------------------------
@@ -32,55 +33,123 @@ class _Entry:
     name: str
     fn: Callable[..., Any]
     help: Optional[str] = None
+    aliases: Tuple[str, ...] = ()
 
 
 class Registry:
+    """
+    Small, thread-safe registry with:
+      • decorator-based and programmatic registration
+      • alias support (multiple names -> same builder)
+      • 'did you mean' suggestions
+      • simple introspection helpers
+    """
+
     def __init__(self, kind: str) -> None:
         self._kind = kind
         self._store: Dict[str, _Entry] = {}
+        self._lock = RLock()
 
     # Decorator-based registration
-    def register(self, name: Optional[str] = None, *, help: Optional[str] = None):
+    def register(
+        self,
+        name: Optional[str] = None,
+        *,
+        help: Optional[str] = None,
+        aliases: Optional[Sequence[str]] = None,
+    ):
         """
         Usage:
-            @REGISTRY.register("my_key")
+            @REGISTRY.register("my_key", help="...", aliases=["my_alias"])
             def builder(...): ...
         """
         def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             key = (name or fn.__name__).lower()
-            if key in self._store:
-                raise KeyError(f"{self._kind} '{key}' already registered.")
-            self._store[key] = _Entry(name=key, fn=fn, help=help)
+            with self._lock:
+                self._ensure_unique(key)
+                ent = _Entry(name=key, fn=fn, help=help, aliases=tuple(a.lower() for a in (aliases or ())))
+                self._store[key] = ent
+                for al in ent.aliases:
+                    self._ensure_unique(al)
+                    self._store[al] = ent
             return fn
         return _decorator
 
     # Programmatic registration
-    def add(self, name: str, fn: Callable[..., Any], *, help: Optional[str] = None) -> None:
+    def add(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        help: Optional[str] = None,
+        aliases: Optional[Sequence[str]] = None,
+    ) -> None:
         key = name.lower()
+        with self._lock:
+            self._ensure_unique(key)
+            ent = _Entry(name=key, fn=fn, help=help, aliases=tuple(a.lower() for a in (aliases or ())))
+            self._store[key] = ent
+            for al in ent.aliases:
+                self._ensure_unique(al)
+                self._store[al] = ent
+
+    def _ensure_unique(self, key: str) -> None:
         if key in self._store:
             raise KeyError(f"{self._kind} '{key}' already registered.")
-        self._store[key] = _Entry(name=key, fn=fn, help=help)
 
     def get(self, name: str) -> Callable[..., Any]:
         key = (name or "").lower()
-        if key not in self._store:
-            self._raise_not_found(key)
-        return self._store[key].fn
+        with self._lock:
+            if key not in self._store:
+                self._raise_not_found(key)
+            return self._store[key].fn
 
     def has(self, name: str) -> bool:
         return name.lower() in self._store
+
+    def remove(self, name: str) -> None:
+        """Remove a key (and keep alias entries pointing to the same fn intact)."""
+        key = name.lower()
+        with self._lock:
+            if key not in self._store:
+                self._raise_not_found(key)
+            del self._store[key]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
 
     def names(self) -> Iterable[str]:
         return list(self._store.keys())
 
     def help_map(self) -> Dict[str, Optional[str]]:
-        return {k: v.help for k, v in self._store.items()}
+        # Only emit canonical entries once (avoid listing aliases twice)
+        seen: set[str] = set()
+        out: Dict[str, Optional[str]] = {}
+        for k, ent in self._store.items():
+            if ent.fn in seen:
+                continue
+            out[ent.name] = ent.help
+            seen.add(ent.fn)  # type: ignore[arg-type]
+        return out
+
+    def describe(self, name: str) -> str:
+        """
+        Return a human-readable description for a builder name (includes aliases).
+        """
+        key = name.lower()
+        if key not in self._store:
+            self._raise_not_found(key)
+        ent = self._store[key]
+        alias_str = f" (aliases: {', '.join(ent.aliases)})" if ent.aliases else ""
+        help_str = f": {ent.help}" if ent.help else ""
+        return f"{self._kind} '{ent.name}'{alias_str}{help_str}"
 
     def _raise_not_found(self, key: str) -> None:
-        choices = list(self._store.keys())
+        choices = sorted(set(self._store.keys()))
         msg = [f"Unknown {self._kind} '{key}'."]
         if choices:
-            msg.append(f"Available {self._kind}s: {', '.join(sorted(choices))}")
+            msg.append(f"Available {self._kind}s: {', '.join(choices)}")
             similar = difflib.get_close_matches(key, choices, n=3, cutoff=0.5)
             if similar:
                 msg.append(f"Did you mean: {', '.join(similar)}?")
@@ -101,36 +170,36 @@ _SCHEDULER_BUILDERS = Registry(kind="scheduler builder")
 # Public decorators (for user code to register builders)
 # -----------------------------------------------------------------------------
 
-def register_model(name: Optional[str] = None, *, help: Optional[str] = None):
+def register_model(name: Optional[str] = None, *, help: Optional[str] = None, aliases: Optional[Sequence[str]] = None):
     """
     Register a model builder:
         signature: builder(cfg, *, criterion=None) -> LightningModule
     """
-    return _MODEL_BUILDERS.register(name, help=help)
+    return _MODEL_BUILDERS.register(name, help=help, aliases=aliases)
 
 
-def register_loss(name: Optional[str] = None, *, help: Optional[str] = None):
+def register_loss(name: Optional[str] = None, *, help: Optional[str] = None, aliases: Optional[Sequence[str]] = None):
     """
     Register a loss builder:
         signature: builder(cfg) -> criterion (callable/nn.Module)
     """
-    return _LOSS_BUILDERS.register(name, help=help)
+    return _LOSS_BUILDERS.register(name, help=help, aliases=aliases)
 
 
-def register_optimizer(name: Optional[str] = None, *, help: Optional[str] = None):
+def register_optimizer(name: Optional[str] = None, *, help: Optional[str] = None, aliases: Optional[Sequence[str]] = None):
     """
     Register an optimizer builder:
         signature: builder(cfg, *, params) -> torch.optim.Optimizer
     """
-    return _OPTIMIZER_BUILDERS.register(name, help=help)
+    return _OPTIMIZER_BUILDERS.register(name, help=help, aliases=aliases)
 
 
-def register_scheduler(name: Optional[str] = None, *, help: Optional[str] = None):
+def register_scheduler(name: Optional[str] = None, *, help: Optional[str] = None, aliases: Optional[Sequence[str]] = None):
     """
     Register a scheduler builder:
         signature: builder(cfg, optimizer, **kw) -> scheduler or Lightning dict
     """
-    return _SCHEDULER_BUILDERS.register(name, help=help)
+    return _SCHEDULER_BUILDERS.register(name, help=help, aliases=aliases)
 
 
 # -----------------------------------------------------------------------------
@@ -175,28 +244,44 @@ def _auto_register_default_optimizers_and_schedulers() -> None:
         # If optim module is unavailable for some reason, skip auto defaults
         return
 
-    @_OPTIMIZER_BUILDERS.register("adamw", help="AdamW with decoupled weight decay groups")
+    # Optimizers
+    @_OPTIMIZER_BUILDERS.register("adamw", help="AdamW with decoupled weight decay groups", aliases=("adamw_torch",))
     def _adamw_builder(cfg: Any, *, params) -> Any:
-        """
-        cfg can be:
-          • Dict-like with keys accepted by OptimizerConfig
-          • An OptimizerConfig instance
-        """
         ocfg = cfg if isinstance(cfg, OptimizerConfig) else OptimizerConfig(**dict(cfg))
         return build_optimizer(ocfg, params_or_module=params if not hasattr(params, "parameters") else params)
 
-    @_OPTIMIZER_BUILDERS.register("adam", help="Adam (decoupled decay groups)")
+    @_OPTIMIZER_BUILDERS.register("adam", help="Adam (decoupled decay groups)", aliases=("adam_torch",))
     def _adam_builder(cfg: Any, *, params) -> Any:
         ocfg = cfg if isinstance(cfg, OptimizerConfig) else OptimizerConfig(**dict(cfg))
         ocfg.name = "adam"
         return build_optimizer(ocfg, params_or_module=params if not hasattr(params, "parameters") else params)
 
-    @_OPTIMIZER_BUILDERS.register("sgd", help="SGD with momentum/Nesterov")
+    @_OPTIMIZER_BUILDERS.register("sgd", help="SGD with momentum/Nesterov", aliases=("sgd_torch",))
     def _sgd_builder(cfg: Any, *, params) -> Any:
         ocfg = cfg if isinstance(cfg, OptimizerConfig) else OptimizerConfig(**dict(cfg))
         ocfg.name = "sgd"
         return build_optimizer(ocfg, params_or_module=params if not hasattr(params, "parameters") else params)
 
+    # Optional extras present in optim.py; if user selects them and deps exist, they're used.
+    @_OPTIMIZER_BUILDERS.register("adamw8bit", help="AdamW 8-bit (bitsandbytes)")
+    def _adamw8_builder(cfg: Any, *, params) -> Any:
+        ocfg = cfg if isinstance(cfg, OptimizerConfig) else OptimizerConfig(**dict(cfg))
+        ocfg.name = "adamw8bit"
+        return build_optimizer(ocfg, params_or_module=params if not hasattr(params, "parameters") else params)
+
+    @_OPTIMIZER_BUILDERS.register("lion", help="Lion optimizer (lion-pytorch/flash-attn)")
+    def _lion_builder(cfg: Any, *, params) -> Any:
+        ocfg = cfg if isinstance(cfg, OptimizerConfig) else OptimizerConfig(**dict(cfg))
+        ocfg.name = "lion"
+        return build_optimizer(ocfg, params_or_module=params if not hasattr(params, "parameters") else params)
+
+    @_OPTIMIZER_BUILDERS.register("adafactor", help="Adafactor (transformers)")
+    def _adafactor_builder(cfg: Any, *, params) -> Any:
+        ocfg = cfg if isinstance(cfg, OptimizerConfig) else OptimizerConfig(**dict(cfg))
+        ocfg.name = "adafactor"
+        return build_optimizer(ocfg, params_or_module=params if not hasattr(params, "parameters") else params)
+
+    # Schedulers
     @_SCHEDULER_BUILDERS.register("cosine", help="CosineAnnealingLR")
     def _cosine_sched_builder(cfg: Any, optimizer, **kw) -> Any:
         scfg = cfg if isinstance(cfg, SchedulerConfig) else SchedulerConfig(**dict(cfg))
