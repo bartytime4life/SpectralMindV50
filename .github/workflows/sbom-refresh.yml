@@ -68,7 +68,7 @@ jobs:
 
       # ---------- Repo SBOMs (CycloneDX + SPDX) ----------
       - name: Install Syft (SBOM generator)
-        uses: anchore/sbom-action/download-syft@v0.17.0
+        uses: anchore/sbom-action/download-syft@v0.20.5
 
       - name: Generate repo SBOM (CycloneDX JSON via Syft)
         run: |
@@ -112,7 +112,7 @@ jobs:
           path: sboms
 
       - name: Install Grype (vulnerability scanner)
-        uses: anchore/scan-action/download-grype@v3
+        uses: anchore/scan-action/download-grype@v6
 
       - name: Scan SBOMs with Grype (produce SARIF per SBOM)
         shell: bash

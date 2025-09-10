@@ -79,7 +79,7 @@ jobs:
 
       # ---------- Repo SBOMs (CycloneDX + SPDX) via Syft ----------
       - name: Install Syft (SBOM generator)
-        uses: anchore/sbom-action/download-syft@v0.17.0
+        uses: anchore/sbom-action/download-syft@v0.20.5
 
       - name: Repo SBOM (CycloneDX JSON)
         run: |

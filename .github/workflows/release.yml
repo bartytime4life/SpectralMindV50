@@ -246,7 +246,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Repo SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@v0.16.0
+        uses: anchore/sbom-action@v0.20.5
         with:
           path: .
           output-file: sbom-repo.json
