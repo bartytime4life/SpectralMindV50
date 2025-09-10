@@ -38,7 +38,7 @@ jobs:
       is_rc: ${{ steps.prerelease.outputs.prerelease }}
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -84,12 +84,12 @@ jobs:
       image_digest: ${{ steps.buildx.outputs.digest }}
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -229,7 +229,7 @@ jobs:
           cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:latest"
 
       - name: Attest build provenance (GitHub attestation)
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.buildx.outputs.digest }}
@@ -243,7 +243,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Repo SBOM (CycloneDX JSON)
         uses: anchore/sbom-action@v0.20.5
@@ -253,7 +253,7 @@ jobs:
           format: cyclonedx-json
 
       - name: Python deps SBOM (CycloneDX)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -284,10 +284,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: release-assets
 
@@ -327,12 +327,12 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -362,7 +362,7 @@ jobs:
       contents: read
     steps:
       - name: Download python dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: python-dist
           path: dist
@@ -388,7 +388,7 @@ jobs:
       contents: read
     steps:
       - name: Download python dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: python-dist
           path: dist

@@ -62,7 +62,7 @@ jobs:
 
       - name: Gate checks
         id: gates
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -231,7 +231,7 @@ jobs:
       (needs.preflight-verify.result != 'success' || needs.preflight-verify.outputs.eligible != 'true')
     steps:
       - name: Explain why auto-merge not enabled
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

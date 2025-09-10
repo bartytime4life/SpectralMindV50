@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Remove artifacts older than 14 days (keep 5 most recent)
         uses: c-hive/gha-remove-artifacts@v1
