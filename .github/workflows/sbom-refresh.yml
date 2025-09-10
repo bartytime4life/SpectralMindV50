@@ -125,7 +125,6 @@ jobs:
             base=$(basename "$sb")
             out="sarif/${base%.json}.sarif"
             echo "Scanning $sb → $out"
-            # Grype accepts SBOM inputs directly; keep going even if scan fails
             grype "sbom:$sb" -o sarif > "$out" || true
             count=$((count+1))
           done
