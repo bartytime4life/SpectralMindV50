@@ -2,19 +2,19 @@ name: docs
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
-      - 'docs/**'
-      - 'assets/diagrams/**'
-      - 'mkdocs.yml'
-      - '.github/workflows/docs.yml'
+      - "docs/**"
+      - "assets/diagrams/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
   pull_request:
-    branches: [main]
+    branches: [ main ]
     paths:
-      - 'docs/**'
-      - 'assets/diagrams/**'
-      - 'mkdocs.yml'
-      - '.github/workflows/docs.yml'
+      - "docs/**"
+      - "assets/diagrams/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
         with: { fetch-depth: 0 }
       - name: typos
         uses: crate-ci/typos@v1
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
       - name: markdownlint-cli2
         uses: DavidAnson/markdownlint-cli2-action@v18
         with:
@@ -63,10 +63,10 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
       - name: Cache lychee URL cache
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: .lycheecache
           key: lychee-${{ runner.os }}-${{ hashFiles('docs/**/*.md', 'mkdocs.yml', '.lychee.toml') }}
@@ -94,7 +94,7 @@ jobs:
 
       - name: Upload lychee report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: lychee-report
           path: |
@@ -117,20 +117,23 @@ jobs:
     name: Build MkDocs site
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [spellcheck, markdownlint, linkcheck]
+    needs: [ spellcheck, markdownlint, linkcheck ]
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_PYTHON_VERSION_WARNING: "1"
     steps:
       - name: Checkout source
-        uses: actions/checkout@v5
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
         with: { fetch-depth: 0 }
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: pip
           cache-dependency-path: |
             docs/requirements.txt
             requirements-docs.txt
@@ -155,10 +158,10 @@ jobs:
 
       - name: Set up Node (for Mermaid CLI pre-render of assets)
         if: ${{ hashFiles('assets/diagrams/**/*.mmd') != '' }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v5
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
 
       - name: Install Mermaid CLI (mmdc)
         if: ${{ hashFiles('assets/diagrams/**/*.mmd') != '' }}
@@ -194,7 +197,7 @@ jobs:
 
       - name: Upload site as PR artifact (preview)
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: site-preview
           path: site
