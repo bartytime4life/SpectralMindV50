@@ -36,7 +36,8 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
   PYTHONHASHSEED: "0"
-  MPLBACKEND: "Agg"          # avoid GUI backends breaking headless tests
+  MPLBACKEND: "Agg"          # headless-safe matplotlib
+  PYTHONWARNINGS: "error::DeprecationWarning,ignore:::pkg_resources"  # fail on our deprecations
 
 jobs:
   lint-test-typecheck:
@@ -72,6 +73,8 @@ jobs:
             .pytest_cache
             .ruff_cache
           key: ${{ runner.os }}-${{ matrix.python-version }}-lintcache-${{ hashFiles('**/*.py', 'pyproject.toml', 'setup.cfg', 'mypy.ini', '.ruff.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.python-version }}-lintcache-
 
       - name: Install dependencies
         run: |
@@ -79,7 +82,7 @@ jobs:
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           # Tooling (pin majors; allow patch updates)
-          pip install "ruff>=0.4,<1.0" "flake8>=7,<8" "mypy>=1.7,<2" \
+          pip install "ruff>=0.5,<1.0" "flake8>=7,<8" "mypy>=1.10,<2" \
                       "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
 
       - name: Pre-commit (optional)
@@ -108,6 +111,7 @@ jobs:
           mkdir -p reports
           pytest -n auto --disable-warnings --maxfail=1 \
             --cov=src --cov-report=xml:reports/coverage.xml \
+            --durations=25 \
             --junitxml=reports/tests-junit.xml
 
       - name: Upload artifacts
