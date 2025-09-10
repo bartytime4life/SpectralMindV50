@@ -11,38 +11,39 @@
 # Notes:
 #   • Pin to NumPy 1.26.x for broad binary wheel availability on Kaggle.
 #   • numba pinned to 0.59.x (0.60+ requires NumPy 2.x).
+#   • Explicit llvmlite pin to avoid resolver drift / slow builds on Kaggle.
 #   • Keep package count small to speed up cold-start installs.
 #   • Prefer versions with manylinux wheels to avoid builds in offline kernels.
 # ==============================================================================
 
 # --- CLI & Config ---
-typer[all]==0.12.5              # stable CLI; typer extras pull click/rich
+typer[all]==0.12.5
 hydra-core==1.3.2
 omegaconf==2.3.0
 pydantic==2.7.4
 pyyaml==6.0.2
 jsonschema==4.23.0
 packaging==24.1
-typing-extensions==4.12.2       # pydantic/runtime hints stability on Py3.10/3.11
+typing-extensions==4.12.2
 
 # --- Core Scientific Stack ---
-numpy==1.26.4                   # hard pin for wheel availability + numba compat
-scipy==1.11.4                   # compatible with NumPy 1.26.x
+numpy==1.26.4
+scipy==1.11.4
 pandas==2.2.2
-polars==1.5.0                   # fast CPU wheels; OK with Py3.10/3.11
+polars==1.5.0
 
 # --- Parquet / Arrow I/O ---
-pyarrow==16.1.0                 # aligns with pandas 2.2.x parquet engine
+pyarrow==16.1.0
 
 # --- Progress / Logging ---
 tqdm==4.66.4
-rich==13.7.1                    # ⚠️ dvc<4 pins rich<14; keep 13.x for compat
-loguru==0.7.3                   # lightweight structured logging
+rich==13.7.1            # dvc<4 requires rich<14
+loguru==0.7.3
 
 # --- Visualization & Diagnostics ---
 matplotlib==3.8.4
 seaborn==0.13.2
-umap-learn==0.5.6               # stable manylinux wheels; pairs with numba 0.59
+umap-learn==0.5.6
 networkx==3.2.1
 
 # --- Model Utils (non-Torch) ---
@@ -52,7 +53,8 @@ statsmodels==0.14.2
 
 # --- Symbolic / Physics-informed ---
 sympy==1.13.1
-numba==0.59.1                   # keep with NumPy 1.26.x; avoids 2.x upgrade chain
+numba==0.59.1
+llvmlite==0.42.0        # explicit pin for numba 0.59.x; prevents slow/failed solves
 
 # --- DVC (core only; no remote extras) ---
 # Use plain 'dvc' for local pipeline execution/caching in kernels.
