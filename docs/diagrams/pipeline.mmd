@@ -3,17 +3,17 @@ flowchart LR
   %% =============================
   %% USER / CLI ENTRY
   %% =============================
-  A["👤 User / CI<br/>(spectramind CLI)"] --> B["⚙️ Hydra Configs<br/>(env, data, calib, model, loss, training)"]
+  A["👤 User / CI<br/>spectramind CLI"] --> B["⚙️ Hydra Configs<br/>env, data, calib, model, loss, training"]
 
   %% =============================
   %% PIPELINE STAGES
   %% =============================
-  B --> C["🔧 Calibrate<br/>(raw → calibrated)"]
-  C --> D["🧹 Preprocess<br/>(calibrated → tensors)"]
-  D --> E["🧑‍🏫 Train<br/>(tensors → checkpoints)"]
-  E --> F["🔮 Predict<br/>(checkpoints → μ, σ)"]
-  F --> G["🩺 Diagnose<br/>(inject-&-recover, HTML dashboard)"]
-  F --> H["📦 Submit<br/>(package, schema validate, zip/json)"]
+  B --> C["🔧 Calibrate<br/>raw → calibrated"]
+  C --> D["🧹 Preprocess<br/>calibrated → tensors"]
+  D --> E["🧑‍🏫 Train<br/>tensors → checkpoints"]
+  E --> F["🔮 Predict<br/>checkpoints → μ, σ"]
+  F --> G["🩺 Diagnose<br/>inject-&-recover, HTML dashboard"]
+  F --> H["📦 Submit<br/>package, schema validate, zip/json"]
 
   %% =============================
   %% ARTIFACTS & STORAGE
@@ -28,7 +28,7 @@ flowchart LR
   %% =============================
   %% REMOTE CACHE
   %% =============================
-  Z -.-> R["☁️ DVC Remote<br/>(local / S3 / SSH)"]
+  Z -.-> R["☁️ DVC Remote<br/>local / S3 / SSH"]
   Y -.-> R
   X -.-> R
   W -.-> R
@@ -37,10 +37,21 @@ flowchart LR
   %% FLEXIBLE / SKIP PATHS
   %% =============================
   %% Start from pre-calibrated data
-  B -.skip.-> D
+  B -. skip .-> D
   %% Reuse tensors without retraining
-  D -.skip.-> F
+  D -. skip .-> F
   %% Reuse old checkpoints directly for inference
-  X -.reuse.-> F
+  X -. reuse .-> F
   %% Predict-only Kaggle kernel path
-  B -.predict-only.-> F
+  B -. predict_only .-> F
+
+  %% =============================
+  %% STYLES
+  %% =============================
+  classDef stage fill:#bbf,stroke:#333,stroke-width:1px;
+  classDef artifact fill:#eef,stroke:#666,stroke-width:1px,stroke-dasharray: 3 3;
+  classDef remote fill:#ffd,stroke:#333,stroke-width:1px;
+
+  class B,C,D,E,F,G,H stage;
+  class Z,Y,X,W,V,U artifact;
+  class R remote;
