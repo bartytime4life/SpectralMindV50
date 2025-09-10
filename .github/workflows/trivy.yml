@@ -43,20 +43,12 @@ jobs:
             trivy-db-${{ runner.os }}-${{ github.ref_name }}-
             trivy-db-${{ runner.os }}-
 
-      - name: Load .trivyignore (if present)
+      - name: Load .trivyignore / policy (if present)
         id: ign
         shell: bash
         run: |
-          if [ -f .trivyignore ]; then
-            echo "ignore=.trivyignore" >> "$GITHUB_OUTPUT"
-          else
-            echo "ignore=" >> "$GITHUB_OUTPUT"
-          fi
-          if [ -d .github/trivy-policies ]; then
-            echo "policy=.github/trivy-policies" >> "$GITHUB_OUTPUT"
-          else
-            echo "policy=" >> "$GITHUB_OUTPUT"
-          fi
+          if [ -f .trivyignore ]; then echo "ignore=.trivyignore" >> "$GITHUB_OUTPUT"; else echo "ignore=" >> "$GITHUB_OUTPUT"; fi
+          if [ -d .github/trivy-policies ]; then echo "policy=.github/trivy-policies" >> "$GITHUB_OUTPUT"; else echo "policy=" >> "$GITHUB_OUTPUT"; fi
 
       - name: Trivy FS → SARIF
         id: trivy-fs
@@ -112,7 +104,6 @@ jobs:
         run: |
           summarize () {
             local f="$1"
-            # count severities across runs/results
             jq -r '
               [ .runs[].results[]? |
                 ( .level // .properties.severity // .rule.properties."security-severity" // "" ) ] |
@@ -145,11 +136,16 @@ jobs:
             trivy-config.sarif
           retention-days: 14
 
-      - name: Optional failure gate
+      - name: Optional failure gate (auto-high on main pushes)
         if: always()
         shell: bash
         run: |
+          # Escalate on main push unless user overrode TRIVY_FAIL_ON explicitly in env
           lvl="${TRIVY_FAIL_ON,,}"
+          if [[ "$lvl" == "none" && "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            lvl="high"
+            echo "Auto-escalating TRIVY_FAIL_ON to 'high' for push to main"
+          fi
           [[ -z "$lvl" || "$lvl" == "none" ]] && { echo "Gate disabled (TRIVY_FAIL_ON=$lvl)"; exit 0; }
           declare -A rank=( [low]=1 [medium]=2 [high]=3 [critical]=4 )
           thr=${rank[$lvl]:-0}
