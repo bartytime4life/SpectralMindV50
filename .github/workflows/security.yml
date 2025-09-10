@@ -2,11 +2,11 @@ name: security
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [ main, develop ]
   push:
-    branches: [main]
+    branches: [ main ]
   schedule:
-    - cron: '0 3 * * 1'  # weekly, Mon 03:00 UTC
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -19,12 +19,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: "3.11"
   ARTIFACT_RETENTION_DAYS: 14
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
   PYTHONUTF8: "1"
-  # Optional central gate: none | low | medium | high | critical
+  # Policy gate for the final job: none | low | medium | high | critical
   SECURITY_FAIL_ON: "none"
 
 jobs:
@@ -37,8 +37,8 @@ jobs:
       pull-requests: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
+      - uses: actions/dependency-review-action@0c155c73f2a90fa08a1f74343c099de8929d8fbe # v4
         with:
           fail-on-severity: high
           comment-summary-in-pr: true
@@ -53,12 +53,14 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
           cache-dependency-path: |
             **/requirements*.txt
             **/pyproject.toml
@@ -69,10 +71,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pip-audit>=2.7,<3" "bandit>=1.7,<2" "detect-secrets>=1.5,<2" jq
 
-      - name: Prepare security dir
+      - name: Prepare output dir
         run: mkdir -p security
 
-      - name: pip-audit → SARIF (best-effort per manifest)
+      - name: pip-audit → SARIF (per manifest, best-effort)
         shell: bash
         run: |
           set -euo pipefail
@@ -89,32 +91,32 @@ jobs:
           fi
           ls security/*.sarif >/dev/null 2>&1 || echo '{}' > security/pip-audit.empty.sarif
 
-      - name: Bandit (best-effort) → SARIF
+      - name: Bandit (src/) → SARIF
         run: |
           if [ -d src ]; then
             bandit -q -r src -f sarif -o security/bandit.sarif || true
           else
-            echo "No src/ directory found; skipping Bandit."
+            echo "No src/ directory; skipping Bandit."
           fi
 
       - name: detect-secrets (JSON)
         run: detect-secrets scan > security/detect-secrets.json || true
 
-      - name: gitleaks (optional best-effort)
+      - name: gitleaks (best-effort JSON)
         uses: gitleaks/gitleaks-action@v2
         with:
           args: detect --no-git -f json -r security/gitleaks.json || true
 
       - name: Upload SARIFs to Code Scanning (fork-safe)
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: security
           category: sast-and-deps
 
       - name: Upload security artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: sast-deps-reports
           path: security
@@ -129,30 +131,30 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
+      - uses: github/codeql-action/init@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           languages: python
           queries: +security-and-quality
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/autobuild@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
+      - uses: github/codeql-action/analyze@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
-          category: '/language:python'
+          category: "/language:python"
 
   sbom:
-    name: SBOM (Syft / CycloneDX)
+    name: SBOM (Syft → CycloneDX)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
       - name: Generate SBOM (CycloneDX) → security/sbom.cdx.json
         uses: anchore/syft-action@v0.20.5
         with:
           options: dir:. -o cyclonedx-json=security/sbom.cdx.json
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: sbom-cyclonedx
           path: security/sbom.cdx.json
@@ -166,9 +168,9 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Prepare security dir
+      - name: Prepare output dir
         run: mkdir -p security
 
       - name: Hadolint
@@ -177,7 +179,7 @@ jobs:
           dockerfile: Dockerfile
 
       - name: Cache Trivy DB
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-${{ github.ref_name }}
@@ -186,35 +188,33 @@ jobs:
             trivy-db-
 
       - name: Trivy FS → SARIF (non-failing)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@f95f286e1f986924f5d54f71c606a05743ee69ac # 0.28.0
         with:
-          scan-type: 'fs'
-          format: 'sarif'
-          output: 'security/trivy-fs.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          scan-type: fs
+          format: sarif
+          output: security/trivy-fs.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
           ignore-unfixed: true
-          vuln-type: 'os,library'
-          exit-code: '0'
+          vuln-type: os,library
 
       - name: Trivy Config → SARIF (non-failing)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@f95f286e1f986924f5d54f71c606a05743ee69ac # 0.28.0
         with:
-          scan-type: 'config'
-          format: 'sarif'
-          output: 'security/trivy-config.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
-          exit-code: '0'
+          scan-type: config
+          format: sarif
+          output: security/trivy-config.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
 
       - name: Upload Trivy SARIFs (fork-safe)
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: security
           category: trivy
 
       - name: Upload container scan artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: trivy-reports
           path: security
@@ -223,10 +223,10 @@ jobs:
   gate:
     name: Security Gate (optional policy)
     runs-on: ubuntu-latest
-    needs: [dependency-review, sast-deps, codeql, sbom, container-scan]
+    needs: [ dependency-review, sast-deps, codeql, sbom, container-scan ]
     steps:
       - name: Download all reports
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@65d8626605736c8d5f6ac075fa365286f27502cf # v5
         with:
           path: secreports
 
@@ -247,12 +247,14 @@ jobs:
             | awk -v thr="$thr" '
               function norm(x){ x=tolower(x);
                 if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2;
-                if(x=="low"||x=="warning")return 1; if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;} return 0 }
+                if(x=="low"||x=="warning")return 1;
+                if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;}
+                return 0 }
               { if (norm($0) >= thr) c++ } END { print c+0 }')
             total=$(( total + hits ))
           done
           if (( total > 0 )); then
-            echo "::error::Security gate: $total findings >= $lvl"
+            echo "::error::Security gate: $total finding(s) >= $lvl"
             exit 1
           fi
           echo "Security gate: no findings >= $lvl"
@@ -260,9 +262,13 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "### Security suite done" >> $GITHUB_STEP_SUMMARY
-          echo "- Dependency Review ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- pip-audit / Bandit / detect-secrets / gitleaks ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- CodeQL ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- SBOM (Syft/CycloneDX) ✅" >> $GITHUB_STEP_SUMMARY
-          echo "- Trivy (fs + config) ✅" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### Security suite summary"
+            echo "- Dependency Review ✅"
+            echo "- pip-audit / Bandit / detect-secrets / gitleaks ✅"
+            echo "- CodeQL ✅"
+            echo "- SBOM (Syft→CycloneDX) ✅"
+            echo "- Trivy (fs + config) ✅"
+            echo ""
+            echo "_Artifacts retained for ${ARTIFACT_RETENTION_DAYS} days_"
+          } >> "$GITHUB_STEP_SUMMARY"
