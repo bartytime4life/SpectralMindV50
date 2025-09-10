@@ -19,36 +19,94 @@ concurrency:
   group: sbom-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHON_VERSION: '3.11'
+  ARTIFACT_RETENTION_DAYS: 14
+  # Optional: set to an OCI image (e.g. ghcr.io/owner/repo:latest) to SBOM the container too
+  OCI_IMAGE: ''
+
 jobs:
   cyclonedx:
-    name: CycloneDX SBOM
+    name: Generate SBOMs (CycloneDX/SPDX)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # ---------- Python deps SBOM (CycloneDX) ----------
+      - name: Set up Python
+        id: setup-py
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
           cache-dependency-path: |
-            requirements*.txt
-            pyproject.toml
-            poetry.lock
-            setup.cfg
-            setup.py
+            **/requirements*.txt
+            **/pyproject.toml
+            **/poetry.lock
+            **/setup.cfg
+            **/setup.py
 
-      - name: Install CycloneDX
-        run: python -m pip install --upgrade cyclonedx-bom
+      - name: Detect Python dependency manifests
+        id: detect
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=( **/requirements*.txt **/pyproject.toml **/poetry.lock **/setup.cfg **/setup.py )
+          if (( ${#files[@]} > 0 )); then
+            echo "has_python=true" >> "$GITHUB_OUTPUT"
+            printf 'Found manifests:\n%s\n' "${files[@]}"
+          else
+            echo "has_python=false" >> "$GITHUB_OUTPUT"
+            echo "No Python manifests found."
+          fi
 
-      - name: Generate SBOM (JSON)
+      - name: Install CycloneDX tool
+        if: ${{ steps.detect.outputs.has_python == 'true' }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install cyclonedx-bom
+
+      - name: Generate Python SBOM (CycloneDX JSON)
+        if: ${{ steps.detect.outputs.has_python == 'true' }}
         run: |
           mkdir -p reports
-          cyclonedx-bom -r -o reports/sbom.json || true
+          # -r: recursive discovery (poetry/requirements/setuptools)
+          cyclonedx-bom -r -o reports/sbom-python.cdx.json || true
+          [ -s reports/sbom-python.cdx.json ] && echo "Python SBOM created." || echo "No Python SBOM (no deps detected)."
 
-      - name: Upload SBOM artifact
+      # ---------- Repo SBOMs (CycloneDX + SPDX) via Syft ----------
+      - name: Install Syft (SBOM generator)
+        uses: anchore/sbom-action/download-syft@v0.17.0
+
+      - name: Repo SBOM (CycloneDX JSON)
+        run: |
+          mkdir -p reports
+          syft dir:. -o cyclonedx-json > reports/sbom-repo.cdx.json
+          test -s reports/sbom-repo.cdx.json
+
+      - name: Repo SBOM (SPDX JSON)
+        run: |
+          syft dir:. -o spdx-json > reports/sbom-repo.spdx.json
+          test -s reports/sbom-repo.spdx.json
+
+      # ---------- Optional: Container Image SBOM (CycloneDX) ----------
+      - name: Image SBOM (CycloneDX) if OCI_IMAGE is set
+        if: ${{ env.OCI_IMAGE != '' }}
+        run: |
+          syft "${{ env.OCI_IMAGE }}" -o cyclonedx-json > reports/sbom-image.cdx.json || true
+          [ -s reports/sbom-image.cdx.json ] && echo "Image SBOM created." || echo "Image SBOM not generated."
+
+      - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sbom
-          path: reports/sbom.json
-          retention-days: 14
+          name: sbom-bundle
+          path: |
+            reports/sbom-python.cdx.json
+            reports/sbom-repo.cdx.json
+            reports/sbom-repo.spdx.json
+            reports/sbom-image.cdx.json
+          if-no-files-found: warn
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
