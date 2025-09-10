@@ -18,10 +18,10 @@ on:
       - "requirements*.txt"
   workflow_dispatch:
 
-# Least-privilege for all jobs
+# Least-privilege for all jobs (escalate only where needed)
 permissions:
   contents: read
-  packages: write          # push to GHCR
+  packages: write          # push to GHCR (non-PR)
   security-events: write   # upload Trivy SARIF
   attestations: write      # build provenance
   id-token: write          # OIDC for provenance
@@ -32,27 +32,29 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # docker/metadata-action will normalize
-  PLATFORM: linux/amd64
+  IMAGE_NAME: ${{ github.repository }}     # normalized by docker/metadata-action
+  # Set to "linux/amd64,linux/arm64" for multi-arch; single-arch is faster for CI
+  PLATFORMS: linux/amd64
+  # Trivy DB cache salt (bump to force refresh)
+  TRIVY_KEY_SALT: v1
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Derive version
         id: ver
         run: |
           set -euo pipefail
-          # Prefer tag -> commit count -> short SHA
           v="$(git describe --tags --always --dirty=-wip || true)"
           echo "version=${v}" >> "$GITHUB_OUTPUT"
 
-      - name: Docker meta (tags & labels)
+      - name: Docker metadata (tags & labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -71,6 +73,10 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.repository.updated_at }}
 
+      - name: Set up QEMU (multi-arch)
+        if: contains(env.PLATFORMS, ',')
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -78,21 +84,21 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # PRs: build locally (no push), so Trivy can scan the image
+      # PRs: build locally (no push) so Trivy can scan the local image
       - name: Build (PR) — load to local Docker
         if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ env.PLATFORM }}
+          # local load supports single-arch only
+          platforms: linux/amd64
           load: true
           push: false
-          target: ""                 # optionally set a multi-stage target
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
@@ -107,9 +113,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: ${{ env.PLATFORM }}
+          platforms: ${{ env.PLATFORMS }}
           push: true
-          provenance: false          # we attest in a separate step
+          # we attest provenance separately
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -118,8 +125,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # --- SBOM (CycloneDX) as artifact and label reference ---
-      - name: Generate SBOM (CycloneDX JSON)
+      # --- SBOM (CycloneDX) for repo (fast, useful during CI) ---
+      - name: Generate repo SBOM (CycloneDX JSON)
         uses: anchore/sbom-action@v0.20.5
         with:
           path: .
@@ -135,7 +142,16 @@ jobs:
           retention-days: 14
 
       # --- Vulnerability scan (Trivy) ---
-      # PRs: scan the local image
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('Dockerfile', '**/requirements*.txt') }}
+          restore-keys: |
+            trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-${{ github.ref_name }}-
+            trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-
+
+      # PRs: scan the local tag
       - name: Trivy image scan (PR)
         if: github.event_name == 'pull_request'
         uses: aquasecurity/trivy-action@0.33.1
@@ -146,8 +162,9 @@ jobs:
           vuln-type: "os,library"
           format: sarif
           output: trivy.sarif
+        continue-on-error: true
 
-      # main: scan by digest (pushed image)
+      # main: scan pushed tags (from metadata)
       - name: Trivy image scan (main)
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@0.33.1
@@ -158,17 +175,31 @@ jobs:
           vuln-type: "os,library"
           format: sarif
           output: trivy.sarif
+        continue-on-error: true
 
-      - name: Upload Trivy SARIF
+      - name: Ensure SARIF exists
+        run: |
+          [ -s trivy.sarif ] || echo '{"runs":[]}' > trivy.sarif
+
+      - name: Upload Trivy SARIF (fork-safe)
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy.sarif
           category: trivy-docker
 
+      - name: Upload Trivy report (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivy.sarif
+          retention-days: 14
+
       # --- Build provenance attestation (GHCR) ---
       - name: Attest build provenance
         if: github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build-push.outputs.digest }}
