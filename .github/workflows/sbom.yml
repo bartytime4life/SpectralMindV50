@@ -14,7 +14,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write        # for keyless cosign signing of SBOMs (kept as artifacts)
+  id-token: write        # keyless cosign for SBOMs
   packages: read         # needed if OCI_IMAGE points to GHCR
 
 concurrency:
@@ -24,9 +24,9 @@ concurrency:
 env:
   PYTHON_VERSION: '3.11'
   ARTIFACT_RETENTION_DAYS: 14
-  # Optional: set to an OCI image (e.g. ghcr.io/owner/repo:latest) to SBOM the container too
+  # Optional: SBOM a container image too (e.g., ghcr.io/owner/repo:latest)
   OCI_IMAGE: ''
-  # Optional license allow-list gate (comma-separated SPDX IDs); leave empty to disable
+  # Optional license allow-list (comma-separated SPDX IDs); empty disables gate
   LICENSE_ALLOWLIST: ''
 
 jobs:
@@ -78,7 +78,7 @@ jobs:
           mkdir -p reports
           cyclonedx-bom -r -o reports/sbom-python.cdx.json || true
           [ -s reports/sbom-python.cdx.json ] && echo "Python SBOM created." || echo "No Python SBOM (no deps detected)."
-          # Optional: dependency tree snapshot for auditors
+          # Dependency tree snapshot for auditors
           pipdeptree --freeze > reports/pipdeptree.txt || true
 
       # ---------- Repo SBOMs (CycloneDX + SPDX) via Syft ----------
