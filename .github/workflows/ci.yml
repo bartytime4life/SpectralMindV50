@@ -36,6 +36,7 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
   PYTHONHASHSEED: "0"
+  MPLBACKEND: "Agg"          # avoid GUI backends breaking headless tests
 
 jobs:
   lint-test-typecheck:
@@ -45,14 +46,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [ "3.10", "3.11" ]
+        python-version: [ "3.10", "3.11", "3.12" ]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -77,19 +78,21 @@ jobs:
           python -m pip install --upgrade pip wheel
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # tools
-          pip install ruff flake8 mypy pytest pytest-cov pytest-xdist
+          # Tooling (pin majors; allow patch updates)
+          pip install "ruff>=0.4,<1.0" "flake8>=7,<8" "mypy>=1.7,<2" \
+                      "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
 
       - name: Pre-commit (optional)
         if: hashFiles('.pre-commit-config.yaml') != ''
         run: |
-          pip install pre-commit
+          pip install "pre-commit>=3,<4"
           pre-commit run --all-files --show-diff-on-failure
 
       - name: Ruff (lint) → SARIF + check
         run: |
           ruff check src/ tests/
           ruff check src/ tests/ --output-format sarif > ruff.sarif || true
+          test -s ruff.sarif || echo '{"runs":[]}' > ruff.sarif
 
       - name: Flake8 (lint)
         run: flake8 src/ tests/
@@ -100,9 +103,10 @@ jobs:
       - name: Run unit tests (pytest + coverage)
         env:
           SM_SUBMISSION_BINS: "283"
+          PYTEST_ADDOPTS: "-q"
         run: |
           mkdir -p reports
-          pytest -q -n auto --disable-warnings --maxfail=1 \
+          pytest -n auto --disable-warnings --maxfail=1 \
             --cov=src --cov-report=xml:reports/coverage.xml \
             --junitxml=reports/tests-junit.xml
 
@@ -116,8 +120,8 @@ jobs:
             reports/
           retention-days: 14
 
-      - name: Upload Ruff SARIF
-        if: always()
+      - name: Upload Ruff SARIF (skip on fork PRs)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ruff.sarif
@@ -153,10 +157,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -196,12 +200,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [ lint-test-typecheck ]
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -218,6 +223,7 @@ jobs:
         run: |
           # Prefer lock/requirements if available, fall back to environment
           if ls requirements*.txt >/dev/null 2>&1; then
+            : > pip-audit.sarif
             for f in requirements*.txt; do
               pip-audit -r "$f" --format sarif --progress-spinner=off >> pip-audit.sarif || true
             done
@@ -226,7 +232,8 @@ jobs:
           fi
           test -s pip-audit.sarif || echo '{"runs":[]}' > pip-audit.sarif
 
-      - name: Upload SARIF (pip-audit)
+      - name: Upload SARIF (pip-audit) (skip on fork PRs)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: pip-audit.sarif
