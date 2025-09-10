@@ -51,7 +51,8 @@ jobs:
     name: Sweep old artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 25
-
+    outputs:
+      sweepruns: ${{ steps.cfg.outputs.sweepruns }}   # <-- expose for downstream job
     steps:
       - name: Resolve inputs
         id: cfg
@@ -95,11 +96,7 @@ jobs:
             const keepLatestPerName = Math.max(0, parseInt(core.getInput('keep_latest_per_name') || '2', 10));
             const minSizeKB = Math.max(0, parseInt(core.getInput('min_size_kb') || '0', 10));
 
-            const toList = (s) => (s ?? '')
-              .split(',')
-              .map(x => x.trim())
-              .filter(Boolean);
-
+            const toList = (s) => (s ?? '').split(',').map(x => x.trim()).filter(Boolean);
             const protectList = toList(core.getInput('protect_patterns'));
             const includeList = toList(core.getInput('include_patterns') || '*');
 
@@ -111,7 +108,6 @@ jobs:
             const protectRegexes = protectList.map(globToRegex);
             const includeRegexes = includeList.map(globToRegex);
             const matchesAny = (name, regs) => regs.length === 0 || regs.some(r => r.test(name));
-
             const cutoffMs = Date.now() - (daysToKeep + graceDays) * 24*60*60*1000;
 
             const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -124,7 +120,7 @@ jobs:
               } catch (e) {
                 const status = e.status || 0;
                 const msg = e.message || String(e);
-                if (attempt < 5 && [403, 429, 502, 503, 504].includes(status)) {
+                if (attempt < 5 && [403,429,502,503,504].includes(status)) {
                   const backoff = Math.min(2000 * attempt, 8000);
                   core.info(`Retry ${attempt} deleting ${artifactId} after ${backoff}ms (status ${status}: ${msg})`);
                   await sleep(backoff);
@@ -142,13 +138,11 @@ jobs:
             core.info(`Include patterns: ${includeList.join(', ') || '(all)'}`);
             core.info(`Min size to delete: ${minSizeKB} KB`);
 
-            // Pull all artifacts via pagination
             const allArtifacts = await github.paginate(
               github.rest.actions.listArtifactsForRepo,
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
             );
 
-            // Group by name for "keep latest N"
             const byName = new Map();
             for (const a of allArtifacts) {
               const n = a.name || `artifact-${a.id}`;
@@ -159,83 +153,47 @@ jobs:
               arr.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             }
 
-            let total = 0, considered = 0, deleted = 0, protectedCount = 0, kept = 0, errors = 0, expired = 0, tooSmall = 0;
-            let bytesDeleted = 0, bytesScanned = 0;
+            let total=0, considered=0, deleted=0, protectedCount=0, kept=0, errors=0, expired=0, tooSmall=0;
+            let bytesDeleted=0, bytesScanned=0;
 
             for (const art of allArtifacts) {
-              total += 1;
+              total++;
               const name = art.name || `artifact-${art.id}`;
               const createdAt = new Date(art.created_at || art.updated_at || Date.now()).getTime();
               const ageDays = Math.floor((Date.now() - createdAt) / (24*60*60*1000));
               const size = Number(art.size_in_bytes || 0);
               bytesScanned += size;
 
-              // Already expired/non-downloadable? Clean up immediately
               if (art.expired || art.archive_download_url == null) {
-                expired += 1;
+                expired++;
                 if (dryRun) {
                   core.warning(`EXPIRED (would delete): ${name} (#${art.id})`);
                 } else {
                   const ok = await delWithRetry(art.id);
-                  if (ok) { deleted += 1; bytesDeleted += size; } else { errors += 1; }
+                  if (ok) { deleted++; bytesDeleted += size; } else { errors++; }
                 }
                 continue;
               }
 
-              // Include filter
-              if (!matchesAny(name, includeRegexes)) {
-                core.info(`SKIP (not included): ${name} (#${art.id})`);
-                kept += 1;
-                continue;
-              }
+              if (!matchesAny(name, includeRegexes)) { kept++; continue; }
+              if (protectRegexes.length && protectRegexes.some(rx => rx.test(name))) { protectedCount++; continue; }
 
-              // Protect filter
-              if (protectRegexes.length > 0 && protectRegexes.some(rx => rx.test(name))) {
-                core.info(`KEEP (protected): ${name} (#${art.id}) [age=${ageDays}d]`);
-                protectedCount += 1;
-                continue;
-              }
-
-              // Freshness guard: keep N newest per artifact *name*
               const siblings = byName.get(art.name || '') ?? [];
-              const indexInGroup = siblings.findIndex(x => x.id === art.id);
-              if (indexInGroup > -1 && indexInGroup < keepLatestPerName) {
-                core.info(`KEEP (latest ${keepLatestPerName} of '${name}'): #${art.id}`);
-                kept += 1;
-                continue;
-              }
+              const idx = siblings.findIndex(x => x.id === art.id);
+              if (idx > -1 && idx < keepLatestPerName) { kept++; continue; }
 
-              considered += 1;
+              if (createdAt > cutoffMs) { kept++; continue; }
+              if (minSizeKB > 0 && size < minSizeKB*1024) { tooSmall++; kept++; continue; }
 
-              // Age cutoff
-              if (createdAt > cutoffMs) {
-                core.info(`KEEP (recent): ${name} (#${art.id}) [age=${ageDays}d]`);
-                kept += 1;
-                continue;
-              }
-
-              // Size filter
-              if (minSizeKB > 0 && size < minSizeKB * 1024) {
-                core.info(`KEEP (too small < ${minSizeKB}KB): ${name} (#${art.id}) size=${size}B`);
-                tooSmall += 1; kept += 1;
-                continue;
-              }
-
-              // Delete (or dry-run)
               if (dryRun) {
                 core.warning(`WOULD DELETE: ${name} (#${art.id}) [age=${ageDays}d, size=${size}B]`);
               } else {
                 const ok = await delWithRetry(art.id);
-                if (ok) { deleted += 1; bytesDeleted += size; } else { errors += 1; }
+                if (ok) { deleted++; bytesDeleted += size; } else { errors++; }
               }
             }
 
-            const fmtBytes = (n) => {
-              const units = ['B','KB','MB','GB','TB'];
-              let i = 0, x = n;
-              while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
-              return `${x.toFixed(2)} ${units[i]}`;
-            };
+            const fmtBytes = (n) => { const u=['B','KB','MB','GB','TB']; let i=0,x=n; while(x>=1024&&i<u.length-1){x/=1024;i++;} return `${x.toFixed(2)} ${u[i]}`; };
 
             core.summary
               .addHeading('Artifact Sweeper Report')
@@ -264,7 +222,6 @@ jobs:
               ])
               .write();
 
-            // Outputs (useful if chaining)
             core.setOutput('total', String(total));
             core.setOutput('considered', String(considered));
             core.setOutput('deleted', String(deleted));
@@ -291,7 +248,7 @@ jobs:
     name: Sweep old workflow runs (optional)
     runs-on: ubuntu-latest
     needs: sweep-artifacts
-    if: ${{ steps.cfg.outputs.sweepruns == 'true' }}
+    if: ${{ needs.sweep-artifacts.outputs.sweepruns == 'true' }}   # <-- fixed reference
     timeout-minutes: 15
     steps:
       - name: Delete completed runs older than 30 days (keep latest 20)
