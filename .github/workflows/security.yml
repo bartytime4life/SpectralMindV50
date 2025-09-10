@@ -21,6 +21,9 @@ concurrency:
 env:
   PYTHON_VERSION: '3.11'
   ARTIFACT_RETENTION_DAYS: 14
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+  PYTHONUTF8: "1"
 
 jobs:
   dependency-review:
@@ -32,13 +35,14 @@ jobs:
       pull-requests: read
       security-events: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+          # You can add allowlists:
+          # allow-ghsas: |
+          #   GHSA-xxxx-xxxx-xxxx
           comment-summary-in-pr: true
-          allow-ghsas: |
-            # (optional) comma/newline-separated GHSAs to allowlist
 
   sast-deps:
     name: pip-audit + Bandit + detect-secrets
@@ -48,9 +52,9 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -62,40 +66,49 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          pip install pip-audit bandit detect-secrets
+          # Pin majors, allow patch updates for stability
+          pip install "pip-audit>=2.7,<3" "bandit>=1.7,<2" "detect-secrets>=1.5,<2" jq
 
       - name: Prepare security dir
         run: mkdir -p security
 
-      # Generate SARIF for each requirements* file, non-failing to avoid CI hard-stop
+      # Per-file audits to make it obvious which manifest produced which findings,
+      # fall back to environment/project mode if no req files exist.
       - name: pip-audit → SARIF (non-failing)
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          found=0
-          for f in requirements*.txt; do
-            echo "Auditing $f"
-            pip-audit -r "$f" --format sarif -o "security/pip-audit.${f%.txt}.sarif" || true
-            found=1
+          got=0
+          for f in requirements*.txt **/requirements*.txt; do
+            out="security/pip-audit.$(echo "$f" | tr '/.' '__').sarif"
+            echo "Auditing $f → $out"
+            pip-audit -r "$f" --format sarif -o "$out" || true
+            got=1
           done
-          # fallback single-run if using PEP 621/poetry without explicit req files
-          if [ $found -eq 0 ]; then
+          if [ $got -eq 0 ]; then
             pip-audit --format sarif -o security/pip-audit.sarif || true
           fi
+          # Ensure at least one SARIF exists for upload step
+          ls security/*.sarif >/dev/null 2>&1 || echo '{}' > security/pip-audit.empty.sarif
 
       - name: Bandit (non-failing)
         run: |
-          if [ -d src ]; then bandit -q -r src -f sarif -o security/bandit.sarif || true; fi
+          if [ -d src ]; then
+            bandit -q -r src -f sarif -o security/bandit.sarif || true
+          else
+            echo "No src/ directory found; skipping Bandit."
+          fi
 
       - name: detect-secrets (non-failing)
         run: detect-secrets scan > security/detect-secrets.json || true
 
-      - name: Upload SARIFs to Code Scanning
-        if: always()
+      - name: Upload SARIFs to Code Scanning (fork-safe)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: security
+          category: sast-and-deps
 
       - name: Upload security artifacts
         if: always()
@@ -114,11 +127,12 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
         with:
           languages: python
           queries: +security-and-quality
+      # No-op for Python, keeps parity if you add other languages later
       - uses: github/codeql-action/autobuild@v3
       - uses: github/codeql-action/analyze@v3
         with:
@@ -131,11 +145,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+
+      # Generate CycloneDX for the repo using Syft (fast, zero-install via action)
       - name: Generate SBOM (CycloneDX) to security/sbom.cdx.json
         uses: anchore/syft-action@v0.20.5
         with:
           options: dir:. -o cyclonedx-json=security/sbom.cdx.json
+
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
@@ -151,7 +168,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Prepare security dir
         run: mkdir -p security
@@ -160,6 +177,15 @@ jobs:
         uses: hadolint/hadolint-action@v3.2.0
         with:
           dockerfile: Dockerfile
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+            trivy-db-
 
       # Filesystem scan (vulns) -> SARIF, non-failing gate
       - name: Trivy FS → SARIF (non-failing)
@@ -183,11 +209,12 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM,LOW'
           exit-code: '0'
 
-      - name: Upload Trivy SARIFs
-        if: always()
+      - name: Upload Trivy SARIFs (fork-safe)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: security
+          category: trivy
 
       - name: Upload container scan artifacts
         if: always()
