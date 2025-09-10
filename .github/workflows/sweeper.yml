@@ -9,10 +9,18 @@ on:
         description: 'Delete artifacts older than this many days'
         required: false
         default: '14'
+      grace_days:
+        description: 'Extra buffer beyond days_to_keep before deletion'
+        required: false
+        default: '2'
       keep_latest_per_name:
         description: 'Always keep the N most-recent per artifact name'
         required: false
         default: '5'
+      min_size_kb:
+        description: 'Only delete artifacts >= this size (KB); 0 disables'
+        required: false
+        default: '0'
       dry_run:
         description: 'Show what would be deleted without deleting (true/false)'
         required: false
@@ -27,7 +35,7 @@ on:
         default: '*'
 
 permissions:
-  actions: write     # required to list/delete artifacts and run logs
+  actions: write     # list/delete artifacts + run logs
   contents: read
 
 concurrency:
@@ -38,7 +46,7 @@ jobs:
   sweep:
     name: 🧹 Sweep artifacts & old run logs
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Resolve inputs
@@ -47,39 +55,65 @@ jobs:
         run: |
           # Inputs are empty for cron; set safe defaults
           DAYS="${{ github.event.inputs.days_to_keep || '14' }}"
+          GRACE="${{ github.event.inputs.grace_days || '2' }}"
           KEEP_N="${{ github.event.inputs.keep_latest_per_name || '5' }}"
+          MIN_KB="${{ github.event.inputs.min_size_kb || '0' }}"
           DRY="${{ github.event.inputs.dry_run || 'true' }}"
           PROTECT="${{ github.event.inputs.protect_patterns || 'release-*,sbom*' }}"
           INCLUDE="${{ github.event.inputs.include_patterns || '*' }}"
-          echo "days=${DAYS}" >> "$GITHUB_OUTPUT"
+          echo "days=${DAYS}"   >> "$GITHUB_OUTPUT"
+          echo "grace=${GRACE}" >> "$GITHUB_OUTPUT"
           echo "keep=${KEEP_N}" >> "$GITHUB_OUTPUT"
-          echo "dry=${DRY}" >> "$GITHUB_OUTPUT"
+          echo "min=${MIN_KB}"  >> "$GITHUB_OUTPUT"
+          echo "dry=${DRY}"     >> "$GITHUB_OUTPUT"
           echo "protect=${PROTECT}" >> "$GITHUB_OUTPUT"
           echo "include=${INCLUDE}" >> "$GITHUB_OUTPUT"
 
-      - name: 🧾 Plan & prune artifacts
+      - name: 🧾 Plan & prune artifacts (age/filters/keep-N; retries/backoff)
         id: prune
         uses: actions/github-script@v8
         with:
+          days: ${{ steps.cfg.outputs.days }}
+          grace: ${{ steps.cfg.outputs.grace }}
+          keep: ${{ steps.cfg.outputs.keep }}
+          min_kb: ${{ steps.cfg.outputs.min }}
+          dry: ${{ steps.cfg.outputs.dry }}
+          protect: ${{ steps.cfg.outputs.protect }}
+          include: ${{ steps.cfg.outputs.include }}
           script: |
-            // ---------- helpers ----------
+            // ---------- inputs ----------
             const daysToKeep = parseInt(core.getInput('days') || '14', 10);
+            const graceDays  = Math.max(0, parseInt(core.getInput('grace') || '0', 10));
             const keepLatest = Math.max(0, parseInt(core.getInput('keep') || '5', 10));
+            const minSizeKB  = Math.max(0, parseInt(core.getInput('min_kb') || '0', 10));
             const dryRun = (core.getInput('dry') || 'true').toLowerCase() === 'true';
-
             const toList = (s) => (s ?? '').split(',').map(x => x.trim()).filter(Boolean);
-            const globToRegex = (g) => new RegExp('^' + g
-              .replace(/[.+^${}()|[\]\\]/g,'\\$&')
-              .replace(/\*/g,'.*')
-              .replace(/\?/g,'.') + '$','i');
-
             const protectGlobs = toList(core.getInput('protect'));
             const includeGlobs = toList(core.getInput('include') || '*');
+
+            // ---------- helpers ----------
+            const globToRegex = (g) => new RegExp('^' + g
+              .replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/\?/g,'.') + '$','i');
             const protectRx = protectGlobs.map(globToRegex);
             const includeRx = includeGlobs.map(globToRegex);
             const matchesAny = (n, rx) => rx.length === 0 || rx.some(r => r.test(n));
-
-            const cutoff = Date.now() - daysToKeep*24*60*60*1000;
+            const cutoff = Date.now() - (daysToKeep + graceDays)*24*60*60*1000;
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            async function delWithRetry(id, attempt=1) {
+              try {
+                await github.rest.actions.deleteArtifact({ owner: context.repo.owner, repo: context.repo.repo, artifact_id: id });
+                return true;
+              } catch (e) {
+                const s = e.status || 0;
+                if (attempt < 5 && [403,429,502,503,504].includes(s)) {
+                  const backoff = Math.min(2000*attempt, 8000);
+                  core.info(`retry ${attempt} delete ${id} after ${backoff}ms (${s})`);
+                  await sleep(backoff); return delWithRetry(id, attempt+1);
+                }
+                core.error(`delete ${id} failed: ${s} ${(e.message||e)}`); return false;
+              }
+            }
+            const fmtBytes = (n)=>{const u=['B','KB','MB','GB','TB'];let i=0,x=n;while(x>=1024&&i<u.length-1){x/=1024;i++;}return `${x.toFixed(2)} ${u[i]}`;}
 
             // ---------- fetch all artifacts ----------
             const artifacts = await github.paginate(
@@ -94,74 +128,61 @@ jobs:
               if (!byName.has(n)) byName.set(n, []);
               byName.get(n).push(a);
             }
-            for (const arr of byName.values()) {
-              arr.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+            for (const a of byName.values()) {
+              a.sort((x,y) => new Date(y.created_at) - new Date(x.created_at));
             }
 
-            let total=0, considered=0, deleted=0, kept=0, protectedCount=0, expired=0, errors=0;
+            let total=0, considered=0, deleted=0, kept=0, protectedCount=0, expired=0, errors=0, tooSmall=0;
             let bytesScanned=0, bytesDeleted=0;
 
             for (const art of artifacts) {
-              total += 1;
+              total++;
               const name = art.name || `artifact-${art.id}`;
               const size = Number(art.size_in_bytes || 0);
-              bytesScanned += size;
               const created = new Date(art.created_at || art.updated_at || Date.now()).getTime();
+              bytesScanned += size;
 
-              // skip if not in include set
+              // include filter
               if (!matchesAny(name, includeRx)) { kept++; continue; }
 
-              // protected by glob
-              if (protectRx.length && protectRx.some(r => r.test(name))) {
-                protectedCount++; continue;
-              }
+              // protect filter
+              if (protectRx.length && protectRx.some(r => r.test(name))) { protectedCount++; continue; }
 
-              // keep newest N per artifact name
+              // keep newest N per name
               const siblings = byName.get(art.name || '') ?? [];
               const idx = siblings.findIndex(x => x.id === art.id);
               if (idx > -1 && idx < keepLatest) { kept++; continue; }
 
-              // expired or missing content? purge regardless of age
+              // expired or missing -> purge regardless of age
               if (art.expired || !art.archive_download_url) {
                 expired++;
-                if (!dryRun) {
-                  try {
-                    await github.rest.actions.deleteArtifact({
-                      owner: context.repo.owner, repo: context.repo.repo, artifact_id: art.id
-                    });
-                    deleted++; bytesDeleted += size;
-                  } catch (e) { errors++; core.error(`Failed deleting expired ${name}: ${e.message}`); }
-                }
+                if (!dryRun) { const ok = await delWithRetry(art.id); ok ? (deleted++, bytesDeleted+=size) : errors++; }
                 continue;
               }
 
               // age cutoff
               if (created > cutoff) { kept++; continue; }
 
+              // size guard
+              if (minSizeKB > 0 && size < minSizeKB*1024) { tooSmall++; kept++; continue; }
+
               considered++;
               if (dryRun) {
-                core.info(`[DRY] would delete: ${name} (#${art.id}) ~ ${size} bytes`);
+                core.info(`[DRY] would delete: ${name} (#${art.id}) ~ ${fmtBytes(size)}`);
               } else {
-                try {
-                  await github.rest.actions.deleteArtifact({
-                    owner: context.repo.owner, repo: context.repo.repo, artifact_id: art.id
-                  });
-                  deleted++; bytesDeleted += size;
-                  core.info(`deleted: ${name} (#${art.id}) ~ ${size} bytes`);
-                } catch (e) {
-                  errors++; core.error(`Failed deleting ${name}: ${e.message}`);
-                }
+                const ok = await delWithRetry(art.id);
+                if (ok) { deleted++; bytesDeleted += size; } else { errors++; }
               }
             }
-
-            const fmt = (n)=>{const u=['B','KB','MB','GB','TB'];let i=0,x=n;while(x>=1024&&i<u.length-1){x/=1024;i++;}return `${x.toFixed(2)} ${u[i]}`;}
 
             core.summary
               .addHeading('Artifact Sweeper Report')
               .addTable([
                 [{data:'Metric',header:true},{data:'Value',header:true}],
                 ['Days to keep', String(daysToKeep)],
+                ['Grace days', String(graceDays)],
                 ['Keep latest per name', String(keepLatest)],
+                ['Min size (KB)', String(minSizeKB)],
                 ['Dry run', String(dryRun)],
                 ['Protected patterns', protectGlobs.join(', ') || '(none)'],
                 ['Included patterns', includeGlobs.join(', ') || '(all)'],
@@ -169,12 +190,12 @@ jobs:
                 ['Considered', String(considered)],
                 ['Deleted', String(deleted)],
                 ['Expired auto-deleted', String(expired)],
+                ['Too small kept', String(tooSmall)],
                 ['Kept (recent/other)', String(kept)],
                 ['Errors', String(errors)],
-                ['Bytes scanned', fmt(bytesScanned)],
-                ['Bytes deleted (est.)', fmt(bytesDeleted)]
-              ])
-              .write();
+                ['Bytes scanned', fmtBytes(bytesScanned)],
+                ['Bytes deleted (est.)', fmtBytes(bytesDeleted)],
+              ]).write();
 
             core.setOutput('deleted', String(deleted));
             core.setOutput('errors', String(errors));
@@ -183,25 +204,31 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            const cutoff = new Date(Date.now() - 30*24*60*60*1000);
+            const cutoff = Date.now() - 30*24*60*60*1000;
             const runs = await github.paginate(
               github.rest.actions.listWorkflowRunsForRepo,
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100, status: "completed" }
             );
-            let pruned = 0;
+            let pruned = 0, errors = 0;
             for (const run of runs) {
-              if (new Date(run.updated_at) < cutoff) {
+              if (new Date(run.updated_at).getTime() < cutoff) {
                 try {
                   await github.rest.actions.deleteWorkflowRunLogs({
                     owner: context.repo.owner, repo: context.repo.repo, run_id: run.id
                   });
                   pruned++;
                 } catch (e) {
-                  core.warning(`Failed to delete logs for run ${run.id}: ${e.message}`);
+                  errors++;
+                  core.warning(`Failed to delete logs for run ${run.id}: ${e.message || e}`);
                 }
               }
             }
-            core.summary.addHeading('Run Log Sweeper').addList([`Logs pruned: ${pruned}`, `Cutoff: 30 days`]).write();
+            core.summary.addHeading('Run Log Sweeper').addList([
+              `Completed runs checked: ${runs.length}`,
+              `Logs pruned: ${pruned}`,
+              `Errors: ${errors}`,
+              `Cutoff: 30 days`
+            ]).write();
 
       - name: Upload sweep summary
         if: always()
