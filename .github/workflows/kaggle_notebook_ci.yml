@@ -36,9 +36,7 @@ env:
   PIP_NO_PYTHON_VERSION_WARNING: "1"
   PYTHONHASHSEED: "0"
   MPLBACKEND: "Agg"
-  # CI-friendly warnings
   PYTHONWARNINGS: "ignore:::pkg_resources,ignore::UserWarning"
-  # Submission bins default (override per notebook if needed)
   SM_SUBMISSION_BINS: "283"
 
 jobs:
@@ -81,9 +79,9 @@ jobs:
           done < <(git ls-files 'notebooks/**/*.ipynb' -z || true)
 
   local-validate:
-    name: Execute notebooks (offline-like; CPU)
+    name: Execute notebooks (offline-like; CPU) + param sweeps
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     needs: notebook-lint
     steps:
       - name: Checkout
@@ -108,10 +106,25 @@ jobs:
           python -m pip install --upgrade pip wheel
           if [ -f requirements-kaggle.txt ]; then pip install -r requirements-kaggle.txt; fi
           python -m pip install jupyter nbconvert nbclient nbformat papermill ipykernel jq
-          # light numerics (Kaggle baseline availability)
           python -m pip install -q numpy pandas matplotlib || true
-          # install local package if present (best-effort)
           if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e . || true; fi
+
+      - name: Snapshot environment (debug/repro)
+        run: |
+          mkdir -p .ci_run/env
+          python -V > .ci_run/env/python.txt
+          pip freeze > .ci_run/env/pip-freeze.txt
+          uname -a > .ci_run/env/uname.txt || true
+
+      - name: Warn on network/pip usage in notebooks (offline guard)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          hits=$(git ls-files 'notebooks/**/*.ipynb' | xargs -I{} jq -r '..|.source? // empty|join("\n")' {} \
+            | grep -Ein 'pip +install|apt-get|conda +install|wget |curl |requests\.' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits" | sed 's/^/::warning::Potential network/pip usage: /'
+          fi
 
       - name: Select notebooks for validation
         id: select
@@ -129,12 +142,23 @@ jobs:
           fi
           printf 'files=%s\n' "$(printf '%s ' "${NB[@]}")" >> "$GITHUB_OUTPUT"
 
-      - name: Execute notebooks (copy; HTML preview)
+      - name: Discover param files (Papermill)
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t P < <(git ls-files 'kaggle/params/**/*.json' 'kaggle/params/**/*.yml' 'kaggle/params/**/*.yaml' 2>/dev/null || true)
+          if [ "${#P[@]}" -gt 0 ]; then
+            printf 'param_files=%s\n' "$(printf '%s ' "${P[@]}")" >> "$GITHUB_OUTPUT"
+          else
+            echo "param_files=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Execute notebooks (copy; HTML preview; base run)
         if: steps.select.outputs.files != ''
         shell: bash
         env:
           KAGGLE_OFFLINE: ${{ env.KAGGLE_OFFLINE }}
-          # Simulate Kaggle env bits notebooks sometimes branch on:
           KAGGLE_KERNEL_RUN_TYPE: "Batch"
           KAGGLE_URL_BASE: "https://www.kaggle.com"
           PYTHONWARNINGS: "ignore"
@@ -150,6 +174,26 @@ jobs:
             jupyter nbconvert --execute --to notebook --inplace "$out" --ExecutePreprocessor.timeout=1500
             jupyter nbconvert --to html "$out" --output ".ci_run/notebooks_html/${base%.ipynb}.html"
             echo "::endgroup::"
+          done
+
+      - name: Execute param sweeps (Papermill) if any
+        if: steps.params.outputs.param_files != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci_run/params_html
+          IFS=' ' read -r -a NB <<< "${{ steps.select.outputs.files }}"
+          IFS=' ' read -r -a P  <<< "${{ steps.params.outputs.param_files }}"
+          for src in "${NB[@]}"; do
+            stem="$(basename "$src" .ipynb)"
+            for pf in "${P[@]}"; do
+              tag="$(basename "${pf%.*}")"
+              out=".ci_run/${stem}__${tag}.ipynb"
+              echo "::group::Papermill $src with $pf"
+              papermill "$src" "$out" -f "$pf"
+              jupyter nbconvert --to html "$out" --output ".ci_run/params_html/${stem}__${tag}.html"
+              echo "::endgroup::"
+            done
           done
 
       - name: Validate produced submissions (CSV/JSON if present)
@@ -203,6 +247,8 @@ jobs:
           path: |
             .ci_run/*.ipynb
             .ci_run/notebooks_html/*.html
+            .ci_run/params_html/*.html
+            .ci_run/env/**
           retention-days: 7
 
   validate-kaggle-metadata:
@@ -315,16 +361,13 @@ jobs:
     if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY && hashFiles('kaggle/datasets/**/dataset-metadata.json') != '' }}
     steps:
       - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
-
       - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-
       - name: Install Kaggle CLI
         run: |
           python -m pip install --upgrade pip
           pip install kaggle
-
       - name: Version datasets
         shell: bash
         run: |
@@ -335,7 +378,6 @@ jobs:
             kaggle datasets version -p "$d" -m "CI sync: ${GITHUB_SHA::7}" -r zip | tee "kaggle_dataset_$(basename "$d").log"
             echo "::endgroup::"
           done
-
       - name: Upload dataset logs
         if: always()
         uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
