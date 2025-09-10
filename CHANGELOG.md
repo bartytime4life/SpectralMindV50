@@ -1,129 +1,54 @@
-# 📜 Changelog — SpectraMind V50
+📜 Changelog — SpectraMind V50
 
-All notable changes to this project will be documented here.  
-This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and the
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+All notable changes to this project will be documented here.
+This project adheres to Semantic Versioning and the
+Keep a Changelog format.
 
----
+⸻
 
-## [Unreleased]
+[Unreleased]
 
-### 🚀 Added
-- JSON Schemas: `schemas/submission.tableschema.sample_id.json` (Tableschema with `sample_id` as canonical key); stricter enums/patterns and full worked examples.
-- Integration tests: calibration chain (`tests/integration/test_calib_chain.py`) and CLI end-to-end smoke test (`tests/integration/test_end_to_end_cli.py`).
-- Kaggle assets: finalized `kaggle/README.md`, notebook template wiring, and pinned `requirements-kaggle.txt`.
-- Docs: expanded calibration internals (aperture/optimal, Horne-style trace), pipeline diagrams, and repo conventions.
-- Diagnostics:
-  - FFT/UMAP analysis (`spectral_analysis.py`, `dimensionality.py`) — see **ADR 0004 Dual Encoder Fusion**.
-  - Physics-informed checks (`validators/physics.py`) — see **ADR 0002 Physics-Informed Losses**.
-  - Unified HTML/JSONL report generator (`diagnostics/report.py`) — see **ADR 0002** + **ADR 0004**.
-- ADC quick-look: mission-grade ADC diagnostics module (`diagnostics/adc_diag.py`) with histograms + HTML report — see **ADR 0002**.
+🚀 Added
+	•	JSON Schemas:
+	•	schemas/submission.tableschema.sample_id.json — Tableschema with sample_id as canonical key; stricter enums/patterns and full worked examples.
+	•	Integration tests:
+	•	tests/integration/test_calib_chain.py.
+	•	tests/integration/test_end_to_end_cli.py.
+	•	Kaggle assets:
+	•	kaggle/README.md, pinned requirements-kaggle.txt, and notebook templates wired to CLI (spectramind.py).
+	•	Docs: expanded calibration internals in src/spectramind/calib/, pipeline diagrams in assets/diagrams/, and repo conventions in docs/.
+	•	Diagnostics:
+	•	FFT/UMAP analysis in src/spectramind/diagnostics/spectral_analysis.py and src/spectramind/diagnostics/dimensionality.py — see ADR 0004 Dual Encoder Fusion.
+	•	Physics-informed checks in src/spectramind/validators/physics.py — see ADR 0002 Physics-Informed Losses.
+	•	Unified HTML/JSONL report generator src/spectramind/diagnostics/report.py — see ADR 0002 + ADR 0004.
+	•	ADC quick-look: src/spectramind/diagnostics/adc_diag.py — see ADR 0002.
 
-### 🔄 Changed
-- Trace modeling: multi-order ready center/width, NaN-safe math, stable denominators, background models (`column_median`, `row_poly`), and Torch-first execution.
-- Photometry: batch-aware `[..., T, H, W]`, adaptive apertures, PSF-weighted optimal extraction with variance propagation, full NaN safety.
-- CI: hardened workflows (matrix pinning, cache keys, deterministic pytest); pre-commit stack updated (ruff/black/isort/mypy/bandit/secrets).
-- Schemas: tightened submission/events schema; added drift tests.
-- Diagnostics: improved JSON/HTML report generator with inline CSS, title support, and deterministic UTF-8 output — see **ADR 0002**.
+🔄 Changed
+	•	Trace modeling (src/spectramind/calib/trace.py): multi-order ready center/width, NaN-safe math, stable denominators, background models (column_median, row_poly), Torch-first execution.
+	•	Photometry (src/spectramind/calib/photometry.py): batch-aware [..., T, H, W], adaptive apertures, PSF-weighted optimal extraction with variance propagation, full NaN safety.
+	•	CI workflows: .github/workflows/ hardened with matrix pinning, cache keys, deterministic pytest.
+	•	Pre-commit stack: .pre-commit-config.yaml updated (ruff/black/isort/mypy/bandit/secrets).
+	•	Schemas: tightened submission.schema.json + events.schema.json; added drift tests.
+	•	Diagnostics reporting (diagnostics/report.py): improved JSON/HTML generator (inline CSS, title support, deterministic UTF-8) — see ADR 0002.
 
-### 🛠️ Fixed
-- Time-axis normalization and mask/variance alignment across calibration modules.
-- PSF normalization edge cases (degenerate/empty masks) in optimal extraction.
-- Docstring mismatches and dtype inconsistencies in Torch/NumPy paths.
-- ADC calibration diagnostics now clamp NaN/Inf inputs and guard matplotlib fallbacks — see **ADR 0002**.
+🛠️ Fixed
+	•	Time-axis normalization and mask/variance alignment across calibration modules (src/spectramind/calib/*).
+	•	PSF normalization edge cases in photometry.py.
+	•	Docstring mismatches and dtype inconsistencies (Torch vs NumPy).
+	•	ADC calibration diagnostics clamped NaN/Inf + guarded matplotlib fallback (adc_diag.py) — see ADR 0002.
 
-### 🧪 Performance
-- Vectorized photometry loops and reduced tensor allocations.
-- NumPy fallback only for polyfit/smoothing (Torch-first everywhere else).
-- FFT analysis normalized per-sample, NaN-safe, batch-aware — see **ADR 0004**.
+🧪 Performance
+	•	Vectorized photometry loops & reduced tensor allocations (photometry.py).
+	•	NumPy fallback only for polyfit; Torch-first everywhere else (trace.py).
+	•	FFT analysis normalized per-sample, NaN-safe, batch-aware (spectral_analysis.py) — see ADR 0004.
 
-### 🔒 Security
-- All new diagnostics modules passed Bandit + CodeQL scanning.
-- No issues flagged in this cycle.
+🔒 Security
+	•	All new diagnostics modules passed Bandit + CodeQL scanning (ci.yml).
 
-### ⚠️ Deprecated
-- None.
+⚠️ Deprecated
+	•	None.
 
-### ❌ Removed
-- None.
+❌ Removed
+	•	None.
 
----
-
-## [0.1.2] — 2025-09-08
-### 🚀 Added
-- Calibration self-tests: lightweight CPU-safe checks in `photometry.py` and `trace.py`.
-- Kaggle guardrails: runtime checks + permission tests (`tests/integration/test_kaggle_runtime_guardrails.py`).
-- CI workflows: `ci.yml`, `kaggle_notebook_ci.yml`, `sbom-refresh.yml`, `artifact-sweeper.yml`.
-- Pre-commit: mission-grade stack with autofix and repo-wide excludes.
-
-### 🔄 Changed
-- `src/spectramind/calib/photometry.py`: batch-aware outputs, NaN-safe reductions, adaptive apertures, robust sky annulus clipping, variance-aware errors.
-- `src/spectramind/calib/trace.py`: normalized axes to `[..., T, Y, X]`, Horne-style optimal extraction with variance propagation, multi-order center/width, improved background models.
-- CLI: unified Typer interface, clarified logging in `setup.cfg` and tests.
-- Docs: calibration/extraction sections expanded; ADR cross-links.
-
-### 🛠️ Fixed
-- PSF weight normalization with masked pixels.
-- Stable denominator guards in optimal extraction (`NaN`/`Inf` suppression).
-- Dtype casts and device alignment in Torch paths.
-
-### 🧪 Performance
-- Vectorized inner loops; reduced allocations in per-frame apertures and PSF grids.
-
----
-
-## [0.1.1] — 2025-09-06
-### 🚀 Added
-- `scripts/bump_version.sh` for automated semantic versioning.
-
-### 🔄 Changed
-- Dependency upgrades: `pytest ≥8.1`, `ruff ≥0.6.8`, `mypy ≥1.11`.
-- Docs: reproducibility notes, Kaggle runtime constraints, ADR workflow clarity.
-
----
-
-## [0.1.0] — 2025-09-05
-### 🚀 Added
-- 🎉 Initial public release of **SpectraMind V50** scaffold.
-- CLI (`spectramind`) with `calibrate`, `train`, `predict`.
-- DVC integration for raw → processed lineage.
-- Initial configs (`configs/train.yaml`, `configs/env/`).
-- ADR system bootstrapped (`ADR/0001-choose-hydra-dvc.md`).
-
----
-
-## [0.0.3] — 2025-09-03
-### 🚀 Added
-- CI bootstrap: GitHub Actions `ci.yml` smoke tests, Python lint/type-check hooks.
-- Pre-commit baseline (`.pre-commit-config.yaml`) with ruff/black/isort.
-- Initial Kaggle notebook sync script (`scripts/kaggle_submit.sh`).
-
----
-
-## [0.0.2] — 2025-09-02
-### 🚀 Added
-- Core calibration modules scaffolded under `src/spectramind/calib/`.
-- Config directories (`configs/data`, `configs/model`, `configs/loss`) with toy YAMLs.
-- Tests skeleton under `tests/unit/`.
-
-### 🔄 Changed
-- Makefile: added `lint`, `test`, `sbom` targets.
-- Dockerfile: GPU-ready base with pinned CUDA/Torch.
-
----
-
-## [0.0.1] — 2025-09-01
-### 🚀 Added
-- Repo initialization: LICENSE, README, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md.
-- Base `pyproject.toml`, `setup.cfg`, and Poetry lockfile stub.
-- `.github/workflows/` directory created (empty placeholders).
-- ADR system scaffolded (`ADR/0000-template.md`).
-- Initial diagrams under `assets/diagrams/`.
-
----
-
-## Conventions
-- Use **Added / Changed / Fixed / Deprecated / Removed / Security / Performance** buckets.
-- Dates in **YYYY-MM-DD** (UTC).
-- Patch = bug fixes & safety; minor = features; major = breaking changes.
-- Cross-link new features to **ADRs** for full design context (e.g. ADR 0002, ADR 0004).
+⸻
