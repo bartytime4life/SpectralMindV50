@@ -110,7 +110,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # If a list file exists, use it (newline-separated paths)
           LIST_FILE="kaggle/ci_notebooks.txt"
           if [ -f "$LIST_FILE" ]; then
             mapfile -t NB < <(grep -v '^\s*#' "$LIST_FILE" | sed 's/#.*$//' | sed '/^\s*$/d')
@@ -141,6 +140,54 @@ jobs:
             jupyter nbconvert --to html "$out" --output ".ci_run/notebooks_html/${base%.ipynb}.html"
             echo "::endgroup::"
           done
+
+      - name: Validate produced submissions (CSV/JSON if present)
+        if: always()
+        run: |
+          python - <<'PY'
+          import glob, json, sys, csv, os
+          from pathlib import Path
+          import pandas as pd
+          # Expect 283 mu_*, 283 sigma_* + sample_id (total 567 columns)
+          N = int(os.environ.get("SM_SUBMISSION_BINS", "283"))
+          expected_mu   = [f"mu_{i:03d}" for i in range(N)]
+          expected_sig  = [f"sigma_{i:03d}" for i in range(N)]
+          expected_cols = ["sample_id"] + expected_mu + expected_sig
+          errors = 0
+          # CSVs
+          for f in glob.glob("**/submission*.csv", recursive=True):
+            try:
+              df = pd.read_csv(f)
+              miss = [c for c in expected_cols if c not in df.columns]
+              if miss:
+                print(f"::error file={f}::Missing columns: {miss[:8]}{' ...' if len(miss)>8 else ''}")
+                errors += 1
+              if df.isna().any().any():
+                print(f"::error file={f}::Contains NaN values"); errors += 1
+              if (df[[c for c in expected_sig if c in df]].lt(0)).any().any():
+                print(f"::error file={f}::Negative sigma found"); errors += 1
+            except Exception as e:
+              print(f\"::error file={f}::CSV validation error: {e}\"); errors += 1
+          # JSON (single-record)
+          for f in glob.glob("**/submission*.json", recursive=True):
+            try:
+              obj = json.load(open(f))
+              if not isinstance(obj, dict):
+                print(f\"::error file={f}::JSON must be an object\"); errors += 1
+                continue
+              miss = [c for c in expected_cols if c not in obj]
+              if miss:
+                print(f\"::error file={f}::Missing keys: {miss[:8]}{' ...' if len(miss)>8 else ''}\"); errors += 1
+              for k in expected_sig:
+                v = obj.get(k, 0)
+                if isinstance(v, (int,float)) and v < 0:
+                  print(f\"::error file={f}::Negative sigma at {k}\"); errors += 1; break
+            except Exception as e:
+              print(f\"::error file={f}::JSON validation error: {e}\"); errors += 1
+          if errors:
+            sys.exit(1)
+          print(\"Submission validation OK (no files or all valid)\")
+          PY
 
       - name: Upload executed notebooks & HTML previews
         if: always()
