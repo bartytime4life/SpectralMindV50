@@ -33,7 +33,7 @@ Notes
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -43,7 +43,6 @@ import torch.nn.functional as F
 # ----------------------------------------------------------------------------- #
 # Finite-difference helpers
 # ----------------------------------------------------------------------------- #
-
 
 def first_derivative(mu: torch.Tensor) -> torch.Tensor:
     """
@@ -85,7 +84,6 @@ def second_derivative(mu: torch.Tensor) -> torch.Tensor:
 # ----------------------------------------------------------------------------- #
 # Reduction helpers (masked, stable)
 # ----------------------------------------------------------------------------- #
-
 
 def _masked_mean(x: torch.Tensor, w: Optional[torch.Tensor]) -> torch.Tensor:
     """
@@ -129,7 +127,6 @@ def _triple_mask(mask: torch.Tensor) -> torch.Tensor:
 # Penalties (smoothness, curvature, coherence)
 # ----------------------------------------------------------------------------- #
 
-
 def smoothness_penalty(
     mu: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
@@ -153,10 +150,7 @@ def smoothness_penalty(
     Tensor scalar
     """
     d1 = first_derivative(mu)  # [B, N-1]
-    if norm.lower() == "l1":
-        pen = d1.abs()
-    else:
-        pen = d1.pow(2)
+    pen = d1.abs() if norm.lower() == "l1" else d1.pow(2)
 
     w = None
     if mask is not None:
@@ -189,10 +183,7 @@ def curvature_penalty(
     if d2.numel() == 0:
         return mu.new_tensor(0.0)
 
-    if norm.lower() == "l1":
-        pen = d2.abs()
-    else:
-        pen = d2.pow(2)
+    pen = d2.abs() if norm.lower() == "l1" else d2.pow(2)
 
     w = None
     if mask is not None:
@@ -247,7 +238,6 @@ def coherence_penalty(
 # ----------------------------------------------------------------------------- #
 # Wrapper module for easy wiring from Hydra/encoders
 # ----------------------------------------------------------------------------- #
-
 
 @dataclass
 class SmoothnessConfig:
