@@ -99,7 +99,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install build twine
 
-      - name: Build wheel + sdist
+      - name: Build wheel + sdist (reproducible)
+        env:
+          SOURCE_DATE_EPOCH: "1704067200"  # 2024-01-01
         run: |
           python -m build
           twine check dist/*
