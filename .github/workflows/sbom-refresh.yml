@@ -1,145 +1,397 @@
-name: sbom-refresh
+name: release
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'     # Every Monday at 06:00 UTC
+  push:
+    tags:
+      - 'v*'                    # e.g. v1.2.0, v1.2.0-rc.1
   workflow_dispatch:
 
+# Default to least privilege; escalate per job as needed
 permissions:
   contents: read
-  security-events: write     # needed for SARIF upload
   actions: read
+  packages: read
+  id-token: none
 
 concurrency:
-  group: sbom-refresh-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: '3.11'
-  ARTIFACT_RETENTION_DAYS: 14
-  # Optional: set to GHCR image ref to also SBOM/scan the container, e.g. ghcr.io/owner/repo:latest
-  OCI_IMAGE: ''
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  VERSION_FILE: VERSION
+  KAGGLE_BUNDLE: artifacts/submission.zip
+  ARTIFACT_RETENTION_DAYS: 30
 
 jobs:
-  sbom:
-    name: Generate SBOMs
+  validate:
+    name: Validate tag & VERSION
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    permissions: { contents: read }
     outputs:
-      has_python: ${{ steps.detect-py.outputs.has_python }}
+      tag: ${{ steps.tag.outputs.tag }}
+      ver: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.prerelease.outputs.prerelease }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      # ---------- Python SBOM (CycloneDX) ----------
+      - name: Extract tag
+        id: tag
+        run: echo "tag=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Read VERSION
+        id: version
+        run: |
+          test -f "${{ env.VERSION_FILE }}" || { echo "::error::Missing ${{ env.VERSION_FILE }}"; exit 1; }
+          VER="$(tr -d ' \n' < "${{ env.VERSION_FILE }}")"
+          test -n "$VER" || { echo "::error::VERSION is empty"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "VERSION => $VER"
+
+      - name: Validate tag == v$(cat VERSION)
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VER="${{ steps.version.outputs.version }}"
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error title=Tag/Version mismatch::Tag $TAG != v$VER"; exit 1;
+          fi
+          echo "✅ Tag $TAG matches VERSION v$VER"
+
+      - name: Determine pre-release (hyphen means prerelease)
+        id: prerelease
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]] && P=true || P=false
+          echo "prerelease=$P" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build & Package
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # upload artifacts
+      packages: write          # push GHCR image
+      id-token: write          # keyless signing/attestations
+    outputs:
+      ver: ${{ steps.v.outputs.ver }}
+      image_digest: ${{ steps.buildx.outputs.digest }}
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
       - name: Set up Python
-        id: setup-py
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
           cache-dependency-path: |
-            **/requirements*.txt
             **/pyproject.toml
             **/setup.cfg
             **/setup.py
+            **/requirements*.txt
 
-      - name: Detect Python deps (best-effort)
-        id: detect-py
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=( **/requirements*.txt **/pyproject.toml **/setup.cfg **/setup.py )
-          if (( ${#files[@]} > 0 )); then echo "has_python=true" >> "$GITHUB_OUTPUT"; else echo "has_python=false" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Install CycloneDX (Python)
-        if: ${{ steps.detect-py.outputs.has_python == 'true' }}
+      - name: Install build deps
         run: |
           python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build wheel + sdist
+        run: |
+          python -m build
+          twine check dist/*
+          ls -lh dist/
+
+      - name: Generate SHA256SUMS for dist/*
+        working-directory: dist
+        run: |
+          : > SHA256SUMS.txt
+          for f in *; do sha256sum "$f" >> SHA256SUMS.txt; done
+          cat SHA256SUMS.txt
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign Python dist (keyless via OIDC)
+        working-directory: dist
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          for f in *; do
+            cosign sign-blob --yes "$f" \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.cert"
+          done
+
+      - name: Make Kaggle submission bundle (if script exists)
+        run: |
+          if [ -x scripts/package_submission.sh ]; then
+            mkdir -p artifacts
+            bash scripts/package_submission.sh
+            test -f "${{ env.KAGGLE_BUNDLE }}" || echo "::warning::Kaggle bundle expected at ${{ env.KAGGLE_BUNDLE }} not found"
+          else
+            echo "No scripts/package_submission.sh; skipping Kaggle bundle."
+          fi
+
+      - name: Upload Python dist (+sigs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload Kaggle bundle (if present)
+        if: ${{ hashFiles(env.KAGGLE_BUNDLE) != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-submission
+          path: ${{ env.KAGGLE_BUNDLE }}
+          retention-days: 14
+
+      - name: Upload diagnostics & metrics (if present)
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-and-metrics
+          path: |
+            artifacts/**/*.html
+            artifacts/**/*.json
+            metrics/**/*.json
+          if-no-files-found: ignore
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      # ---------- Container build & push (GHCR) ----------
+      - name: Docker login (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.validate.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push (with SBOM + provenance)
+        id: buildx
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract version
+        id: v
+        run: echo "ver=$(tr -d ' \n' < "${{ env.VERSION_FILE }}")" >> "$GITHUB_OUTPUT"
+
+      - name: Sign images (keyless default)
+        if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign --yes "${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}"
+          cosign sign --yes "${{ env.IMAGE_NAME }}:latest"
+
+      - name: Sign images (key-based)
+        if: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          printf '%s' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}"
+          cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:latest"
+
+      - name: Attest build provenance (GitHub attestation)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.buildx.outputs.digest }}
+          push-to-registry: true
+
+  sbom:
+    name: Generate SBOMs
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Repo SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@v0.20.5
+        with:
+          path: .
+          output-file: sbom-repo.json
+          format: cyclonedx-json
+
+      - name: Python deps SBOM (CycloneDX)
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - run: |
           pip install cyclonedx-bom
+          cyclonedx-bom -o sbom-python.json || true
 
-      - name: Generate Python deps SBOM (CycloneDX)
-        if: ${{ steps.detect-py.outputs.has_python == 'true' }}
+      - name: Image SBOM (Syft → CycloneDX)
         run: |
-          cyclonedx-bom -o sbom-python.cdx.json || true
-          [ -s sbom-python.cdx.json ] && echo "Python SBOM created." || echo "No Python SBOM (no deps detected)."
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v1.16.0
+          syft "${{ env.IMAGE_NAME }}:${{ needs.build.outputs.ver }}" -o cyclonedx-json > sbom-image.json || true
 
-      # ---------- Repo SBOMs (CycloneDX + SPDX) ----------
-      - name: Install Syft (SBOM generator)
-        uses: anchore/sbom-action/download-syft@v0.20.5
-
-      - name: Generate repo SBOM (CycloneDX JSON via Syft)
-        run: |
-          syft dir:. -o cyclonedx-json > sbom-repo.cdx.json
-          test -s sbom-repo.cdx.json
-
-      - name: Generate repo SBOM (SPDX JSON via Syft)
-        run: |
-          syft dir:. -o spdx-json > sbom-repo.spdx.json
-          test -s sbom-repo.spdx.json
-
-      # ---------- Optional: OCI image SBOM ----------
-      - name: Generate image SBOM (if OCI_IMAGE is set)
-        if: ${{ env.OCI_IMAGE != '' }}
-        run: |
-          syft "${{ env.OCI_IMAGE }}" -o cyclonedx-json > sbom-image.cdx.json || true
-          [ -s sbom-image.cdx.json ] && echo "Image SBOM created." || echo "Image SBOM not generated."
-
-      - name: Upload SBOM artifacts
+      - name: Upload SBOMs
         uses: actions/upload-artifact@v4
         with:
           name: sboms
           path: |
-            sbom-repo.cdx.json
-            sbom-repo.spdx.json
-            sbom-python.cdx.json
-            sbom-image.cdx.json
-          if-no-files-found: warn
+            sbom-repo.json
+            sbom-python.json
+            sbom-image.json
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
-  scan:
-    name: Vulnerability Scan (Grype → SARIF)
-    needs: sbom
+  release:
+    name: Create GitHub Release
+    needs: [validate, build, sbom]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    permissions: { contents: write }
     steps:
-      - name: Download SBOM artifacts
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with: { path: release-assets }
+
+      - name: Flatten artifacts into assets/
+        id: gather
+        run: |
+          mkdir -p assets
+          shopt -s globstar nullglob
+          for f in release-assets/**/*; do [ -f "$f" ] && cp -v "$f" assets/; done
+          # include container digest as a text file for convenience
+          echo "${{ needs.build.outputs.image_digest }}" > assets/image-digest.txt
+          echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
+          ls -l assets || true
+
+      - name: Create Release (auto notes)
+        id: gh_release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ needs.validate.outputs.tag }}
+          tag_name: ${{ needs.validate.outputs.tag }}
+          draft: false
+          prerelease: ${{ needs.validate.outputs.prerelease }}
+          generate_release_notes: true
+          files: assets/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log Release URL
+        run: echo "Release => ${{ steps.gh_release.outputs.url }}"
+
+  docs:
+    name: Build & Publish Docs
+    needs: validate
+    runs-on: ubuntu-latest
+    if: ${{ github.ref_type == 'tag' }}   # only on version tags
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install mkdocs + plugins
+        run: |
+          pip install mkdocs mkdocs-material mkdocs-git-revision-date-localized-plugin || true
+
+      - name: Build docs
+        run: mkdocs build --strict
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          publish_branch: gh-pages
+          keep_files: false
+          commit_message: "docs: publish ${{ needs.validate.outputs.tag }}"
+
+  testpypi-publish:
+    name: Publish to TestPyPI (optional)
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
+    permissions: { contents: read }
+    steps:
+      - name: Download python dist
         uses: actions/download-artifact@v5
         with:
-          name: sboms
-          path: sboms
+          name: python-dist
+          path: dist
 
-      - name: Install Grype (vulnerability scanner)
-        uses: anchore/scan-action/download-grype@v6
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
 
-      - name: Scan SBOMs with Grype (produce SARIF per SBOM)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p sarif
-          shopt -s nullglob
-          count=0
-          for sb in sboms/*.json; do
-            base=$(basename "$sb")
-            out="sarif/${base%.json}.sarif"
-            echo "Scanning $sb → $out"
-            grype "sbom:$sb" -o sarif > "$out" || true
-            count=$((count+1))
-          done
-          echo "Scanned $count SBOM(s)."
-          ls -l sarif || true
-
-      - name: Upload SARIF results to Code Scanning
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@v1.13.0
         with:
-          sarif_file: sarif
+          repository-url: https://test.pypi.org/legacy/
+          user: __token__
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          skip-existing: true
 
-      - name: Upload SARIF as artifact (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
+  pypi-publish:
+    name: Publish to PyPI (optional)
+    needs: [validate, build, testpypi-publish]
+    runs-on: ubuntu-latest
+    if: ${{ secrets.PYPI_API_TOKEN != '' }}
+    permissions: { contents: read }
+    steps:
+      - name: Download python dist
+        uses: actions/download-artifact@v5
         with:
-          name: sbom-scan-sarif
-          path: sarif/*.sarif
-          retention-days: 7
+          name: python-dist
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.13.0
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
