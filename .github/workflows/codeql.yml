@@ -44,9 +44,14 @@ jobs:
       security-events: write
 
     env:
+      # Speed / stability
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_PYTHON_VERSION_WARNING: "1"
       PYTHONUTF8: "1"
+      CODEQL_THREADS: "2"        # auto uses cores; cap if you see OOM
+      CODEQL_RAM: "6144"         # MB; tune for longer repos
+      # Optional: reduce noise from unpinned envs
+      # CODEQL_EXTRACTOR_PYTHON_DONT_BUILD_UNNAMED_MODULES: "true"
 
     strategy:
       fail-fast: false
@@ -56,6 +61,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Provide a Python runtime so CodeQL can resolve stdlib/site-packages
       - name: Setup Python
@@ -75,18 +82,19 @@ jobs:
           python -m pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then pip install -e . || true; fi
+          if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
+            pip install -e . || true
+          fi
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
+          # Use GitHub's maintained high-signal query packs
           queries: +security-extended,+security-and-quality
           tools: latest
-          # Optional scope for monorepos
-          # paths: |
-          #   src/
-          #   scripts/
+          # If you keep a custom config, uncomment the next line
+          # config-file: .github/codeql/codeql-config.yml
 
       # For Python this is a safe no-op, keeps parity if other languages are added later
       - name: Autobuild
@@ -97,7 +105,7 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
-          # Fork-safe: skip SARIF upload on forked PRs, but still run analysis
+          # Fork-safe: on PRs from forks, still analyze but skip uploading SARIF
           upload: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
 
       # Keep the database for local debugging (CodeQL CLI)
