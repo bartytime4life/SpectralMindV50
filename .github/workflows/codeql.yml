@@ -20,7 +20,7 @@ on:
       - "requirements*.txt"
       - ".github/workflows/codeql.yml"
   schedule:
-    - cron: "0 5 * * 1"  # Mondays 05:00 UTC
+    - cron: "0 5 * * 1"   # Mondays 05:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -44,13 +44,13 @@ jobs:
       security-events: write
 
     env:
-      # Speed / stability
+      # Stability/perf knobs (tune as needed)
+      CODEQL_THREADS: "2"     # or "0" for auto; 2 reduces OOM risk on GH runners
+      CODEQL_RAM: "6144"      # MB cap
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_PYTHON_VERSION_WARNING: "1"
       PYTHONUTF8: "1"
-      CODEQL_THREADS: "2"        # auto uses cores; cap if you see OOM
-      CODEQL_RAM: "6144"         # MB; tune for longer repos
-      # Optional: reduce noise from unpinned envs
+      # Optional: reduce noise from transient site-packages
       # CODEQL_EXTRACTOR_PYTHON_DONT_BUILD_UNNAMED_MODULES: "true"
 
     strategy:
@@ -59,14 +59,13 @@ jobs:
         language: [ python ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
         with:
           fetch-depth: 0
 
-      # Provide a Python runtime so CodeQL can resolve stdlib/site-packages
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: 🐍 Setup Python (for import resolution)
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -76,42 +75,38 @@ jobs:
             setup.cfg
             setup.py
 
-      # Optional: install deps to improve library/typing resolution for queries
-      - name: Install dependencies (optional)
+      - name: 📦 Install dependencies (optional but improves CodeQL precision)
         run: |
           python -m pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
-            pip install -e . || true
+            pip install -e . || true   # best-effort for extras/entrypoints
           fi
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - name: 🔎 Initialize CodeQL
+        uses: github/codeql-action/init@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           languages: ${{ matrix.language }}
-          # Use GitHub's maintained high-signal query packs
           queries: +security-extended,+security-and-quality
           tools: latest
-          # If you keep a custom config, uncomment the next line
+          # If you maintain a policy/config, enable this:
           # config-file: .github/codeql/codeql-config.yml
 
-      # For Python this is a safe no-op, keeps parity if other languages are added later
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+      - name: 🏗️ Autobuild (no-op for pure Python; safe to keep)
+        uses: github/codeql-action/autobuild@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
 
-      - name: Perform CodeQL Analysis
+      - name: 🧪 Analyze
         id: analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           category: "/language:${{ matrix.language }}"
-          # Fork-safe: on PRs from forks, still analyze but skip uploading SARIF
+          # Fork-safe: analyze but skip SARIF upload for PRs from forks
           upload: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
 
-      # Keep the database for local debugging (CodeQL CLI)
-      - name: Upload CodeQL database (debug)
+      - name: 📤 Upload CodeQL database (for local triage)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: codeql-db-${{ matrix.language }}
           path: ${{ steps.analyze.outputs.database-path }}
