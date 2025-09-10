@@ -1,7 +1,7 @@
 # =====================================================================
-# pyproject.toml — SpectraMind V50 (Upgraded)
+# pyproject.toml — SpectraMind V50 (Upgraded, corrected)
 # ---------------------------------------------------------------------
-# • Reproducible pins (Kaggle/CI safe)
+# • Reproducible pins (Kaggle/CI safe; aligned with runtime/dev files)
 # • Torch stack lives in extras (install locally or in GH Actions)
 # • CLI exposed as `spectramind` (mirrors `python -m spectramind`)
 # • Package-data ensures configs/schemas/diagrams ship inside the wheel
@@ -40,19 +40,19 @@ dependencies = [
   "omegaconf==2.3.0",
   "pydantic==2.7.4",
   "pyyaml==6.0.2",
-  "jsonschema==4.22.0",
+  "jsonschema==4.23.0",
   "packaging==24.1",
 
   # Core scientific stack
   "numpy==1.26.4",
   "scipy==1.11.4",
   "pandas==2.2.2",
-  "polars==1.33.0",
+  "polars==1.5.0",
   "pyarrow==16.1.0",
 
   # Logging / progress / viz
   "tqdm==4.66.4",
-  "rich==14.1.0",
+  "rich==13.7.1",   # keep <14 to avoid conflict with DVC in mixed envs
   "matplotlib==3.8.4",
   "seaborn==0.13.2",
   "umap-learn==0.5.6",
@@ -76,17 +76,19 @@ analysis = [
   "statsmodels==0.14.2",
   "sympy==1.13.1",
   "numba==0.59.1",
+  "llvmlite==0.42.0",  # explicit pair for numba 0.59.x (prevents resolver drift/builds)
 ]
 
 # Dev/test/typing/linting (tool configs live in setup.cfg).
 dev = [
-  "pytest==8.3.3",
-  "pytest-cov==6.0.0",
-  "pytest-xdist==3.5.0",
-  "pytest-timeout==2.3.1",
+  "pytest==8.4.2",
+  "pytest-cov==6.3.0",
+  "pytest-xdist==3.8.0",
+  "pytest-timeout==2.4.0",
+  "pytest-rerunfailures==14.0",
   "hypothesis==6.112.0",
-  "ruff==0.6.3",
-  "mypy==1.11.2",
+  "ruff==0.12.12",
+  "mypy==1.17.1",
   "typing-extensions==4.12.2",
   "toml-sort==0.23.1",
   "check-jsonschema==0.33.3",
@@ -109,7 +111,7 @@ docs = [
 
 security = [
   "pip-audit==2.7.3",
-  "cyclonedx-bom==7.1.0",
+  "cyclonedx-bom==4.3.2",
   # "bandit==1.7.9",
 ]
 
