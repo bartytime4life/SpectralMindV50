@@ -1,24 +1,37 @@
 # .github/dependabot.yml
 # SpectraMind V50 — Dependabot configuration
-# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+# Docs:
+#   • Configuration: https://docs.github.com/code-security/dependabot/dependabot-version-updates
+#   • Ecosystems:    https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+# Notes:
+#   • Use UTC everywhere for deterministic scheduling in CI.
+#   • Prefer grouping to reduce PR noise.
+#   • Keep PR caps sane; allow direct deps first; bump version only when needed.
 
 version: 2
+
 updates:
   # ────────────────────────────────
-  # Python (pip/Poetry/requirements)
+  # Python (pip / pyproject / requirements-*.txt)
   # ────────────────────────────────
   - package-ecosystem: "pip"
-    directory: "/"                     # root (pyproject.toml, setup.cfg, requirements-*.txt)
+    directory: "/"                       # root (pyproject.toml, setup.cfg, requirements-*.txt)
     schedule:
-      interval: "weekly"               # check once a week
+      interval: "weekly"
       day: "sunday"
       time: "03:00"
+      timezone: "UTC"
+    # Only bump when necessary (avoid premature major bumps)
+    versioning-strategy: increase-if-necessary
+    # Prefer direct dependencies to keep review scope tight
+    allow:
+      - dependency-type: "direct"
+    open-pull-requests-limit: 10
     commit-message:
       prefix: "deps(python)"
-    open-pull-requests-limit: 10
-    labels:
-      - dependencies
-      - python
+      include: "scope"
+    labels: [dependencies, python]
+    # Grouping reduces churn; keep safety-critical libs separate if desired
     groups:
       dev-deps:
         patterns:
@@ -26,6 +39,37 @@ updates:
           - "mypy*"
           - "flake8*"
           - "ruff*"
+          - "coverage*"
+          - "hypothesis*"
+      sci-stack:
+        patterns:
+          - "numpy"
+          - "scipy*"
+          - "pandas*"
+          - "numba*"
+          - "xarray*"
+      viz:
+        patterns:
+          - "matplotlib*"
+          - "seaborn*"
+          - "plotly*"
+      torch:
+        patterns:
+          - "torch*"
+          - "pytorch*"
+          - "lightning*"
+      io-mlops:
+        patterns:
+          - "dvc*"
+          - "mlflow*"
+          - "hydra*"
+          - "omegaconf*"
+    # Ignore families that frequently churn platforms or require manual CUDA alignment
+    ignore:
+      - dependency-name: "torch*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pytorch*"
+        update-types: ["version-update:semver-major"]
 
   # ────────────────────────────────
   # GitHub Actions
@@ -36,12 +80,31 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "02:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(actions)"
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - ci
+      include: "scope"
+    labels: [dependencies, ci]
+    # Group common action vendors to cut PR noise
+    groups:
+      github:
+        patterns:
+          - "actions/*"
+          - "github/*"
+      docker:
+        patterns:
+          - "docker/*"
+          - "docker/*-action*"
+      security:
+        patterns:
+          - "aquasecurity/*"
+          - "anchore/*"
+          - "github/codeql-action*"
+      python-setup:
+        patterns:
+          - "actions/setup-python*"
+          - "pypa/*"
 
   # ────────────────────────────────
   # Dockerfile base images
@@ -52,9 +115,34 @@ updates:
       interval: "weekly"
       day: "tuesday"
       time: "04:00"
+      timezone: "UTC"
     commit-message:
       prefix: "deps(docker)"
-    labels:
-      - dependencies
-      - docker
+      include: "scope"
+    labels: [dependencies, docker]
+    open-pull-requests-limit: 5
+    # Avoid constant major jumps for CUDA / base images
+    ignore:
+      - dependency-name: "*cuda*"
+        update-types: ["version-update:semver-major"]
 
+  # ────────────────────────────────
+  # (Optional) NPM for docs site or UI assets (uncomment if used)
+  # ────────────────────────────────
+  # - package-ecosystem: "npm"
+  #   directory: "/docs"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "wednesday"
+  #     time: "01:00"
+  #     timezone: "UTC"
+  #   open-pull-requests-limit: 5
+  #   commit-message:
+  #     prefix: "deps(docs)"
+  #     include: "scope"
+  #   labels: [dependencies, docs]
+
+# Tips:
+# • Consider enabling repo-level “auto-merge” for Dependabot PRs with passing checks (patch/minor),
+#   or gate via CODEOWNERS for safety-critical libs (torch, CUDA, code scanning actions).
+# • Keep PR caps aligned with reviewer bandwidth; tighten groups if noise increases.
