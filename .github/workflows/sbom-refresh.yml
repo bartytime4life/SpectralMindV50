@@ -6,7 +6,6 @@ on:
       - 'v*'              # e.g. v1.2.0, v1.2.0-rc.1
   workflow_dispatch:
 
-# Least privilege by default; escalate per job only when needed
 permissions:
   contents: read
   actions: read
@@ -24,8 +23,7 @@ env:
   VERSION_FILE: VERSION
   KAGGLE_BUNDLE: artifacts/submission.zip
   ARTIFACT_RETENTION_DAYS: 30
-  # Set to "linux/amd64,linux/arm64" for multi-arch
-  RELEASE_PLATFORMS: 'linux/amd64'
+  RELEASE_PLATFORMS: 'linux/amd64'   # set to "linux/amd64,linux/arm64" for multi-arch
 
 jobs:
   validate:
@@ -75,9 +73,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # upload artifacts
-      packages: write      # push GHCR image
-      id-token: write      # keyless signing/attestations
+      contents: write
+      packages: write
+      id-token: write
     outputs:
       ver: ${{ steps.v.outputs.ver }}
       image_digest: ${{ steps.buildx.outputs.digest }}
@@ -243,7 +241,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write   # for SARIF upload
+      security-events: write
       packages: read
     steps:
       - name: Checkout
@@ -391,7 +389,30 @@ jobs:
           echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
           ls -l assets || true
 
-      - name: Create Release (auto notes)
+      - name: Extract CHANGELOG section (if present)
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.validate.outputs.tag }}"
+          body=""
+          if [ -f CHANGELOG.md ]; then
+            # naive extractor: section starting with "## tag" up to next "## "
+            body="$(awk -v t="## ${tag}" '
+              $0==t {print;flag=1;next}
+              /^## / && flag {exit}
+              flag {print}
+            ' CHANGELOG.md | sed '1d')"
+          fi
+          body="${body:-}"
+          printf '%s' "$body" > RELEASE_BODY.md
+          if [ -s RELEASE_BODY.md ]; then
+            echo "has_body=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_body=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Release (auto notes or extracted changelog)
         id: gh_release
         uses: softprops/action-gh-release@v2
         with:
@@ -399,19 +420,25 @@ jobs:
           tag_name: ${{ needs.validate.outputs.tag }}
           draft: false
           prerelease: ${{ needs.validate.outputs.prerelease }}
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.changelog.outputs.has_body != 'true' }}
+          body_path: ${{ steps.changelog.outputs.has_body == 'true' && 'RELEASE_BODY.md' || '' }}
           files: assets/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log Release URL
-        run: echo "Release => ${{ steps.gh_release.outputs.url }}"
+      - name: Release summary
+        if: always()
+        run: |
+          echo "### Release assets" >> $GITHUB_STEP_SUMMARY
+          ls -1 assets | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Release URL: ${{ steps.gh_release.outputs.url }}" >> $GITHUB_STEP_SUMMARY
 
   docs:
     name: Build & Publish Docs
     needs: validate
     runs-on: ubuntu-latest
-    if: ${{ github.ref_type == 'tag' }}   # only on version tags
+    if: ${{ github.ref_type == 'tag' }}
     permissions:
       contents: read
       pages: write
