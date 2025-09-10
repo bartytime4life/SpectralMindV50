@@ -68,7 +68,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install "ruff>=0.4,<1.0" "pre-commit>=3,<4"
+          pip install "ruff>=0.5,<1.0" "pre-commit>=3,<4"
 
       - name: Ruff check (github format)
         run: ruff check --output-format=github .
@@ -96,8 +96,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install "mypy>=1.7,<2" types-PyYAML types-requests
-          # Install package in editable for import resolution
+          pip install "mypy>=1.8,<2" types-PyYAML types-requests
           pip install -e .
       - name: mypy
         run: mypy src
@@ -122,21 +121,44 @@ jobs:
       - name: Load all Hydra/YAML configs
         run: |
           python - << 'PY'
-          import glob
+          import glob, sys
           from omegaconf import OmegaConf
           files = sorted(glob.glob('configs/**/*.yaml', recursive=True))
-          for f in files:
-              OmegaConf.load(f)
+          for f in files: OmegaConf.load(f)
           print(f"Loaded {len(files)} config files OK")
           PY
       - name: Validate submission schema presence
         run: |
           test -f schemas/submission.schema.json && echo "Found schemas/submission.schema.json"
+      - name: Validate any submissions against schema (if present)
+        run: |
+          python - << 'PY'
+          import json, glob, sys
+          from jsonschema import validate, Draft202012Validator
+          import jsonschema
+          import pathlib
+          schema_path = pathlib.Path("schemas/submission.schema.json")
+          if not schema_path.exists():
+              print("No schema found; skipping.")
+              sys.exit(0)
+          schema = json.loads(schema_path.read_text())
+          validator = Draft202012Validator(schema)
+          bad = 0; checked = 0
+          for f in glob.glob("artifacts/**/submission*.json", recursive=True):
+              checked += 1
+              data = json.loads(open(f).read())
+              errs = sorted(validator.iter_errors(data), key=lambda e: e.path)
+              if errs:
+                  bad += 1
+                  print(f"ERROR: {f} failed schema with {len(errs)} issue(s)")
+          print(f"Checked {checked} submission JSON file(s); failures={bad}")
+          sys.exit(1 if bad else 0)
+          PY
 
   tests:
     name: Unit tests (Py ${{ matrix.py }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -160,16 +182,26 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           pip install -e .
-          pip install "pytest>=8,<9" "pytest-cov>=4,<5"
+          pip install "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
 
-      - name: PyTest (fast)
+      - name: PyTest (fast) + coverage
         env:
           PYTHONWARNINGS: "ignore::DeprecationWarning"
         run: |
-          pytest -q --disable-warnings --maxfail=1 \
-            --cov=src/spectramind --cov-report=xml:coverage.xml
+          pytest -q -n auto --disable-warnings --maxfail=1 \
+            --cov=src --cov-report=xml:coverage.xml \
+            --durations=25
 
-      - name: Upload coverage & JUnit (if present)
+      - name: Summarize tests
+        if: always()
+        run: |
+          echo "### pytest (slowest 25)" >> $GITHUB_STEP_SUMMARY
+          grep -A1000 "slowest" -n tests/.pytest_cache/v/cache/lastfailed 2>/dev/null || true
+          if [ -f coverage.xml ]; then
+            echo "### coverage.xml present" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload coverage & artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -229,7 +261,7 @@ jobs:
   package:
     name: Build & verify package
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     needs: [lint, types, config-sanity, tests]
     steps:
       - uses: actions/checkout@v4
@@ -248,6 +280,16 @@ jobs:
           python -m build
           twine check dist/*
           ls -lh dist/
+
+      - name: Smoke import from built wheel
+        run: |
+          python -m venv .venv_pkg && . .venv_pkg/bin/activate
+          pip install dist/*.whl
+          python - <<'PY'
+          import importlib, sys
+          m = importlib.import_module("spectramind")
+          print("Imported spectramind OK:", m.__name__, "Py", sys.version.split()[0])
+          PY
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
