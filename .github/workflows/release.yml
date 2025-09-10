@@ -6,12 +6,12 @@ on:
       - 'v*'                    # e.g. v1.2.0, v1.2.0-rc.1
   workflow_dispatch:
 
-# Default to least privilege; escalate per job as needed
 permissions:
   contents: read
   actions: read
   packages: read
   id-token: none
+  security-events: none
 
 concurrency:
   group: release-${{ github.ref }}
@@ -132,6 +132,7 @@ jobs:
             mkdir -p artifacts
             bash scripts/package_submission.sh
             test -f "${{ env.KAGGLE_BUNDLE }}" || echo "::warning::Kaggle bundle expected at ${{ env.KAGGLE_BUNDLE }} not found"
+            ( cd artifacts && sha256sum "$(basename "${{ env.KAGGLE_BUNDLE }}")" > SUBMISSION.SHA256SUM )
           else
             echo "No scripts/package_submission.sh; skipping Kaggle bundle."
           fi
@@ -149,7 +150,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kaggle-submission
-          path: ${{ env.KAGGLE_BUNDLE }}
+          path: |
+            ${{ env.KAGGLE_BUNDLE }}
+            artifacts/SUBMISSION.SHA256SUM
           retention-days: 14
 
       - name: Upload diagnostics & metrics (if present)
@@ -182,8 +185,11 @@ jobs:
             type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=SpectraMind V50
+            org.opencontainers.image.description=NeurIPS 2025 Ariel Data Challenge — Spectral extraction & submission toolkit
             org.opencontainers.image.version=${{ needs.validate.outputs.tag }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -231,6 +237,48 @@ jobs:
           subject-digest: ${{ steps.buildx.outputs.digest }}
           push-to-registry: true
 
+  scan:
+    name: Trivy FS & Image Scan
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # for SARIF upload
+      actions: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy (filesystem)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          format: sarif
+          output: trivy-fs.sarif
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Run Trivy (image)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.ver }}
+          format: sarif
+          output: trivy-image.sarif
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Upload Trivy SARIF (FS)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+
+      - name: Upload Trivy SARIF (Image)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+
   sbom:
     name: Generate SBOMs
     needs: build
@@ -273,7 +321,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, build, sbom]
+    needs: [validate, build, sbom, scan]
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:
@@ -290,7 +338,6 @@ jobs:
           mkdir -p assets
           shopt -s globstar nullglob
           for f in release-assets/**/*; do [ -f "$f" ] && cp -v "$f" assets/; done
-          # include container digest as a text file for convenience
           echo "${{ needs.build.outputs.image_digest }}" > assets/image-digest.txt
           echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
           ls -l assets || true
@@ -315,7 +362,7 @@ jobs:
     name: Build & Publish Docs
     needs: validate
     runs-on: ubuntu-latest
-    if: ${{ github.ref_type == 'tag' }}   # only on version tags
+    if: ${{ github.ref_type == 'tag' }}
     permissions:
       contents: read
       pages: write
@@ -347,9 +394,43 @@ jobs:
           keep_files: false
           commit_message: "docs: publish ${{ needs.validate.outputs.tag }}"
 
+  verify-dist:
+    name: Verify dist checksums & signatures
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ secrets.PYPI_API_TOKEN != '' || secrets.TEST_PYPI_API_TOKEN != '' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download python dist
+        uses: actions/download-artifact@v5
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Verify signatures (OIDC, repo subject)
+        working-directory: dist
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          for f in *; do
+            [ -f "$f.sig" ] || continue
+            cosign verify-blob \
+              --certificate "$f.cert" \
+              --signature "$f.sig" \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "$f"
+          done
+
   testpypi-publish:
     name: Publish to TestPyPI (optional)
-    needs: [validate, build]
+    needs: [validate, build, verify-dist]
     runs-on: ubuntu-latest
     if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
     permissions: { contents: read }
@@ -374,7 +455,7 @@ jobs:
 
   pypi-publish:
     name: Publish to PyPI (optional)
-    needs: [validate, build, testpypi-publish]
+    needs: [validate, build, verify-dist, testpypi-publish]
     runs-on: ubuntu-latest
     if: ${{ secrets.PYPI_API_TOKEN != '' }}
     permissions: { contents: read }
