@@ -43,6 +43,11 @@ jobs:
       contents: read
       security-events: write
 
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_PYTHON_VERSION_WARNING: "1"
+      PYTHONUTF8: "1"
+
     strategy:
       fail-fast: false
       matrix:
@@ -50,11 +55,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       # Provide a Python runtime so CodeQL can resolve stdlib/site-packages
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -78,12 +83,12 @@ jobs:
           languages: ${{ matrix.language }}
           queries: +security-extended,+security-and-quality
           tools: latest
-          # For mono-repos, you can scope analysis with 'paths' / 'paths-ignore'
+          # Optional scope for monorepos
           # paths: |
           #   src/
           #   scripts/
 
-      # Safe no-op for Python and keeps parity if other languages are added later
+      # For Python this is a safe no-op, keeps parity if other languages are added later
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
@@ -92,7 +97,8 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
-          upload: true
+          # Fork-safe: skip SARIF upload on forked PRs, but still run analysis
+          upload: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
 
       # Keep the database for local debugging (CodeQL CLI)
       - name: Upload CodeQL database (debug)
