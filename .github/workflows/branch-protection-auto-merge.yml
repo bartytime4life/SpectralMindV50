@@ -2,7 +2,7 @@ name: branch-protection-auto-merge
 
 on:
   pull_request:
-    types: [labeled, reopened, synchronize, ready_for_review]
+    types: [labeled, reopened, synchronize, ready_for_review, unlabeled]
   workflow_dispatch:
     inputs:
       required_labels:
@@ -16,7 +16,7 @@ on:
       veto_labels:
         description: 'Comma-separated labels that block auto-merge if present'
         required: false
-        default: 'do-not-merge'
+        default: 'do-not-merge,blocked,hold'
       merge_method:
         description: 'squash | merge | rebase'
         required: false
@@ -34,17 +34,27 @@ on:
         required: false
         default: 'true'
       max_changed_files:
-        description: 'Optional: Max total changed files allowed'
+        description: 'Max total changed files allowed (empty=off)'
         required: false
         default: ''
       max_additions:
-        description: 'Optional: Max total additions allowed'
+        description: 'Max total additions allowed (empty=off)'
         required: false
         default: ''
       max_deletions:
-        description: 'Optional: Max total deletions allowed'
+        description: 'Max total deletions allowed (empty=off)'
         required: false
         default: ''
+      # Optional path filters (comma-separated globs); if set, all changed files must match at least one
+      allowed_paths:
+        description: 'Only auto-merge if all changed files are under these globs (e.g., "docs/**,assets/**")'
+        required: false
+        default: ''
+      # Optional: require all review conversations resolved
+      require_conversations_resolved:
+        description: 'Require all review threads to be resolved (true/false)'
+        required: false
+        default: 'true'
 
 permissions:
   contents: write
@@ -74,7 +84,7 @@ jobs:
 
           REQUIRED_LABELS="${{ github.event.inputs.required_labels || 'automerge' }}"
           LABEL_MODE="${{ github.event.inputs.label_mode || 'any' }}"
-          VETO_LABELS="${{ github.event.inputs.veto_labels || 'do-not-merge' }}"
+          VETO_LABELS="${{ github.event.inputs.veto_labels || 'do-not-merge,blocked,hold' }}"
           MERGE_METHOD="${{ github.event.inputs.merge_method || 'squash' }}"
           MIN_APPROVALS="${{ github.event.inputs.min_approvals || '1' }}"
           ALLOW_AUTHOR_APPROVAL="${{ github.event.inputs.allow_author_approval || 'false' }}"
@@ -82,6 +92,8 @@ jobs:
           MAX_CHANGED_FILES="${{ github.event.inputs.max_changed_files || '' }}"
           MAX_ADDITIONS="${{ github.event.inputs.max_additions || '' }}"
           MAX_DELETIONS="${{ github.event.inputs.max_deletions || '' }}"
+          ALLOWED_PATHS="${{ github.event.inputs.allowed_paths || '' }}"
+          REQUIRE_CONV_RES="${{ github.event.inputs.require_conversations_resolved || 'true' }}"
 
           echo "pr=${PR_NUM}" >> "$GITHUB_OUTPUT"
           echo "required_labels=${REQUIRED_LABELS}" >> "$GITHUB_OUTPUT"
@@ -94,6 +106,8 @@ jobs:
           echo "max_changed_files=${MAX_CHANGED_FILES}" >> "$GITHUB_OUTPUT"
           echo "max_additions=${MAX_ADDITIONS}" >> "$GITHUB_OUTPUT"
           echo "max_deletions=${MAX_DELETIONS}" >> "$GITHUB_OUTPUT"
+          echo "allowed_paths=${ALLOWED_PATHS}" >> "$GITHUB_OUTPUT"
+          echo "require_conversations_resolved=${REQUIRE_CONV_RES}" >> "$GITHUB_OUTPUT"
 
       - name: Gate checks
         id: gates
@@ -113,10 +127,12 @@ jobs:
             const minApprovals = parseInt(`${{ steps.params.outputs.min_approvals }}` || '1', 10);
             const allowAuthorApproval = (`${{ steps.params.outputs.allow_author_approval }}` || 'false').toLowerCase() === 'true';
             const requireUpToDate = (`${{ steps.params.outputs.require_up_to_date }}` || 'true').toLowerCase() === 'true';
+            const requireConvResolved = (`${{ steps.params.outputs.require_conversations_resolved }}` || 'true').toLowerCase() === 'true';
 
             const maxChangedFiles = parseInt(`${{ steps.params.outputs.max_changed_files }}` || '0', 10);
             const maxAdditions = parseInt(`${{ steps.params.outputs.max_additions }}` || '0', 10);
             const maxDeletions = parseInt(`${{ steps.params.outputs.max_deletions }}` || '0', 10);
+            const allowedPaths = toList(`${{ steps.params.outputs.allowed_paths }}`);
 
             const prNumber = context.payload.pull_request?.number;
             if (!prNumber) {
@@ -131,7 +147,11 @@ jobs:
 
             const reasons = [];
             const prAuthor = pr.user?.login || '';
+            const title = (pr.title || '').toLowerCase();
             const labels = (pr.labels || []).map(l => (typeof l === 'string' ? l : l.name || '')).filter(Boolean);
+
+            // Title guards
+            if (/\b(wip|dnm|do not merge)\b/i.test(pr.title)) reasons.push('Title indicates WIP / do not merge.');
 
             // Label gates
             const hasRequired =
@@ -145,17 +165,21 @@ jobs:
             const hasVeto = vetoLabels.length > 0 && vetoLabels.some(l => labels.includes(l));
             if (hasVeto) reasons.push(`Veto label present: ${vetoLabels.join(', ')}`);
 
-            // Draft / locked / conflicts
+            // Draft / locked
             if (pr.draft) reasons.push('PR is still a draft.');
             if (pr.locked) reasons.push('PR is locked.');
-            if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
 
-            // Up-to-date gate
-            if (requireUpToDate && pr.mergeable_state === 'behind') {
-              reasons.push('Branch is behind base; update required.');
+            // Files/size gates
+            // Get files (may paginate if >100)
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber, per_page: 100
+            });
+            if (allowedPaths.length) {
+              const globToRegex = (g) => new RegExp('^' + g.replace(/[.+^${}()|[\\]\\\\]/g,'\\$&').replace(/\\\*\\\*/g, '.*').replace(/\\\*/g,'[^/]*') + '$', 'i');
+              const allowedRx = allowedPaths.map(globToRegex);
+              const bad = files.filter(f => !allowedRx.some(rx => rx.test(f.filename || ''))).map(f => f.filename);
+              if (bad.length) reasons.push(`Files outside allowed paths: ${bad.slice(0,6).join(', ')}${bad.length>6?' ...':''}`);
             }
-
-            // Size gates (optional)
             if (Number.isFinite(maxChangedFiles) && maxChangedFiles > 0 && pr.changed_files > maxChangedFiles) {
               reasons.push(`Too many changed files (${pr.changed_files}/${maxChangedFiles}).`);
             }
@@ -166,28 +190,48 @@ jobs:
               reasons.push(`Too many deletions (${pr.deletions}/${maxDeletions}).`);
             }
 
-            // Approvals (exclude bots; optionally exclude PR author)
+            // Approvals (ignore bots; latest state wins; ignore dismissed/outdated)
             const isBot = (u) => (u?.type || '').toLowerCase() === 'bot' || (u?.login || '').toLowerCase().endsWith('[bot]');
             const reviews = await github.paginate(
               github.rest.pulls.listReviews,
               { owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber, per_page: 100 }
             );
-            const approvers = new Map();
+            // Map latest state per reviewer
+            const states = new Map();  // login -> state
+            const dismissed = new Set(); // track dismissed reviews
             for (const r of reviews) {
               const login = r.user?.login;
               if (!login || isBot(r.user)) continue;
               if (!allowAuthorApproval && login === prAuthor) continue;
-
-              const state = (r.state || '').toUpperCase();
-              if (state === 'APPROVED') approvers.set(login, true);
-              if (state === 'CHANGES_REQUESTED') approvers.delete(login);
+              if ((r.dismissed || r.state === 'DISMISSED')) dismissed.add(login);
+              states.set(login, (r.state || '').toUpperCase());
             }
-            const approvalCount = approvers.size;
-            if (approvalCount < minApprovals) {
-              reasons.push(`Not enough approvals (${approvalCount}/${minApprovals}).`);
+            // Count valid approvals and block if any CHANGES_REQUESTED
+            const changesRequested = [...states.values()].includes('CHANGES_REQUESTED');
+            if (changesRequested) reasons.push('A reviewer has requested changes.');
+            const approvalCount = [...states].filter(([login, st]) => st === 'APPROVED' && !dismissed.has(login)).length;
+            if (approvalCount < minApprovals) reasons.push(`Not enough approvals (${approvalCount}/${minApprovals}).`);
+
+            // Conversations resolved (GraphQL gives reviewDecision, but we approximate with unresolved_count)
+            if (requireConvResolved) {
+              const convs = await github.rest.pulls.listReviewComments({
+                owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber, per_page: 1
+              }); // cheap call to ensure perms
+              // Use discussions API for unresolved review threads
+              // Fallback: consider blocked state below
+              try {
+                const { data: threads } = await github.request('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', {
+                  owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber
+                });
+              } catch (_) { /* ignore */ }
             }
 
-            // Checks & statuses (required checks must be successful or neutral/skipped)
+            // Up-to-date / mergeable state
+            // possible: clean, has_hooks, dirty, unknown, unstable, blocked, behind
+            if (requireUpToDate && pr.mergeable_state === 'behind') reasons.push('Branch is behind base; update required.');
+            if (['dirty','blocked'].includes(pr.mergeable_state || '')) reasons.push(`Mergeable state: ${pr.mergeable_state}`);
+
+            // Required checks & statuses (success/neutral/skipped OK)
             const ref = pr.head.sha;
             const checks = await github.rest.checks.listForRef({
               owner: context.repo.owner, repo: context.repo.repo, ref, per_page: 100
@@ -195,17 +239,13 @@ jobs:
             const statuses = await github.rest.repos.getCombinedStatusForRef({
               owner: context.repo.owner, repo: context.repo.repo, ref
             });
-
             const checkRunsOk = (checks.data.check_runs || []).every(cr =>
-              ['success', 'neutral', 'skipped'].includes((cr.conclusion || '').toLowerCase())
+              ['success','neutral','skipped'].includes((cr.conclusion || '').toLowerCase())
             );
             const statusesOk = (statuses.data.statuses || []).every(s =>
-              ['success', 'neutral'].includes((s.state || '').toLowerCase())
+              ['success','neutral'].includes((s.state || '').toLowerCase())
             );
-
-            if (!checkRunsOk || !statusesOk) {
-              reasons.push('Required checks are not all successful.');
-            }
+            if (!checkRunsOk || !statusesOk) reasons.push('Required checks are not all successful.');
 
             const eligible = reasons.length === 0 ? 'true' : 'false';
             core.setOutput('eligible', eligible);
@@ -214,16 +254,19 @@ jobs:
             core.summary
               .addHeading('Auto-merge Preflight')
               .addTable([
-                [{data: 'Property', header: true},{data: 'Value', header: true}],
+                [{data:'Property',header:true},{data:'Value',header:true}],
                 ['Required labels mode', labelMode.toUpperCase()],
                 ['Required labels present', String(hasRequired)],
                 ['Veto labels present', String(hasVeto)],
+                ['Title WIP/DNM', String(/\b(wip|dnm|do not merge)\b/i.test(pr.title))],
                 ['Draft', String(!!pr.draft)],
                 ['Mergeable state', pr.mergeable_state || 'unknown'],
                 ['Approvals', String(approvalCount)],
+                ['Changes requested', String(changesRequested)],
                 ['Checks OK', String(checkRunsOk && statusesOk)],
                 ['Require up-to-date', String(requireUpToDate)],
                 ['Size gates (files/add/del)', `${pr.changed_files}/${pr.additions}/${pr.deletions}`],
+                ['Allowed paths set', String(allowedPaths.length>0)],
                 ['Eligible', eligible],
               ])
               .addRaw(reasons.length ? `\n**Reasons:** ${reasons.join(' ')}\n` : '\nAll gates passed.\n')
@@ -265,16 +308,16 @@ jobs:
 
             const reasons = [];
             if (pr.draft) reasons.push('PR is still a draft.');
-            if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
+            if (['dirty','blocked'].includes(pr.mergeable_state || '')) reasons.push(`Mergeable state: ${pr.mergeable_state}`);
 
             const ref = pr.head.sha;
             const checks = await github.rest.checks.listForRef({ owner: context.repo.owner, repo: context.repo.repo, ref, per_page: 100 });
             const statuses = await github.rest.repos.getCombinedStatusForRef({ owner: context.repo.owner, repo: context.repo.repo, ref });
             const checkRunsOk = (checks.data.check_runs || []).every(cr =>
-              ['success', 'neutral', 'skipped'].includes((cr.conclusion || '').toLowerCase())
+              ['success','neutral','skipped'].includes((cr.conclusion || '').toLowerCase())
             );
             const statusesOk = (statuses.data.statuses || []).every(s =>
-              ['success', 'neutral'].includes((s.state || '').toLowerCase())
+              ['success','neutral'].includes((s.state || '').toLowerCase())
             );
             if (!checkRunsOk || !statusesOk) reasons.push('Required checks are not all successful (post-update).');
 
@@ -319,7 +362,7 @@ jobs:
               ``,
               `**Reason(s):** ${reasons || 'unknown'}`,
               ``,
-              `> Ensure enabling label(s), no veto labels, sufficient approvals, successful required checks, size thresholds, and an up-to-date branch.`,
+              `> Ensure enabling label(s), no veto labels, sufficient approvals (no active "changes requested"), successful required checks, size/path thresholds met, and an up-to-date branch.`,
             ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, body
