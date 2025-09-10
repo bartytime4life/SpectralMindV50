@@ -51,11 +51,11 @@ jobs:
         python-version: [ "3.10", "3.11", "3.12" ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: 🐍 Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -66,8 +66,8 @@ jobs:
             setup.cfg
             setup.py
 
-      - name: Prime caches (mypy/pytest/ruff)
-        uses: actions/cache@v4
+      - name: ♻️ Prime caches (mypy/pytest/ruff)
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: |
             .mypy_cache
@@ -77,7 +77,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.python-version }}-lintcache-
 
-      - name: Install dependencies
+      - name: 📦 Install dependencies
         run: |
           python -m pip install --upgrade pip wheel
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
@@ -87,28 +87,29 @@ jobs:
             "ruff>=0.5,<1.0" "flake8>=7,<8" "mypy>=1.10,<2" \
             "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
 
-      - name: Pre-commit (optional)
+      - name: 🔧 Pre-commit (optional)
         if: hashFiles('.pre-commit-config.yaml') != ''
         run: |
           python -m pip install "pre-commit>=3,<4"
           pre-commit run --all-files --show-diff-on-failure
 
-      - name: Ruff (format check)
+      - name: 🎨 Ruff (format check)
         run: ruff format --check .
 
-      - name: Ruff (lint) → SARIF + check
+      - name: 🔍 Ruff (lint) → SARIF + check
         run: |
           ruff check src/ tests/
           ruff check src/ tests/ --output-format sarif > ruff.sarif || true
           test -s ruff.sarif || echo '{"runs":[]}' > ruff.sarif
 
-      - name: Flake8 (lint)
-        run: flake8 src/ tests/
+      - name: 🐍 Flake8 (lint)
+        run: |
+          flake8 src/ tests/ || (echo "::warning::flake8 found issues (see job log)"; exit 1)
 
-      - name: Typecheck (mypy)
+      - name: 🧠 Typecheck (mypy)
         run: mypy src/
 
-      - name: Run unit tests (pytest + coverage)
+      - name: 🧪 Unit tests (pytest + coverage)
         env:
           SM_SUBMISSION_BINS: "283"
           PYTEST_ADDOPTS: "-q"
@@ -119,9 +120,9 @@ jobs:
             --durations=25 \
             --junitxml=reports/tests-junit.xml
 
-      - name: Upload artifacts
+      - name: 📤 Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: ci-reports-${{ matrix.python-version }}
           path: |
@@ -129,30 +130,30 @@ jobs:
             reports/
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
-      - name: Upload Ruff SARIF (skip on fork PRs)
+      - name: ⬆️ Upload Ruff SARIF (skip on fork PRs)
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: ruff.sarif
           category: ruff-lint
 
-      - name: Publish Unit Test Results to Job Summary
+      - name: 🧾 Publish Unit Test Results to Job Summary
         if: always()
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: EnricoMi/publish-unit-test-result-action@3f5660f3a9cf74aa02543a9f6f05e07e07d5e7db # v2
         with:
           files: reports/tests-junit.xml
 
-      - name: Publish Coverage Summary to Job Summary
+      - name: 📈 Publish Coverage Summary to Job Summary
         if: always()
-        uses: irongut/CodeCoverageSummary@v1.3.0
+        uses: irongut/CodeCoverageSummary@66b9cfd6a931ef682a0aabfa4b8a711c823ad950 # v1.3.0
         with:
           filename: reports/coverage.xml
           format: markdown
           output: both
 
-      - name: Upload coverage to Codecov (optional)
+      - name: ☔ Upload coverage to Codecov (optional)
         if: ${{ secrets.CODECOV_TOKEN != '' }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@4fe8c5f003fae6d2b30dcf8a67b9f1c9c3b87460 # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: reports/coverage.xml
@@ -166,11 +167,11 @@ jobs:
     needs: [ lint-test-typecheck ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -180,7 +181,7 @@ jobs:
             setup.cfg
             setup.py
 
-      - name: Build sdist/wheel (deterministic)
+      - name: 🏗️ Build sdist/wheel (deterministic)
         env:
           SOURCE_DATE_EPOCH: "1704067200"  # 2024-01-01 for reproducible builds
         run: |
@@ -189,7 +190,7 @@ jobs:
           twine check dist/*
           ls -lh dist/
 
-      - name: Install built wheel and import
+      - name: 🔬 Install built wheel and import
         run: |
           python -m pip install dist/*.whl
           python - <<'PY'
@@ -199,9 +200,9 @@ jobs:
           print(f"Imported {pkg} OK with Python {sys.version.split()[0]}")
           PY
 
-      - name: Upload build artifacts
+      - name: 📤 Upload build artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: dist-artifacts
           path: dist/*
@@ -214,11 +215,11 @@ jobs:
     needs: [ lint-test-typecheck ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: 🐍 Setup Python 3.11
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -228,10 +229,10 @@ jobs:
             setup.cfg
             setup.py
 
-      - name: Install pip-audit
-        run: python -m pip install --upgrade pip pip-audit
+      - name: 🔧 Install pip-audit
+        run: python -m pip install --upgrade pip "pip-audit>=2.7,<3"
 
-      - name: Run pip-audit (best-effort) → SARIF
+      - name: 🔍 Run pip-audit (best-effort) → SARIF
         run: |
           if ls requirements*.txt >/dev/null 2>&1; then
             : > pip-audit.sarif
@@ -245,9 +246,9 @@ jobs:
           fi
           test -s pip-audit.sarif || echo '{"runs":[]}' > pip-audit.sarif
 
-      - name: Upload SARIF (pip-audit) (skip on fork PRs)
+      - name: ⬆️ Upload SARIF (pip-audit) (skip on fork PRs)
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: pip-audit.sarif
           category: pip-audit
