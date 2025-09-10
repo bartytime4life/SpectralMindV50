@@ -18,9 +18,9 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  # Set to "none" (default) to never fail CI, or "critical|high|medium|low" to gate merges.
+  # Set to "none" (default) to never fail CI, or one of: critical | high | medium | low
   AUDIT_FAIL_ON: "none"
-  # Pin pip-audit for reproducibility (update occasionally)
+  # Pin pip-audit for reproducibility (update periodically)
   PIP_AUDIT_VERSION: "2.7.3"
 
 jobs:
@@ -38,11 +38,17 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
 
-      - name: Install pip-audit
+      - name: Install tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install "pip-audit==${PIP_AUDIT_VERSION}"
+          sudo apt-get update && sudo apt-get install -y jq
 
       - name: Discover requirement files
         id: discover
@@ -50,12 +56,12 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t REQS < <(git ls-files \
-              ':!:**/.venv/**' \
-              ':!:**/site-packages/**' \
-              '**/requirements*.txt' \
-              'requirements.txt' \
-              'requirements-dev.txt' \
-              'requirements-kaggle.txt' 2>/dev/null | sort -u || true)
+            ':!:**/.venv/**' \
+            ':!:**/site-packages/**' \
+            '**/requirements*.txt' \
+            'requirements.txt' \
+            'requirements-dev.txt' \
+            'requirements-kaggle.txt' 2>/dev/null | sort -u || true)
           if [ "${#REQS[@]}" -gt 0 ]; then
             printf 'reqs=%s\n' "$(printf '%s ' "${REQS[@]}")" >> "$GITHUB_OUTPUT"
           else
@@ -72,7 +78,6 @@ jobs:
           for f in "${REQS[@]}"; do
             out=".audit/$(echo "$f" | tr '/.' '__').sarif"
             echo "::group::pip-audit -r $f"
-            # --progress-spinner off for clean logs; --format sarif for code scanning
             pip-audit -r "$f" --format sarif --output "$out" || true
             echo "::endgroup::"
           done
@@ -110,14 +115,12 @@ jobs:
           set -euo pipefail
           lvl="${AUDIT_FAIL_ON,,}"
           [[ "$lvl" == "none" || -z "$lvl" ]] && { echo "Gate disabled (AUDIT_FAIL_ON=$lvl)."; exit 0; }
-          # Count findings at or above threshold (naive SARIF grep; good enough for gating)
-          # Order: critical > high > medium > low
+          # Rank severities (critical > high > medium > low)
           declare -A rank=( [low]=1 [medium]=2 [high]=3 [critical]=4 )
           thr=${rank[$lvl]:-0}
           total=0
+          shopt -s nullglob
           for s in .audit/*.sarif; do
-            [ -f "$s" ] || continue
-            # Extract severity from SARIF. pip-audit uses level values like "error"/"warning" with properties.severity.
             hits=$(jq -r '.runs[].results[]? | (.properties.severity // .level // "")' "$s" 2>/dev/null \
               | awk -v thr="$thr" '
                   function norm(x){tolower(x); if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2; if(x=="warning"||x=="low")return 1; if(x=="error")return 3; return 0}
