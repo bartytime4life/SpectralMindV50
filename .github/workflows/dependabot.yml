@@ -3,9 +3,10 @@
 # SpectraMind V50 — Dependabot Config (Upgraded)
 # -----------------------------------------------------------------------------
 # • Weekly checks for Python (pip & Poetry) and GitHub Actions
-# • Smart groups to cut PR noise (core ML, testing, linting, docs, security)
-# • Safer defaults: rebase, scoped commit messages, limits, and selective ignores
-# • Timezone-aware scheduling aligned to repo cadence
+# • Smart groups to cut PR noise (ML core, testing, linting, docs, security/SBOM)
+# • Safer defaults: rebase, scoped commit messages, PR limits, selective ignores
+# • Timezone-aware scheduling aligned to repo cadence (America/Chicago)
+# • Optional reviewers/assignees (commented) for triage routing
 # =============================================================================
 
 version: 2
@@ -15,7 +16,7 @@ updates:
   # Python — pip (requirements*.txt)
   # ----------------------------
   - package-ecosystem: "pip"
-    directory: "/"                   # detect requirements*.txt in repo
+    directory: "/"                   # Dependabot scans requirements*.txt here
     schedule:
       interval: "weekly"
       day: "monday"
@@ -25,13 +26,13 @@ updates:
     target-branch: "develop"
     rebase-strategy: "auto"
     labels: ["dependencies", "security", "pip"]
+    # reviewers: [ "your-org/sec-reviewers" ]
+    # assignees: [ "andybarta" ]
     commit-message:
       prefix: "deps(pip)"
       include: "scope"
-    # Prefer bumping direct deps; transitive bumps will arrive via lock/constraints
     allow:
       - dependency-type: "direct"
-    # Group by function to reduce PR noise
     groups:
       core-ml:
         patterns:
@@ -43,6 +44,7 @@ updates:
           - "numpy*"
           - "scipy*"
           - "pandas*"
+          - "umap*"
       testing:
         patterns:
           - "pytest*"
@@ -69,15 +71,15 @@ updates:
           - "cyclonedx*"
           - "syft*"
           - "trivy*"
-    # Avoid churn on huge binary stacks or system packages not used directly
     ignore:
+      # Avoid churn on heavyweight stacks you likely don’t use directly
       - dependency-name: "opencv-python*"
         update-types: ["version-update:semver-patch", "version-update:semver-minor"]
       - dependency-name: "tensorflow*"
       - dependency-name: "pygobject*"
 
   # ----------------------------
-  # Python — Poetry (pyproject.toml, poetry.lock)
+  # Python — Poetry (pyproject.toml / poetry.lock)
   # ----------------------------
   - package-ecosystem: "poetry"
     directory: "/"
@@ -89,8 +91,9 @@ updates:
     open-pull-requests-limit: 5
     target-branch: "develop"
     rebase-strategy: "auto"
-    versioning-strategy: "increase"   # bump within semver sensibly
+    versioning-strategy: "increase"   # sensible semver increases
     labels: ["dependencies", "security", "poetry"]
+    # reviewers: [ "your-org/sec-reviewers" ]
     commit-message:
       prefix: "deps(poetry)"
       include: "scope"
@@ -114,6 +117,7 @@ updates:
     open-pull-requests-limit: 10
     rebase-strategy: "auto"
     labels: ["dependencies", "security", "ci"]
+    # reviewers: [ "your-org/ci-admins" ]
     commit-message:
       prefix: "deps(actions)"
       include: "scope"
@@ -136,6 +140,6 @@ updates:
           - "actions/cache*"
 
 # Notes:
-# • Dependabot auto-merge is configured via repo settings/branch-protection.
-# • `target-branch: develop` funnels bumps through dev; change to `main` if preferred.
-# • Adjust ignore patterns for heavyweight stacks you do not use directly.
+# • Auto-merge is enforced via branch protection/merge rules (not here).
+# • `target-branch: develop` funnels bumps through dev; set to `main` if you prefer.
+# • Tweak ignore patterns for heavyweight stacks you don’t vendor directly.
