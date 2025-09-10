@@ -6,13 +6,12 @@ on:
       - 'v*'                    # e.g. v1.2.0, v1.2.0-rc.1
   workflow_dispatch:
 
-# Default to the principle of least privilege; jobs can elevate as needed
+# Default to least privilege; escalate per job as needed
 permissions:
   contents: read
   actions: read
   packages: read
   id-token: none
-  pages: none
 
 concurrency:
   group: release-${{ github.ref }}
@@ -35,7 +34,6 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       ver: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.prerelease.outputs.prerelease }}
-      is_rc: ${{ steps.prerelease.outputs.prerelease }}
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v5
@@ -76,9 +74,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     permissions:
-      contents: write     # to upload artifacts
-      packages: write     # push GHCR image
-      id-token: write     # OIDC for keyless signing/attestations
+      contents: write          # upload artifacts
+      packages: write          # push GHCR image
+      id-token: write          # keyless signing/attestations
     outputs:
       ver: ${{ steps.v.outputs.ver }}
       image_digest: ${{ steps.buildx.outputs.digest }}
@@ -107,7 +105,8 @@ jobs:
       - name: Build wheel + sdist
         run: |
           python -m build
-          ls -l dist
+          twine check dist/*
+          ls -lh dist/
 
       - name: Generate SHA256SUMS for dist/*
         working-directory: dist
@@ -211,7 +210,7 @@ jobs:
         id: v
         run: echo "ver=$(tr -d ' \n' < "${{ env.VERSION_FILE }}")" >> "$GITHUB_OUTPUT"
 
-      - name: Sign images (keyless by default)
+      - name: Sign images (keyless default)
         if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
         env:
           COSIGN_EXPERIMENTAL: "true"
