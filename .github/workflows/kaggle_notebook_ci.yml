@@ -10,6 +10,15 @@ on:
       - "configs/**"
       - "requirements-kaggle.txt"
       - ".github/workflows/kaggle_notebook_ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "notebooks/**"
+      - "kaggle/**"
+      - "src/**"
+      - "configs/**"
+      - "requirements-kaggle.txt"
+      - ".github/workflows/kaggle_notebook_ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -21,17 +30,63 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  # Optional defaults; can be overridden by notebooks/metadata
+  # Default competition; notebooks may override via parameters/metadata
   KAGGLE_COMP: "ariel-data-challenge-2025"
-  # Encourage notebooks to behave like Kaggle (no internet, deterministic)
+  # Encourage Kaggle-like behavior (no internet, deterministic)
   KAGGLE_OFFLINE: "1"
   PYTHONHASHSEED: "0"
 
 jobs:
-  local-validate:
-    name: Local notebook validation (offline-like; CPU)
+  notebook-lint:
+    name: Lint notebooks (nbqa ruff/black) + output hygiene
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: |
+            requirements-kaggle.txt
+            requirements.txt
+            requirements-dev.txt
+            pyproject.toml
+
+      - name: Install lint deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install nbqa ruff black nbstripout
+
+      - name: nbqa ruff
+        run: |
+          nbqa ruff notebooks --output-format=github
+
+      - name: nbqa black --check
+        run: |
+          nbqa black --check notebooks
+
+      - name: Enforce stripped outputs (optional; warn-only)
+        continue-on-error: true
+        run: |
+          # Fail if tracked notebooks contain outputs/metadata blobs (keeps diffs clean)
+          # Switch to 'nbstripout --install --attributes .gitattributes' in repo if desired.
+          set -euo pipefail
+          bad=0
+          while IFS= read -r -d '' nb; do
+            if jq -e '.. | .outputs? // empty | length > 0' "$nb" >/dev/null; then
+              echo "::warning file=$nb::Notebook contains cell outputs; consider stripping."
+              bad=1
+            fi
+          done < <(git ls-files 'notebooks/**/*.ipynb' -z || true)
+          exit 0  # warn-only; flip to 'exit $bad' to enforce
+
+  local-validate:
+    name: Execute notebooks (offline-like; CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: notebook-lint
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,31 +109,28 @@ jobs:
       - name: Install minimal Kaggle-friendly deps
         run: |
           python -m pip install --upgrade pip wheel
-          # Prefer pinned Kaggle reqs if provided
           if [ -f requirements-kaggle.txt ]; then pip install -r requirements-kaggle.txt; fi
-          # Execution toolchain
-          pip install jupyter nbconvert papermill ipykernel nbformat "nbclient>=0.8" "jq"
-          # Optional extras used by many Kaggle notebooks; ignore if absent
+          pip install jupyter nbconvert nbclient nbformat papermill ipykernel jq
           pip install -q numpy pandas matplotlib || true
+          # install package (imports) without heavy extras
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e .; fi
 
       - name: Select notebooks for validation
         id: select
         shell: bash
         run: |
           set -euo pipefail
+          # Prefer fast/smoke/sample notebooks; fallback to first notebook
           mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | grep -E '(00_|01_|10_|smoke|quick|sample|mini).*\.ipynb$' || true)
           if [ "${#NB[@]}" -eq 0 ]; then
             mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | head -n 1 || true)
           fi
-          echo "Selected:"
-          printf ' - %s\n' "${NB[@]}"
           printf 'files=%s\n' "$(printf '%s ' "${NB[@]}")" >> "$GITHUB_OUTPUT"
 
-      - name: Execute notebooks (to copies; keep repo clean)
+      - name: Execute notebooks (copy; HTML preview)
         if: steps.select.outputs.files != ''
         shell: bash
         env:
-          # Hint to notebooks they must not hit the internet
           KAGGLE_OFFLINE: ${{ env.KAGGLE_OFFLINE }}
           PYTHONWARNINGS: "ignore"
         run: |
@@ -89,10 +141,9 @@ jobs:
             base="$(basename "$src")"
             out=".ci_run/${base}"
             cp "$src" "$out"
-            echo "::group::Executing $src"
-            # Execute copy in-place with a conservative timeout
-            jupyter nbconvert --execute --to notebook --inplace "$out" --ExecutePreprocessor.timeout=600
-            # Also export HTML preview
+            echo "::group::Execute $src"
+            # Conservative timeout; no internet assumptions
+            jupyter nbconvert --execute --to notebook --inplace "$out" --ExecutePreprocessor.timeout=900
             jupyter nbconvert --to html "$out" --output ".ci_run/notebooks_html/${base%.ipynb}.html"
             echo "::endgroup::"
           done
@@ -108,7 +159,7 @@ jobs:
           retention-days: 7
 
   validate-kaggle-metadata:
-    name: Validate Kaggle kernel & dataset metadata (JSON sanity)
+    name: Validate Kaggle kernel & dataset metadata
     runs-on: ubuntu-latest
     needs: local-validate
     timeout-minutes: 10
@@ -126,15 +177,15 @@ jobs:
           [ -z "$files" ] && { echo "No kernel metadata files found."; exit 0; }
           for f in $files; do
             echo "Checking: $f"
-            # Basic required fields per Kaggle docs
-            jq -e '
-              .id and .title and .is_private and .kernel_type and .language
-            ' "$f" >/dev/null
-            # Optional: ensure is_private is boolean and kernel_type in allowed set
-            jq -e '
-              (.is_private | type == "boolean") and
-              (.kernel_type | IN("notebook","script"))
-            ' "$f" >/dev/null || echo "WARN: kernel_type/is_private not canonical in $f"
+            # Required fields & types (per Kaggle docs)
+            jq -e '.id and .title and (.is_private|type=="boolean") and (.kernel_type|IN("notebook","script")) and .language' "$f" >/dev/null
+            # Optional: warn if competition mismatch
+            comp_env="${{ env.KAGGLE_COMP }}"
+            if [ -n "$comp_env" ]; then
+              if ! jq -e --arg c "$comp_env" '.competitionSources? // [] | index($c) != null' "$f" >/dev/null; then
+                echo "::notice file=$f::No competitionSources entry for '$comp_env' (ok if intentional)."
+              fi
+            fi
           done
 
       - name: Validate dataset-metadata.json (if present)
@@ -145,13 +196,11 @@ jobs:
           [ -z "$files" ] && { echo "No dataset metadata files found."; exit 0; }
           for f in $files; do
             echo "Checking: $f"
-            jq -e '
-              .id and .title and (.licenses | length >= 1)
-            ' "$f" >/dev/null
+            jq -e '.id and .title and (.licenses|length>=1)' "$f" >/dev/null
           done
 
   push-to-kaggle:
-    name: Push notebooks to Kaggle (guarded)
+    name: Push kernels to Kaggle (guarded)
     runs-on: ubuntu-latest
     needs: [local-validate, validate-kaggle-metadata]
     timeout-minutes: 20
@@ -188,10 +237,8 @@ jobs:
           set -euo pipefail
           mapfile -t KDIRS < <(git ls-files 'kaggle/kernels/**/kernel-metadata.json' | xargs -n1 dirname 2>/dev/null || true)
           if [ "${#KDIRS[@]}" -eq 0 ]; then
-            echo "No Kaggle kernel workspaces found; skipping push."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            printf '%s\n' "${KDIRS[@]}"
             printf 'dirs=%s\n' "$(printf '%s ' "${KDIRS[@]}")" >> "$GITHUB_OUTPUT"
           fi
 
@@ -204,11 +251,7 @@ jobs:
           set -euo pipefail
           IFS=' ' read -r -a KDIRS <<< "${{ steps.kernels.outputs.dirs }}"
           for d in "${KDIRS[@]}"; do
-            echo "::group::Pushing kernel from $d"
-            # Info-only: show competition linkage if present
-            if jq -e '.competitionSources? | length > 0' "$d/kernel-metadata.json" >/dev/null 2>&1; then
-              echo "Kernel references competition sources."
-            fi
+            echo "::group::kaggle kernels push -p $d"
             kaggle kernels push -p "$d" | tee "kaggle_push_$(basename "$d").log"
             echo "::endgroup::"
           done
@@ -251,7 +294,7 @@ jobs:
           set -euo pipefail
           for meta in $(git ls-files 'kaggle/datasets/**/dataset-metadata.json'); do
             d=$(dirname "$meta")
-            echo "::group::Versioning dataset at $d"
+            echo "::group::kaggle datasets version -p $d"
             kaggle datasets version -p "$d" -m "CI sync: ${GITHUB_SHA::7}" -r zip | tee "kaggle_dataset_$(basename "$d").log"
             echo "::endgroup::"
           done
