@@ -1,3 +1,4 @@
+# src/spectramind/losses/composite_physics.py
 from __future__ import annotations
 """
 Composite physics loss for SpectraMind V50 (upgraded).
@@ -28,6 +29,7 @@ from torch import Tensor, nn
 from .nonneg import NonNegConfig, bounds_penalty  # reuse nonneg/bounds helpers
 
 __all__ = [
+    "GLLConfig",
     "SmoothnessConfig",
     "BandCoherenceConfig",
     "CompositeLossConfig",
@@ -99,12 +101,13 @@ def gaussian_nll(
     # Optional per-element weight (allow both boolean/binary masks and real weights)
     eff_w: Optional[Tensor] = None
     if mask is not None and w is not None:
-        eff_w = torch.broadcast_tensors(mask, w)[0] * w
-        eff_w = eff_w.to(mu.dtype) * mask.to(mu.dtype)
+        m = torch.broadcast_tensors(mask.to(mu.dtype), mu)[0]
+        ww = torch.broadcast_tensors(w.to(mu.dtype), mu)[0]
+        eff_w = m * ww
     elif mask is not None:
-        eff_w = torch.broadcast_tensors(mask, mu)[0].to(mu.dtype)
+        eff_w = torch.broadcast_tensors(mask.to(mu.dtype), mu)[0]
     elif w is not None:
-        eff_w = torch.broadcast_tensors(w, mu)[0].to(mu.dtype)
+        eff_w = torch.broadcast_tensors(w.to(mu.dtype), mu)[0]
 
     # σ transform & clamping
     sigma = _apply_sigma_transform(sigma, cfg)
