@@ -5,7 +5,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: "0 6 * * 2"   # Tuesdays
+    - cron: "0 6 * * 2"   # Tuesdays 06:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -21,6 +21,7 @@ concurrency:
 env:
   # Optional failure gate: none | low | medium | high | critical
   TRIVY_FAIL_ON: "none"
+  # NOTE: We keep Trivy action on a tag here. If you want a SHA pin, say the word and I'll lock it.
   TRIVY_ACTION_VERSION: "0.33.1"
 
 jobs:
@@ -30,27 +31,27 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
         with: { fetch-depth: 0 }
 
-      - name: Cache Trivy DB
-        uses: actions/cache@v4
+      - name: ♻️ Cache Trivy DB
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('**/requirements*.txt', '**/package*.json', 'Dockerfile') }}
+          key: trivy-db-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('**/requirements*.txt', '**/package*.json', 'Dockerfile', '**/*.tf', '**/*.y*ml') }}
           restore-keys: |
             trivy-db-${{ runner.os }}-${{ github.ref_name }}-
             trivy-db-${{ runner.os }}-
 
-      - name: Load .trivyignore / policy (if present)
+      - name: 🔎 Load .trivyignore / policy (if present)
         id: ign
         shell: bash
         run: |
           if [ -f .trivyignore ]; then echo "ignore=.trivyignore" >> "$GITHUB_OUTPUT"; else echo "ignore=" >> "$GITHUB_OUTPUT"; fi
           if [ -d .github/trivy-policies ]; then echo "policy=.github/trivy-policies" >> "$GITHUB_OUTPUT"; else echo "policy=" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Trivy FS → SARIF
+      - name: 🧪 Trivy FS → SARIF (vuln/secret/misconfig/license)
         id: trivy-fs
         uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
@@ -66,7 +67,7 @@ jobs:
           policy: ${{ steps.ign.outputs.policy }}
         continue-on-error: true  # report-only
 
-      - name: Trivy Config → SARIF
+      - name: 🧪 Trivy Config → SARIF
         id: trivy-config
         uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
@@ -79,26 +80,26 @@ jobs:
           policy: ${{ steps.ign.outputs.policy }}
         continue-on-error: true
 
-      - name: Ensure SARIFs
+      - name: ✅ Ensure SARIFs exist
         run: |
           [ -s trivy-fs.sarif ] || echo '{"runs":[]}' > trivy-fs.sarif
           [ -s trivy-config.sarif ] || echo '{"runs":[]}' > trivy-config.sarif
 
-      - name: Upload FS SARIF
+      - name: ⬆️ Upload FS SARIF (fork-safe)
         if: ${{ (github.event_name != 'pull_request') || (github.event.pull_request.head.repo.fork != true) }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
-      - name: Upload Config SARIF
+      - name: ⬆️ Upload Config SARIF (fork-safe)
         if: ${{ (github.event_name != 'pull_request') || (github.event.pull_request.head.repo.fork != true) }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
 
-      - name: Summarize results
+      - name: 📝 Summarize results
         if: always()
         shell: bash
         run: |
@@ -119,16 +120,18 @@ jobs:
                 ($sev|map(select(.=="medium"))|length),
                 ($sev|map(select(.=="low" or .=="warning"))|length) ] | @tsv' "$f" 2>/dev/null
           }
-          echo "### Trivy summary" >> $GITHUB_STEP_SUMMARY
-          printf '| Report | Critical | High | Medium | Low |\n|---|---:|---:|---:|---:|\n' >> $GITHUB_STEP_SUMMARY
-          for f in trivy-fs.sarif trivy-config.sarif; do
-            read -r c h m l < <(summarize "$f")
-            printf '| %s | %s | %s | %s | %s |\n' "$(basename "$f")" "${c:-0}" "${h:-0}" "${m:-0}" "${l:-0}" >> $GITHUB_STEP_SUMMARY
-          done
+          {
+            echo "### Trivy summary"
+            printf '| Report | Critical | High | Medium | Low |\n|---|---:|---:|---:|---:|\n'
+            for f in trivy-fs.sarif trivy-config.sarif; do
+              read -r c h m l < <(summarize "$f")
+              printf '| %s | %s | %s | %s | %s |\n' "$(basename "$f")" "${c:-0}" "${h:-0}" "${m:-0}" "${l:-0}"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Trivy reports (artifact)
+      - name: 📦 Upload FS/Config reports (artifact)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: trivy-fs-config-reports
           path: |
@@ -136,11 +139,10 @@ jobs:
             trivy-config.sarif
           retention-days: 14
 
-      - name: Optional failure gate (auto-high on main pushes)
+      - name: 🚦 Optional failure gate (auto-high on main pushes)
         if: always()
         shell: bash
         run: |
-          # Escalate on main push unless user overrode TRIVY_FAIL_ON explicitly in env
           lvl="${TRIVY_FAIL_ON,,}"
           if [[ "$lvl" == "none" && "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
             lvl="high"
@@ -157,12 +159,14 @@ jobs:
             | awk -v thr="$thr" '
                 function norm(x){ x=tolower(x);
                   if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2;
-                  if(x=="low"||x=="warning")return 1; if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;} return 0 }
+                  if(x=="low"||x=="warning")return 1;
+                  if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;}
+                  return 0 }
                 { if (norm($0) >= thr) c++ } END { print c+0 }')
             total=$(( total + hits ))
           done
           if (( total > 0 )); then
-            echo "::error::Trivy found $total issues at >= $lvl severity"
+            echo "::error::Trivy found $total issue(s) at >= $lvl severity"
             exit 1
           fi
           echo "No issues at >= $lvl severity."
@@ -173,33 +177,33 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Detect Dockerfile
+      - name: 🔎 Detect Dockerfile
         id: detect
         run: |
           if [ -f Dockerfile ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Set up QEMU
+      - name: 🧰 Set up QEMU
         if: steps.detect.outputs.found == 'true'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
 
-      - name: Set up Docker Buildx
+      - name: 🧱 Set up Docker Buildx
         if: steps.detect.outputs.found == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3
 
-      - name: Build image (local, no push)
+      - name: 🏗️ Build image (local, no push)
         if: steps.detect.outputs.found == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6
         with:
           context: .
           tags: localbuild:trivy-${{ github.sha }}
           load: true
 
-      - name: Cache Trivy DB
+      - name: ♻️ Cache Trivy DB (image)
         if: steps.detect.outputs.found == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-image-${{ github.ref_name }}-${{ hashFiles('Dockerfile') }}
@@ -207,7 +211,7 @@ jobs:
             trivy-db-${{ runner.os }}-image-${{ github.ref_name }}-
             trivy-db-${{ runner.os }}-image-
 
-      - name: Trivy Image → SARIF
+      - name: 🧪 Trivy Image → SARIF
         if: steps.detect.outputs.found == 'true'
         id: trivy-image
         uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
@@ -223,19 +227,19 @@ jobs:
           timeout: 10m
         continue-on-error: true
 
-      - name: Ensure image SARIF
+      - name: ✅ Ensure image SARIF
         if: steps.detect.outputs.found == 'true'
         run: |
           [ -s trivy-image.sarif ] || echo '{"runs":[]}' > trivy-image.sarif
 
-      - name: Upload Image SARIF
+      - name: ⬆️ Upload Image SARIF (fork-safe)
         if: steps.detect.outputs.found == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
 
-      - name: Summarize image results
+      - name: 📝 Summarize image results
         if: always() && steps.detect.outputs.found == 'true'
         shell: bash
         run: |
@@ -256,9 +260,9 @@ jobs:
               ($sev|map(select(.=="low" or .=="warning"))|length) ] | @tsv' trivy-image.sarif 2>/dev/null)
           printf '| Critical | High | Medium | Low |\n|---:|---:|---:|---:|\n| %s | %s | %s | %s |\n' "${c:-0}" "${h:-0}" "${m:-0}" "${l:-0}" >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload Trivy image report
+      - name: 📦 Upload Trivy image report
         if: always() && steps.detect.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: trivy-image-report
           path: trivy-image.sarif
@@ -269,14 +273,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Docker login (GHCR)
-        uses: docker/login-action@v3
+      - name: 🔐 Docker login (GHCR)
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Try to pull image
+      - name: 🐳 Try to pull image
         id: pull
         shell: bash
         env:
@@ -289,16 +293,16 @@ jobs:
             echo "No GHCR :latest image available; skipping."
           fi
 
-      - name: Cache Trivy DB
+      - name: ♻️ Cache Trivy DB (registry)
         if: steps.pull.outputs.image != ''
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ runner.os }}-registry-latest
           restore-keys: |
             trivy-db-${{ runner.os }}-
 
-      - name: Trivy GHCR image → SARIF
+      - name: 🧪 Trivy GHCR image → SARIF
         if: steps.pull.outputs.image != ''
         uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
@@ -313,16 +317,16 @@ jobs:
           timeout: 10m
         continue-on-error: true
 
-      - name: Upload GHCR SARIF
+      - name: ⬆️ Upload GHCR SARIF (fork-safe)
         if: steps.pull.outputs.image != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy-ghcr-latest.sarif
           category: trivy-ghcr-latest
 
-      - name: Upload GHCR report (artifact)
+      - name: 📦 Upload GHCR report (artifact)
         if: always() && steps.pull.outputs.image != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: trivy-ghcr-latest-report
           path: trivy-ghcr-latest.sarif
