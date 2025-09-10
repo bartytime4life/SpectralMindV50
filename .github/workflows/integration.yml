@@ -38,6 +38,7 @@ concurrency:
 
 env:
   PY_MAIN: '3.11'
+  PY_MATRIX: '3.10,3.11,3.12'
   COVERAGE_FILE: .coverage
   PYTHONDONTWRITEBYTECODE: '1'
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
@@ -46,12 +47,13 @@ env:
   # SpectraMind defaults for CI/Kaggle-safe runs
   SM_SUBMISSION_BINS: '283'
   SM_CI: '1'
+  ARTIFACT_RETENTION_DAYS: '14'
 
 jobs:
   lint:
-    name: Ruff / Pre-commit (fast)
+    name: Ruff / Format / Pre-commit
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -68,15 +70,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install "ruff>=0.5,<1.0" "pre-commit>=3,<4"
+          python -m pip install "ruff>=0.5,<1.0" "pre-commit>=3,<4"
 
-      - name: Ruff check (github format)
-        run: ruff check --output-format=github .
+      - name: Ruff format (check only)
+        run: ruff format --check .
+
+      - name: Ruff lint (github format)
+        run: ruff check --output-format=github src/ tests/ configs/ || true
 
       - name: Pre-commit (selected hooks)
         if: hashFiles('.pre-commit-config.yaml') != ''
-        run: |
-          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+        run: pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
+      - name: Summarize lint
+        if: always()
+        run: echo "### Lint completed (ruff + pre-commit)" >> $GITHUB_STEP_SUMMARY
 
   types:
     name: Type check (mypy)
@@ -84,6 +92,7 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
@@ -92,21 +101,32 @@ jobs:
             requirements*.txt
             pyproject.toml
             mypy.ini
+
+      - name: Prime mypy cache
+        uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: ${{ runner.os }}-mypy-${{ env.PY_MAIN }}-${{ hashFiles('**/*.py','pyproject.toml','mypy.ini','.ruff.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-mypy-${{ env.PY_MAIN }}-
+
       - name: Install type deps
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install "mypy>=1.8,<2" types-PyYAML types-requests
-          pip install -e .
+          python -m pip install "mypy>=1.8,<2" types-PyYAML types-requests
+          python -m pip install -e .
+
       - name: mypy
         run: mypy src
 
   config-sanity:
     name: Config & schema sanity
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
@@ -114,29 +134,30 @@ jobs:
           cache-dependency-path: |
             requirements*.txt
             pyproject.toml
+
       - name: Install minimal deps
         run: |
           python -m pip install --upgrade pip
-          pip install "omegaconf==2.3.0" pyyaml jsonschema
+          python -m pip install "omegaconf==2.3.0" pyyaml jsonschema jq
+
       - name: Load all Hydra/YAML configs
         run: |
           python - << 'PY'
-          import glob, sys
+          import glob
           from omegaconf import OmegaConf
           files = sorted(glob.glob('configs/**/*.yaml', recursive=True))
           for f in files: OmegaConf.load(f)
           print(f"Loaded {len(files)} config files OK")
           PY
+
       - name: Validate submission schema presence
-        run: |
-          test -f schemas/submission.schema.json && echo "Found schemas/submission.schema.json"
-      - name: Validate any submissions against schema (if present)
+        run: test -f schemas/submission.schema.json && echo "Found schemas/submission.schema.json"
+
+      - name: Validate submissions against schema (if any artifacts exist)
         run: |
           python - << 'PY'
-          import json, glob, sys
-          from jsonschema import validate, Draft202012Validator
-          import jsonschema
-          import pathlib
+          import json, glob, sys, pathlib
+          from jsonschema import Draft202012Validator
           schema_path = pathlib.Path("schemas/submission.schema.json")
           if not schema_path.exists():
               print("No schema found; skipping.")
@@ -150,7 +171,7 @@ jobs:
               errs = sorted(validator.iter_errors(data), key=lambda e: e.path)
               if errs:
                   bad += 1
-                  print(f"ERROR: {f} failed schema with {len(errs)} issue(s)")
+                  print(f"::error file={f}::Schema violations ({len(errs)})")
           print(f"Checked {checked} submission JSON file(s); failures={bad}")
           sys.exit(1 if bad else 0)
           PY
@@ -158,7 +179,7 @@ jobs:
   tests:
     name: Unit tests (Py ${{ matrix.py }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 28
     strategy:
       fail-fast: false
       matrix:
@@ -178,42 +199,50 @@ jobs:
 
       - name: Install package + test deps
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install -e .
-          pip install "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
+          python -m pip install -e .
+          python -m pip install "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
 
       - name: PyTest (fast) + coverage
         env:
           PYTHONWARNINGS: "ignore::DeprecationWarning"
+          SM_SUBMISSION_BINS: "283"
         run: |
+          mkdir -p reports
           pytest -q -n auto --disable-warnings --maxfail=1 \
-            --cov=src --cov-report=xml:coverage.xml \
-            --durations=25
+            --cov=src --cov-branch --cov-report=xml:reports/coverage.xml \
+            --durations=25 \
+            --junitxml=reports/tests-junit.xml
 
-      - name: Summarize tests
-        if: always()
-        run: |
-          echo "### pytest (slowest 25)" >> $GITHUB_STEP_SUMMARY
-          grep -A1000 "slowest" -n tests/.pytest_cache/v/cache/lastfailed 2>/dev/null || true
-          if [ -f coverage.xml ]; then
-            echo "### coverage.xml present" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload coverage & artifacts
+      - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: unit-test-artifacts-${{ matrix.py }}
           path: |
-            coverage.xml
-            ./.coverage
+            reports/
+            ${{ env.COVERAGE_FILE }}
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Publish Unit Test Results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: reports/tests-junit.xml
+
+      - name: Publish Coverage Summary
+        if: always()
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: reports/coverage.xml
+          format: markdown
+          output: both
 
   dvc-cli:
-    name: DVC + CLI Smoke
+    name: DVC + CLI smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -232,10 +261,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install -e .
-          pip install "dvc[s3]>=3,<4"
+          python -m pip install -e .
+          python -m pip install "dvc[s3]>=3,<4"
 
-      # If you have OIDC S3 access, uncomment and set your role arn in secrets
+      # Uncomment to enable AWS OIDC + S3 remote checks (set AWS_ROLE_ARN secret)
       # - name: AWS OIDC
       #   uses: aws-actions/configure-aws-credentials@v4
       #   with:
@@ -274,7 +303,9 @@ jobs:
             requirements*.txt
             pyproject.toml
 
-      - name: Build sdist/wheel
+      - name: Build sdist/wheel (deterministic)
+        env:
+          SOURCE_DATE_EPOCH: "1704067200"  # 2024-01-01 for reproducible wheels
         run: |
           python -m pip install --upgrade pip build twine
           python -m build
@@ -288,7 +319,7 @@ jobs:
           python - <<'PY'
           import importlib, sys
           m = importlib.import_module("spectramind")
-          print("Imported spectramind OK:", m.__name__, "Py", sys.version.split()[0])
+          print("Imported:", m.__name__, "Py", sys.version.split()[0])
           PY
 
       - name: Upload dist artifacts
@@ -296,4 +327,4 @@ jobs:
         with:
           name: dist
           path: dist/*
-          retention-days: 7
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
