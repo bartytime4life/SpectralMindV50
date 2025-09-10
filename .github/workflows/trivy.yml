@@ -12,10 +12,16 @@ permissions:
   contents: read
   security-events: write
   actions: read
+  packages: read
 
 concurrency:
   group: trivy-scan-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # Optional failure gate: none | low | medium | high | critical
+  TRIVY_FAIL_ON: "none"
+  TRIVY_ACTION_VERSION: "0.33.1"
 
 jobs:
   fs-and-config:
@@ -26,10 +32,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
-      # ---- Cache Trivy DB to speed up scans ----
       - name: Cache Trivy DB
         uses: actions/cache@v4
         with:
@@ -39,10 +43,24 @@ jobs:
             trivy-db-${{ runner.os }}-${{ github.ref_name }}-
             trivy-db-${{ runner.os }}-
 
-      # ---- File system (repo) scan: vuln + secrets + misconfig + license -> SARIF ----
+      - name: Load .trivyignore (if present)
+        id: ign
+        shell: bash
+        run: |
+          if [ -f .trivyignore ]; then
+            echo "ignore=.trivyignore" >> "$GITHUB_OUTPUT"
+          else
+            echo "ignore=" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -d .github/trivy-policies ]; then
+            echo "policy=.github/trivy-policies" >> "$GITHUB_OUTPUT"
+          else
+            echo "policy=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Trivy FS → SARIF
         id: trivy-fs
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: fs
           ignore-unfixed: true
@@ -52,27 +70,28 @@ jobs:
           output: trivy-fs.sarif
           severity: CRITICAL,HIGH,MEDIUM,LOW
           timeout: 10m
+          trivyignores: ${{ steps.ign.outputs.ignore }}
+          policy: ${{ steps.ign.outputs.policy }}
         continue-on-error: true  # report-only
 
-      # ---- IaC/config scan (Terraform/K8s/Dockerfile, etc.) -> SARIF ----
       - name: Trivy Config → SARIF
         id: trivy-config
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: config
           format: sarif
           output: trivy-config.sarif
           severity: CRITICAL,HIGH,MEDIUM,LOW
           timeout: 10m
+          trivyignores: ${{ steps.ign.outputs.ignore }}
+          policy: ${{ steps.ign.outputs.policy }}
         continue-on-error: true
 
-      # ---- Ensure SARIFs exist even if scans produced no output ----
       - name: Ensure SARIFs
         run: |
           [ -s trivy-fs.sarif ] || echo '{"runs":[]}' > trivy-fs.sarif
           [ -s trivy-config.sarif ] || echo '{"runs":[]}' > trivy-config.sarif
 
-      # ---- Upload SARIF to GitHub code scanning (fork-safe) ----
       - name: Upload FS SARIF
         if: ${{ (github.event_name != 'pull_request') || (github.event.pull_request.head.repo.fork != true) }}
         uses: github/codeql-action/upload-sarif@v3
@@ -87,8 +106,36 @@ jobs:
           sarif_file: trivy-config.sarif
           category: trivy-config
 
-      # Always keep artifacts for manual review
-      - name: Upload Trivy reports
+      - name: Summarize results
+        if: always()
+        shell: bash
+        run: |
+          summarize () {
+            local f="$1"
+            # count severities across runs/results
+            jq -r '
+              [ .runs[].results[]? |
+                ( .level // .properties.severity // .rule.properties."security-severity" // "" ) ] |
+              map( ascii_downcase
+                   | if test("^[0-9.]+$") then
+                       (if (tonumber>=9) then "critical"
+                        elif (tonumber>=7) then "high"
+                        elif (tonumber>=4) then "medium"
+                        elif (tonumber>0) then "low" else "none" end)
+                     else . end) as $sev |
+              [ ($sev|map(select(.=="critical"))|length),
+                ($sev|map(select(.=="high"))|length),
+                ($sev|map(select(.=="medium"))|length),
+                ($sev|map(select(.=="low" or .=="warning"))|length) ] | @tsv' "$f" 2>/dev/null
+          }
+          echo "### Trivy summary" >> $GITHUB_STEP_SUMMARY
+          printf '| Report | Critical | High | Medium | Low |\n|---|---:|---:|---:|---:|\n' >> $GITHUB_STEP_SUMMARY
+          for f in trivy-fs.sarif trivy-config.sarif; do
+            read -r c h m l < <(summarize "$f")
+            printf '| %s | %s | %s | %s | %s |\n' "$(basename "$f")" "${c:-0}" "${h:-0}" "${m:-0}" "${l:-0}" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Upload Trivy reports (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -98,11 +145,34 @@ jobs:
             trivy-config.sarif
           retention-days: 14
 
-      - name: Log completion
-        run: echo "✅ Trivy FS & Config scans completed; SARIF uploaded (if permitted) and artifacts saved."
+      - name: Optional failure gate
+        if: always()
+        shell: bash
+        run: |
+          lvl="${TRIVY_FAIL_ON,,}"
+          [[ -z "$lvl" || "$lvl" == "none" ]] && { echo "Gate disabled (TRIVY_FAIL_ON=$lvl)"; exit 0; }
+          declare -A rank=( [low]=1 [medium]=2 [high]=3 [critical]=4 )
+          thr=${rank[$lvl]:-0}
+          total=0
+          for s in trivy-fs.sarif trivy-config.sarif; do
+            hits=$(jq -r '
+              [ .runs[].results[]? |
+                ( .level // .properties.severity // .rule.properties."security-severity" // "" ) ]' "$s" \
+            | awk -v thr="$thr" '
+                function norm(x){ x=tolower(x);
+                  if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2;
+                  if(x=="low"||x=="warning")return 1; if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;} return 0 }
+                { if (norm($0) >= thr) c++ } END { print c+0 }')
+            total=$(( total + hits ))
+          done
+          if (( total > 0 )); then
+            echo "::error::Trivy found $total issues at >= $lvl severity"
+            exit 1
+          fi
+          echo "No issues at >= $lvl severity."
 
-  image:
-    name: Trivy Image scan (if Dockerfile present)
+  image-build:
+    name: Trivy Image scan (local build if Dockerfile present)
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -113,11 +183,7 @@ jobs:
       - name: Detect Dockerfile
         id: detect
         run: |
-          if [ -f Dockerfile ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
+          if [ -f Dockerfile ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: Set up QEMU
         if: steps.detect.outputs.found == 'true'
@@ -148,7 +214,7 @@ jobs:
       - name: Trivy Image → SARIF
         if: steps.detect.outputs.found == 'true'
         id: trivy-image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: image
           image-ref: localbuild:trivy-${{ github.sha }}
@@ -173,6 +239,27 @@ jobs:
           sarif_file: trivy-image.sarif
           category: trivy-image
 
+      - name: Summarize image results
+        if: always() && steps.detect.outputs.found == 'true'
+        shell: bash
+        run: |
+          echo "### Trivy image summary" >> $GITHUB_STEP_SUMMARY
+          read -r c h m l < <(jq -r '
+            [ .runs[].results[]? |
+              ( .level // .properties.severity // .rule.properties."security-severity" // "" ) ] |
+            map( ascii_downcase
+                 | if test("^[0-9.]+$") then
+                     (if (tonumber>=9) then "critical"
+                      elif (tonumber>=7) then "high"
+                      elif (tonumber>=4) then "medium"
+                      elif (tonumber>0) then "low" else "none" end)
+                   else . end) as $sev |
+            [ ($sev|map(select(.=="critical"))|length),
+              ($sev|map(select(.=="high"))|length),
+              ($sev|map(select(.=="medium"))|length),
+              ($sev|map(select(.=="low" or .=="warning"))|length) ] | @tsv' trivy-image.sarif 2>/dev/null)
+          printf '| Critical | High | Medium | Low |\n|---:|---:|---:|---:|\n| %s | %s | %s | %s |\n' "${c:-0}" "${h:-0}" "${m:-0}" "${l:-0}" >> $GITHUB_STEP_SUMMARY
+
       - name: Upload Trivy image report
         if: always() && steps.detect.outputs.found == 'true'
         uses: actions/upload-artifact@v4
@@ -181,6 +268,66 @@ jobs:
           path: trivy-image.sarif
           retention-days: 14
 
-      - name: Log completion (image)
-        if: steps.detect.outputs.found == 'true'
-        run: echo "✅ Trivy image scan completed; SARIF uploaded (if permitted) and artifact saved."
+  registry-image:
+    name: Scan GHCR registry image (latest) if present
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Docker login (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Try to pull image
+        id: pull
+        shell: bash
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:latest
+        run: |
+          if docker pull "$IMAGE" >/dev/null 2>&1; then
+            echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=" >> "$GITHUB_OUTPUT"
+            echo "No GHCR :latest image available; skipping."
+          fi
+
+      - name: Cache Trivy DB
+        if: steps.pull.outputs.image != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-registry-latest
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Trivy GHCR image → SARIF
+        if: steps.pull.outputs.image != ''
+        uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
+        with:
+          scan-type: image
+          image-ref: ${{ steps.pull.outputs.image }}
+          ignore-unfixed: true
+          scanners: vuln,secret,misconfig,license
+          vuln-type: os,library
+          format: sarif
+          output: trivy-ghcr-latest.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          timeout: 10m
+        continue-on-error: true
+
+      - name: Upload GHCR SARIF
+        if: steps.pull.outputs.image != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-ghcr-latest.sarif
+          category: trivy-ghcr-latest
+
+      - name: Upload GHCR report (artifact)
+        if: always() && steps.pull.outputs.image != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-ghcr-latest-report
+          path: trivy-ghcr-latest.sarif
+          retention-days: 14
