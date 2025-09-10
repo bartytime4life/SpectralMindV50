@@ -10,16 +10,16 @@ on:
 
 permissions:
   contents: read
-  security-events: write  # SARIF upload
+  security-events: write  # for SARIF upload
 
 concurrency:
   group: pip-audit-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # Set to "none" (default) to never fail CI; else one of: critical | high | medium | low
+  # Gate: "none" (default) never fails CI; else one of: critical | high | medium | low
   AUDIT_FAIL_ON: "none"
-  # Pin pip-audit for reproducibility (update periodically)
+  # Reproducibility: pin pip-audit (update periodically)
   PIP_AUDIT_VERSION: "2.7.3"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
@@ -36,11 +36,11 @@ jobs:
         python-version: [ "3.10", "3.11", "3.12" ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: 🐍 Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -50,12 +50,12 @@ jobs:
             setup.cfg
             setup.py
 
-      - name: Install tools
+      - name: 🔧 Install tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install "pip-audit==${PIP_AUDIT_VERSION}" jq
 
-      - name: Discover requirement files
+      - name: 🔎 Discover requirement files
         id: discover
         shell: bash
         run: |
@@ -70,7 +70,7 @@ jobs:
             echo "No requirements*.txt files found."
           fi
 
-      - name: Load ignore list (if present)
+      - name: 🧾 Load ignore list (if present)
         id: ignore
         shell: bash
         run: |
@@ -84,7 +84,7 @@ jobs:
             echo "flags=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Audit requirement files → SARIF
+      - name: 📄 Audit requirement files → SARIF
         if: steps.discover.outputs.reqs != ''
         shell: bash
         run: |
@@ -94,22 +94,24 @@ jobs:
           for f in "${REQS[@]}"; do
             out=".audit/$(echo "${{ matrix.python-version }}_$f" | tr '/.' '__').sarif"
             echo "::group::pip-audit -r $f (py${{ matrix.python-version }})"
-            pip-audit -r "$f" --format sarif --output "$out" ${{ steps.ignore.outputs.flags }} || true
+            pip-audit -r "$f" --format sarif --output "$out" \
+              ${{ steps.ignore.outputs.flags }} || true
             echo "::endgroup::"
           done
 
-      - name: Project-mode audit (pyproject/setup)
+      - name: 🧩 Project-mode audit (pyproject/setup)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .audit
           if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
             echo "::group::pip-audit (project) (py${{ matrix.python-version }})"
-            pip-audit --format sarif --output ".audit/project_${{ matrix.python-version }}.sarif" ${{ steps.ignore.outputs.flags }} || true
+            pip-audit --format sarif --output ".audit/project_${{ matrix.python-version }}.sarif" \
+              ${{ steps.ignore.outputs.flags }} || true
             echo "::endgroup::"
           fi
 
-      - name: Ensure at least one SARIF exists
+      - name: 🧿 Ensure at least one SARIF exists
         shell: bash
         run: |
           set -euo pipefail
@@ -119,7 +121,7 @@ jobs:
             echo '{}' > ".audit/empty_${{ matrix.python-version }}.sarif"
           fi
 
-      - name: Build summary table
+      - name: 📊 Build summary table
         if: always()
         shell: bash
         run: |
@@ -145,23 +147,23 @@ jobs:
             printf '| %s | %s | %s | %s | %s |\n' "$(basename "$s")" "${crit:-0}" "${high:-0}" "${med:-0}" "${low:-0}" >> $GITHUB_STEP_SUMMARY
           done
 
-      - name: Upload SARIF to Code Scanning (fork-safe)
+      - name: ⬆️ Upload SARIF to Code Scanning (fork-safe)
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: .audit
           category: pip-audit-py${{ matrix.python-version }}
 
-      - name: Upload raw reports (artifact)
+      - name: 📦 Upload raw reports (artifact)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: pip-audit-reports-py${{ matrix.python-version }}
           path: .audit/*${{ matrix.python-version }}*.sarif
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Optional failure gate by severity
+      - name: 🚦 Optional failure gate by severity
         if: always()
         shell: bash
         run: |
