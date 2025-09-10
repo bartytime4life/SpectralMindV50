@@ -17,7 +17,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.11"
   # Set to "none" (default) to never fail CI; else one of: critical | high | medium | low
   AUDIT_FAIL_ON: "none"
   # Pin pip-audit for reproducibility (update periodically)
@@ -28,18 +27,22 @@ env:
 
 jobs:
   audit:
-    name: Python deps vulnerability audit
+    name: pip-audit (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.10", "3.11", "3.12" ]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             requirements*.txt
@@ -58,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t REQS < <(git ls-files \
-            ':!:**/.venv/**' ':!:**/site-packages/**' \
+            ':!:**/.venv/**' ':!:**/venv/**' ':!:**/env/**' ':!:**/site-packages/**' \
             '**/requirements*.txt' 'requirements.txt' \
             'requirements-dev.txt' 'requirements-kaggle.txt' 2>/dev/null | sort -u || true)
           if [ "${#REQS[@]}" -gt 0 ]; then
@@ -74,7 +77,6 @@ jobs:
           set -euo pipefail
           IGN_FILE=".github/pip-audit.ignore"
           if [ -f "$IGN_FILE" ]; then
-            # Build repeated --ignore-vuln flags from lines (strip comments/empties)
             flags=$(sed -E 's/#.*$//' "$IGN_FILE" | sed '/^\s*$/d' | sed 's/^/--ignore-vuln /' | xargs -r echo)
             echo "flags=$flags" >> "$GITHUB_OUTPUT"
             echo "Using ignore list: $IGN_FILE"
@@ -90,8 +92,8 @@ jobs:
           mkdir -p .audit
           IFS=' ' read -r -a REQS <<< "${{ steps.discover.outputs.reqs }}"
           for f in "${REQS[@]}"; do
-            out=".audit/$(echo "$f" | tr '/.' '__').sarif"
-            echo "::group::pip-audit -r $f"
+            out=".audit/$(echo "${{ matrix.python-version }}_$f" | tr '/.' '__').sarif"
+            echo "::group::pip-audit -r $f (py${{ matrix.python-version }})"
             pip-audit -r "$f" --format sarif --output "$out" ${{ steps.ignore.outputs.flags }} || true
             echo "::endgroup::"
           done
@@ -102,8 +104,8 @@ jobs:
           set -euo pipefail
           mkdir -p .audit
           if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
-            echo "::group::pip-audit (project)"
-            pip-audit --format sarif --output .audit/project.sarif ${{ steps.ignore.outputs.flags }} || true
+            echo "::group::pip-audit (project) (py${{ matrix.python-version }})"
+            pip-audit --format sarif --output ".audit/project_${{ matrix.python-version }}.sarif" ${{ steps.ignore.outputs.flags }} || true
             echo "::endgroup::"
           fi
 
@@ -114,7 +116,7 @@ jobs:
           shopt -s nullglob
           files=(.audit/*.sarif)
           if [ ${#files[@]} -eq 0 ]; then
-            echo '{}' > .audit/empty.sarif
+            echo '{}' > ".audit/empty_${{ matrix.python-version }}.sarif"
           fi
 
       - name: Build summary table
@@ -122,14 +124,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "### pip-audit summary" >> $GITHUB_STEP_SUMMARY
+          echo "### pip-audit summary (py${{ matrix.python-version }})" >> $GITHUB_STEP_SUMMARY
           printf '| Report | Critical | High | Medium | Low |\n|---|---:|---:|---:|---:|\n' >> $GITHUB_STEP_SUMMARY
           shopt -s nullglob
-          for s in .audit/*.sarif; do
-            # Extract severities, normalize, and count
+          for s in .audit/*${{ matrix.python-version }}*.sarif; do
             read -r crit high med low < <(jq -r '
-              [ .runs[].results[]? | (
-                  .properties.severity // .level // .rule.properties.security-severity // "" ) ] |
+              [ .runs[].results[]? |
+                ( .properties.severity // .level // .rule.properties.security-severity // "" ) ] |
               map( if test("^[0-9.]+$") then
                       (if (tonumber>=9) then "critical"
                        elif (tonumber>=7) then "high"
@@ -149,14 +150,14 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .audit
-          category: pip-audit
+          category: pip-audit-py${{ matrix.python-version }}
 
       - name: Upload raw reports (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pip-audit-reports
-          path: .audit/*.sarif
+          name: pip-audit-reports-py${{ matrix.python-version }}
+          path: .audit/*${{ matrix.python-version }}*.sarif
           if-no-files-found: ignore
           retention-days: 7
 
@@ -167,28 +168,28 @@ jobs:
           set -euo pipefail
           lvl="${AUDIT_FAIL_ON,,}"
           [[ "$lvl" == "none" || -z "$lvl" ]] && { echo "Gate disabled (AUDIT_FAIL_ON=$lvl)."; exit 0; }
-          declare -A rank=( [low]=1 [medium]=2 [high]=3 [critical]=4 )
-          thr=${rank[$lvl]:-0}
+          function rank() { case "$1" in critical) echo 4;; high) echo 3;; medium) echo 2;; low|warning) echo 1;; *) echo 0;; esac; }
+          thr=$(rank "$lvl")
           total=0
           shopt -s nullglob
-          for s in .audit/*.sarif; do
+          for s in .audit/*${{ matrix.python-version }}*.sarif; do
             hits=$(jq -r '
-              [ .runs[].results[]? | (
-                .properties.severity // .level // .rule.properties.security-severity // "" ) ] |
+              [ .runs[].results[]? |
+                ( .properties.severity // .level // .rule.properties.security-severity // "" ) ] |
               map( if test("^[0-9.]+$") then
                       (if (tonumber>=9) then "critical"
                        elif (tonumber>=7) then "high"
                        elif (tonumber>=4) then "medium"
                        elif (tonumber>0) then "low" else "none" end)
                    else ascii_downcase end )' "$s" \
-            | awk -v lvl="$lvl" '
-              function r(x){ if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2; if(x=="low"||x=="warning")return 1; return 0 }
-              { if (r($0) >= (lvl=="critical"?4:lvl=="high"?3:lvl=="medium"?2:lvl=="low"?1:5)) c++ } END { print c+0 }')
+            | awk -v thr="$thr" '
+              function r(x){ return x=="critical"?4:x=="high"?3:x=="medium"?2:(x=="low"||x=="warning")?1:0 }
+              { if (r($0) >= thr) c++ } END { print c+0 }')
             total=$(( total + hits ))
           done
           if (( total > 0 )); then
-            echo "::error::pip-audit found $total issues at >= ${lvl} severity"
+            echo "::error::pip-audit (py${{ matrix.python-version }}) found $total issue(s) at >= ${lvl} severity"
             exit 1
           else
-            echo "No issues at >= ${lvl} severity."
+            echo "No issues at >= ${lvl} severity for py${{ matrix.python-version }}."
           fi
