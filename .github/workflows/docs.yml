@@ -17,7 +17,6 @@ on:
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
-# Minimal perms for Pages + OIDC + SARIF (for optional linkcheck upload)
 permissions:
   contents: read
   pages: write
@@ -42,7 +41,6 @@ jobs:
             docs
             mkdocs.yml
           config: typos.toml
-        # Create a baseline config later if you need to silence project words
 
   markdownlint:
     name: Markdown lint
@@ -104,13 +102,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Optional: surface linkcheck to Code Scanning (requires lychee -> SARIF conversion)
-      # - name: Upload linkcheck SARIF
-      #   if: always()
-      #   uses: github/codeql-action/upload-sarif@v3
-      #   with:
-      #     sarif_file: lychee.sarif
-
   build:
     name: Build MkDocs site
     runs-on: ubuntu-latest
@@ -144,7 +135,6 @@ jobs:
           elif [ -f requirements-docs.txt ]; then
             pip install -r requirements-docs.txt
           else
-            # Pinned safe defaults; extend as needed
             pip install \
               "mkdocs==1.6.1" \
               "mkdocs-material==9.5.34" \
@@ -154,7 +144,6 @@ jobs:
           fi
 
       - name: Set up Node (for Mermaid CLI pre-render of assets)
-      # Only if there are .mmd files in assets/diagrams
         if: ${{ hashFiles('assets/diagrams/**/*.mmd') != '' }}
         uses: actions/setup-node@v5
         with:
