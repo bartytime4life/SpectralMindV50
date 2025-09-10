@@ -3,42 +3,42 @@ flowchart TB
   %% Inputs
   subgraph Inputs
     I1[FGS1 time series aligned and binned]:::in
-    I2[AIRS spectra (283 lambda bins)]:::in
+    I2[AIRS spectra · 283 lambda bins]:::in
   end
 
   %% FGS1 branch
   subgraph FGS1_Encoder [FGS1 Encoder sequence]
-    FE1[Preprocess: denoise, detrend, bin]:::blk
-    FE2[State-space SSM (e.g., Mamba) — transit-aware latent]:::blk
-    FE3[Temporal pooling / projection]:::blk
+    FE1[Preprocess · denoise · detrend · bin]:::blk
+    FE2[State space SSM e.g. Mamba · transit aware latent]:::blk
+    FE3[Temporal pooling · projection]:::blk
   end
 
   %% AIRS branch
   subgraph AIRS_Encoder [AIRS Encoder spectral]
-    AE1[Preprocess: normalize, mask bad lambda]:::blk
-    AE2[Spectral CNN or GNN (local band features)]:::blk
-    AE3[Global pooling / projection]:::blk
+    AE1[Preprocess · normalize · mask bad lambda]:::blk
+    AE2[Spectral CNN or GNN · local band features]:::blk
+    AE3[Global pooling · projection]:::blk
   end
 
   %% Fusion + Head
   subgraph Fusion_Head [Fusion and Heteroscedastic Head]
-    F0[Concat or Cross-attention]:::fusion
+    F0[Concat or Cross attention]:::fusion
     H1[Residual MLP head]:::blk
-    H2[Per-bin outputs: mu(lambda), log sigma(lambda)]:::head
+    H2[Per bin outputs · mu(lambda) and log sigma(lambda)]:::head
   end
 
   %% Constraints
-  subgraph Constraints [Symbolic and Physics Constraints (loss)]
-    C1[Non-negativity: mu >= 0]:::cons
-    C2[Smoothness: second difference of mu small]:::cons
-    C3[Band coherence: molecular regions]:::cons
+  subgraph Constraints [Symbolic and Physics Constraints · loss]
+    C1[Non negativity · mu ≥ 0]:::cons
+    C2[Smoothness · second difference of mu small]:::cons
+    C3[Band coherence · molecular regions]:::cons
   end
 
   %% Calibration and Diagnostics
   subgraph CalibDiag [Uncertainty Calibration and Diagnostics]
-    T1[Temperature scaling: sigma / T on val split]:::aux
-    D1[Inject-and-Recover tests: CO2 bands and photometric drift]:::aux
-    D2[HTML dashboard: metrics and plots]:::aux
+    T1[Temperature scaling · sigma ÷ T on val split]:::aux
+    D1[Inject and Recover tests · CO2 bands and photometric drift]:::aux
+    D2[HTML dashboard · metrics and plots]:::aux
   end
 
   %% Flow
@@ -46,7 +46,7 @@ flowchart TB
   I2 --> AE1 --> AE2 --> AE3
   FE3 --> F0
   AE3 --> F0
-  F0 --> H1 --> H2
+  F0  --> H1 --> H2
 
   %% Loss hooks
   C1 -. penalize .-> H2
