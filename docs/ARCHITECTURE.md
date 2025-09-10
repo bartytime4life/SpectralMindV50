@@ -52,18 +52,21 @@ Each directory has **single responsibility** (e.g. `src/models/` only model defs
 
 ```mermaid
 flowchart LR
-  A[User / CI] --> B["spectramind CLI (Typer + Hydra)"]
-  B --> C[Configs (YAML)]
-  C --> D[Calibrate: FGS1 & AIRS → cubes]
-  D --> E[Encoders: FGS1 = Mamba SSM; AIRS = CNN/GNN]
-  E --> F[Decoder: μ, σ via heteroscedastic head]
-  F --> G[Diagnostics: GLL, FFT, UMAP/t-SNE, SHAP, physics checks]
-  G --> H[Submission: CSV + manifest + schema validation]
-  H --> I[Kaggle Leaderboard]
-  D -.-> J[DVC-tracked calibrated data]
-  E -.-> J[Checkpoints/metrics]
-  G -.-> J[HTML reports]
-  H -.-> J[submission.zip]
+  A["User / CI"] --> B["spectramind CLI<br/>(Typer + Hydra)"]
+  B --> C["Configs YAML"]
+  C --> D["Calibrate<br/>FGS1 & AIRS → cubes"]
+  D --> E["Encoders<br/>FGS1 = Mamba SSM<br/>AIRS = CNN/GNN"]
+  E --> F["Decoder<br/>μ, σ (heteroscedastic head)"]
+  F --> G["Diagnostics<br/>GLL, FFT, UMAP, SHAP, checks"]
+  G --> H["Submission<br/>CSV + manifest + schema validate"]
+  H --> I["Kaggle Leaderboard"]
+
+  %% Artifacts
+  D -.-> J["DVC-tracked calibrated data"]
+  E -.-> J
+  G -.-> J["HTML reports + metrics"]
+  H -.-> J["submission.zip"]
+
 ```
 
 ---
