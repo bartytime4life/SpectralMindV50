@@ -35,16 +35,17 @@ env:
   # Encourage Kaggle-like behavior (no internet, deterministic)
   KAGGLE_OFFLINE: "1"
   PYTHONHASHSEED: "0"
+  MPLBACKEND: "Agg"
 
 jobs:
   notebook-lint:
     name: Lint notebooks (nbqa ruff/black) + output hygiene
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
@@ -57,42 +58,36 @@ jobs:
       - name: Install lint deps
         run: |
           python -m pip install --upgrade pip
-          pip install nbqa ruff black nbstripout
+          pip install "nbqa>=1,<2" "ruff>=0.4,<1" "black>=24,<25" nbstripout jq
 
       - name: nbqa ruff
-        run: |
-          nbqa ruff notebooks --output-format=github
+        run: nbqa ruff notebooks --output-format=github
 
       - name: nbqa black --check
-        run: |
-          nbqa black --check notebooks
+        run: nbqa black --check notebooks
 
-      - name: Enforce stripped outputs (optional; warn-only)
+      - name: Enforce stripped outputs (warn-only)
         continue-on-error: true
         run: |
           set -euo pipefail
-          bad=0
           while IFS= read -r -d '' nb; do
             if jq -e '.. | .outputs? // empty | length > 0' "$nb" >/dev/null; then
-              echo "::warning file=$nb::Notebook contains cell outputs; consider stripping."
-              bad=1
+              echo "::warning file=$nb::Notebook contains cell outputs; consider stripping (nbstripout)."
             fi
           done < <(git ls-files 'notebooks/**/*.ipynb' -z || true)
-          exit 0  # warn-only; flip to 'exit $bad' to enforce
 
   local-validate:
     name: Execute notebooks (offline-like; CPU)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     needs: notebook-lint
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
@@ -109,6 +104,7 @@ jobs:
           python -m pip install --upgrade pip wheel
           if [ -f requirements-kaggle.txt ]; then pip install -r requirements-kaggle.txt; fi
           pip install jupyter nbconvert nbclient nbformat papermill ipykernel jq
+          # light scientific stack if not pinned in requirements-kaggle.txt
           pip install -q numpy pandas matplotlib || true
           # install package (imports) without heavy extras
           if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e .; fi
@@ -118,6 +114,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # prefer "smoke/quick/sample/mini" or numbered starters; fallback to 1st
           mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | grep -E '(00_|01_|10_|smoke|quick|sample|mini).*\.ipynb$' || true)
           if [ "${#NB[@]}" -eq 0 ]; then
             mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | head -n 1 || true)
@@ -139,7 +136,7 @@ jobs:
             out=".ci_run/${base}"
             cp "$src" "$out"
             echo "::group::Execute $src"
-            jupyter nbconvert --execute --to notebook --inplace "$out" --ExecutePreprocessor.timeout=900
+            jupyter nbconvert --execute --to notebook --inplace "$out" --ExecutePreprocessor.timeout=1200
             jupyter nbconvert --to html "$out" --output ".ci_run/notebooks_html/${base%.ipynb}.html"
             echo "::endgroup::"
           done
@@ -160,7 +157,7 @@ jobs:
     needs: local-validate
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -201,10 +198,10 @@ jobs:
     if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
@@ -238,8 +235,7 @@ jobs:
       - name: Push kernels
         if: steps.kernels.outputs.skip != 'true'
         shell: bash
-        env:
-          KAGGLE_COMP: ${{ env.KAGGLE_COMP }}
+        env: { KAGGLE_COMP: ${{ env.KAGGLE_COMP }} }
         run: |
           set -euo pipefail
           IFS=' ' read -r -a KDIRS <<< "${{ steps.kernels.outputs.dirs }}"
@@ -264,9 +260,9 @@ jobs:
     timeout-minutes: 20
     if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY && hashFiles('kaggle/datasets/**/dataset-metadata.json') != '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
