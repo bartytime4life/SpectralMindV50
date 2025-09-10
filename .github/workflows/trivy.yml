@@ -18,36 +18,155 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  fs-scan:
-    name: Trivy FS Scan
+  fs-and-config:
+    name: Trivy FS/Config scan
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Run Trivy FS → SARIF
+      # ---- Cache Trivy DB to speed up scans ----
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('**/requirements*.txt', '**/package*.json', 'Dockerfile') }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-${{ github.ref_name }}-
+            trivy-db-${{ runner.os }}-
+
+      # ---- File system (repo) scan: vuln + secrets + misconfig + license -> SARIF ----
+      - name: Trivy FS → SARIF
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           ignore-unfixed: true
+          scanners: vuln,secret,misconfig,license
+          vuln-type: os,library
           format: sarif
           output: trivy-fs.sarif
           severity: CRITICAL,HIGH,MEDIUM,LOW
-        continue-on-error: true  # do not fail the workflow, just report
+          timeout: 10m
+        continue-on-error: true  # report-only
 
-      - name: Upload SARIF to Code Scanning
+      # ---- IaC/config scan (Terraform/K8s/Dockerfile, etc.) -> SARIF ----
+      - name: Trivy Config → SARIF
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: config
+          format: sarif
+          output: trivy-config.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          timeout: 10m
+        continue-on-error: true
+
+      # ---- Upload both SARIFs to GitHub code scanning (skip on forked PRs) ----
+      - name: Upload FS SARIF
+        if: ${{ (github.event_name != 'pull_request') || (github.event.pull_request.head.repo.fork != true) }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-fs.sarif
+          category: trivy-fs
 
-      - name: Upload Trivy report as artifact
+      - name: Upload Config SARIF
+        if: ${{ (github.event_name != 'pull_request') || (github.event.pull_request.head.repo.fork != true) }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
+      # Always keep artifacts for manual review
+      - name: Upload Trivy reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-fs-report
-          path: trivy-fs.sarif
+          name: trivy-fs-config-reports
+          path: |
+            trivy-fs.sarif
+            trivy-config.sarif
           retention-days: 14
 
       - name: Log completion
-        run: echo "✅ Trivy FS scan completed and results uploaded (SARIF + artifact)."
+        run: echo "✅ Trivy FS & Config scans completed; SARIF uploaded (if permitted) and artifacts saved."
+
+  image:
+    name: Trivy Image scan (if Dockerfile present)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Dockerfile
+        id: detect
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: steps.detect.outputs.found == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.detect.outputs.found == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (local, no push)
+        if: steps.detect.outputs.found == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: localbuild:trivy-${{ github.sha }}
+          load: true
+
+      - name: Cache Trivy DB
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-image-${{ github.ref_name }}-${{ hashFiles('Dockerfile') }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-image-${{ github.ref_name }}-
+            trivy-db-${{ runner.os }}-image-
+
+      - name: Trivy Image → SARIF
+        if: steps.detect.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: image
+          image-ref: localbuild:trivy-${{ github.sha }}
+          ignore-unfixed: true
+          scanners: vuln,secret,misconfig,license
+          vuln-type: os,library
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          timeout: 10m
+        continue-on-error: true
+
+      - name: Upload Image SARIF
+        if: steps.detect.outputs.found == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Upload Trivy image report
+        if: always() && steps.detect.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivy-image.sarif
+          retention-days: 14
+
+      - name: Log completion (image)
+        if: steps.detect.outputs.found == 'true'
+        run: echo "✅ Trivy image scan completed; SARIF uploaded (if permitted) and artifact saved."
