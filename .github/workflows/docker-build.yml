@@ -39,6 +39,8 @@ env:
   TRIVY_KEY_SALT: v1
   # Optional failure gate for Trivy: none | low | medium | high | critical
   TRIVY_FAIL_ON: none
+  # Trivy action version (tag). Say the word and I'll pin the exact SHA.
+  TRIVY_ACTION_VERSION: "0.33.1"
 
 jobs:
   build:
@@ -47,25 +49,25 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - name: Derive version
+      - name: 🔢 Derive version
         id: ver
         run: |
           set -euo pipefail
           v="$(git describe --tags --always --dirty=-wip || echo "${GITHUB_SHA::7}")"
           echo "version=${v}" >> "$GITHUB_OUTPUT"
 
-      - name: Dockerfile lint (Hadolint)
+      - name: 🧹 Dockerfile lint (Hadolint)
         if: hashFiles('Dockerfile') != ''
         uses: hadolint/hadolint-action@v3.2.0
         with:
           dockerfile: Dockerfile
 
-      - name: Docker metadata (tags & labels)
+      - name: 🏷️ Docker metadata (tags & labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2a88c2ef49dc42b97de # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -83,25 +85,25 @@ jobs:
             org.opencontainers.image.created=${{ github.event.repository.updated_at }}
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Set up QEMU (for multi-arch)
+      - name: 🧬 Set up QEMU (for multi-arch)
         if: contains(env.PLATFORMS, ',')
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: 🧱 Set up Buildx
+        uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3
 
-      - name: Login to GHCR
+      - name: 🔐 Login to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # PRs → build locally (no push) so Trivy can scan the image
-      - name: Build (PR) — load to local Docker
+      - name: 🏗️ Build (PR) — load to local Docker
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6
         with:
           context: .
           platforms: linux/amd64          # local load supports single-arch only
@@ -117,10 +119,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       # main branch / manual → push to GHCR
-      - name: Build & Push (main)
+      - name: 🚀 Build & Push (main)
         id: build-push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
@@ -137,22 +139,22 @@ jobs:
           cache-to: type=gha,mode=max
 
       # ---------- SBOMs ----------
-      - name: Repo SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@v0.20.5
+      - name: 📦 Repo SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@5c043a5065ad9009a4633986c724c8da7b34fd55 # v0
         with:
           path: .
           output-file: sbom-repo.cdx.json
           format: cyclonedx-json
 
-      - name: Image SBOM (Syft → CycloneDX)
+      - name: 📦 Image SBOM (Syft → CycloneDX)
         if: github.event_name != 'pull_request'
         uses: anchore/syft-action@v0.20.5
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
           output: cyclonedx-json=sbom-image.cdx.json
 
-      - name: Upload SBOM artifacts
-        uses: actions/upload-artifact@v4
+      - name: 📤 Upload SBOM artifacts
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: sbom-bundle
           path: |
@@ -162,8 +164,8 @@ jobs:
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       # ---------- Vulnerability scan (Trivy) ----------
-      - name: Cache Trivy DB
-        uses: actions/cache@v4
+      - name: ♻️ Cache Trivy DB
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('Dockerfile', '**/requirements*.txt') }}
@@ -171,9 +173,9 @@ jobs:
             trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-${{ github.ref_name }}-
             trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-
 
-      - name: Trivy image scan (PR local)
+      - name: 🔎 Trivy image scan (PR local)
         if: github.event_name == 'pull_request'
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: image
           image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
@@ -183,9 +185,9 @@ jobs:
           output: trivy.sarif
         continue-on-error: true
 
-      - name: Trivy image scan (pushed)
+      - name: 🔎 Trivy image scan (pushed)
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: image
           image-ref: ${{ steps.meta.outputs.tags }}
@@ -195,26 +197,26 @@ jobs:
           output: trivy.sarif
         continue-on-error: true
 
-      - name: Ensure SARIF exists
+      - name: ✅ Ensure SARIF exists
         run: |
           [ -s trivy.sarif ] || echo '{"runs":[]}' > trivy.sarif
 
-      - name: Upload Trivy SARIF (fork-safe)
+      - name: ⬆️ Upload Trivy SARIF (fork-safe)
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy.sarif
           category: trivy-docker
 
-      - name: Upload Trivy report (artifact)
+      - name: 📦 Upload Trivy report (artifact)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: trivy-image-report
           path: trivy.sarif
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
-      - name: Optional Trivy failure gate
+      - name: 🚦 Optional Trivy failure gate
         if: always()
         shell: bash
         run: |
@@ -228,24 +230,26 @@ jobs:
           | awk -v thr="$thr" '
               function norm(x){ x=tolower(x);
                 if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2;
-                if(x=="low"||x=="warning")return 1; if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;} return 0 }
+                if(x=="low"||x=="warning")return 1;
+                if (x ~ /^[0-9.]+$/){n=x+0; if(n>=9)return 4; if(n>=7)return 3; if(n>=4)return 2; if(n>0)return 1;}
+                return 0 }
               { if (norm($0) >= thr) c++ } END { print c+0 }')
           if (( hits > 0 )); then
-            echo "::error::Trivy found $hits issues at >= $lvl severity"
+            echo "::error::Trivy found $hits issue(s) at >= $lvl severity"
             exit 1
           fi
           echo "No issues at >= $lvl severity."
 
       # ---------- Build provenance attestation (GHCR) ----------
-      - name: Attest build provenance
+      - name: 🧾 Attest build provenance
         if: github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@bdd51370d99a66c718e0de0492932ad2c8c24a73 # v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build-push.outputs.digest }}
           push-to-registry: true
 
-      - name: Summary
+      - name: 📑 Summary
         if: always()
         run: |
           echo "### Docker build summary" >> $GITHUB_STEP_SUMMARY
