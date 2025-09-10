@@ -5,10 +5,18 @@ on:
     types: [labeled, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
-      required_label:
-        description: 'Label that enables auto-merge'
+      required_labels:
+        description: 'Comma-separated label(s) that enable auto-merge'
         required: false
         default: 'automerge'
+      label_mode:
+        description: 'Require ALL or ANY of the required_labels (all|any)'
+        required: false
+        default: 'any'
+      veto_labels:
+        description: 'Comma-separated labels that block auto-merge if present'
+        required: false
+        default: 'do-not-merge'
       merge_method:
         description: 'squash | merge | rebase'
         required: false
@@ -17,10 +25,26 @@ on:
         description: 'Minimum number of PR approvals'
         required: false
         default: '1'
+      allow_author_approval:
+        description: 'Count PR author approval toward min_approvals (true/false)'
+        required: false
+        default: 'false'
       require_up_to_date:
-        description: 'Require PR branch to be up-to-date with base (true/false)'
+        description: 'Require PR branch up-to-date with base (true/false)'
         required: false
         default: 'true'
+      max_changed_files:
+        description: 'Optional: Max total changed files allowed'
+        required: false
+        default: ''
+      max_additions:
+        description: 'Optional: Max total additions allowed'
+        required: false
+        default: ''
+      max_deletions:
+        description: 'Optional: Max total deletions allowed'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -40,7 +64,6 @@ jobs:
       eligible: ${{ steps.gates.outputs.eligible }}
       reason: ${{ steps.gates.outputs.reason }}
       merge_method: ${{ steps.params.outputs.merge_method }}
-      required_label: ${{ steps.params.outputs.required_label }}
       require_up_to_date: ${{ steps.params.outputs.require_up_to_date }}
     steps:
       - name: Resolve params
@@ -49,16 +72,28 @@ jobs:
         run: |
           PR_NUM="${{ github.event.pull_request.number || '' }}"
 
-          REQUIRED_LABEL="${{ github.event.inputs.required_label || 'automerge' }}"
+          REQUIRED_LABELS="${{ github.event.inputs.required_labels || 'automerge' }}"
+          LABEL_MODE="${{ github.event.inputs.label_mode || 'any' }}"
+          VETO_LABELS="${{ github.event.inputs.veto_labels || 'do-not-merge' }}"
           MERGE_METHOD="${{ github.event.inputs.merge_method || 'squash' }}"
           MIN_APPROVALS="${{ github.event.inputs.min_approvals || '1' }}"
+          ALLOW_AUTHOR_APPROVAL="${{ github.event.inputs.allow_author_approval || 'false' }}"
           REQUIRE_UP_TO_DATE="${{ github.event.inputs.require_up_to_date || 'true' }}"
+          MAX_CHANGED_FILES="${{ github.event.inputs.max_changed_files || '' }}"
+          MAX_ADDITIONS="${{ github.event.inputs.max_additions || '' }}"
+          MAX_DELETIONS="${{ github.event.inputs.max_deletions || '' }}"
 
           echo "pr=${PR_NUM}" >> "$GITHUB_OUTPUT"
-          echo "required_label=${REQUIRED_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "required_labels=${REQUIRED_LABELS}" >> "$GITHUB_OUTPUT"
+          echo "label_mode=${LABEL_MODE}" >> "$GITHUB_OUTPUT"
+          echo "veto_labels=${VETO_LABELS}" >> "$GITHUB_OUTPUT"
           echo "merge_method=${MERGE_METHOD}" >> "$GITHUB_OUTPUT"
           echo "min_approvals=${MIN_APPROVALS}" >> "$GITHUB_OUTPUT"
+          echo "allow_author_approval=${ALLOW_AUTHOR_APPROVAL}" >> "$GITHUB_OUTPUT"
           echo "require_up_to_date=${REQUIRE_UP_TO_DATE}" >> "$GITHUB_OUTPUT"
+          echo "max_changed_files=${MAX_CHANGED_FILES}" >> "$GITHUB_OUTPUT"
+          echo "max_additions=${MAX_ADDITIONS}" >> "$GITHUB_OUTPUT"
+          echo "max_deletions=${MAX_DELETIONS}" >> "$GITHUB_OUTPUT"
 
       - name: Gate checks
         id: gates
@@ -66,9 +101,22 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const requiredLabel = `${{ steps.params.outputs.required_label }}` || 'automerge';
+            const toList = (s) => (s ?? '')
+              .split(',')
+              .map(x => x.trim())
+              .filter(Boolean);
+
+            const requiredLabels = toList(`${{ steps.params.outputs.required_labels }}`);
+            const labelMode = (`${{ steps.params.outputs.label_mode }}` || 'any').toLowerCase();
+            const vetoLabels = toList(`${{ steps.params.outputs.veto_labels }}`);
+
             const minApprovals = parseInt(`${{ steps.params.outputs.min_approvals }}` || '1', 10);
+            const allowAuthorApproval = (`${{ steps.params.outputs.allow_author_approval }}` || 'false').toLowerCase() === 'true';
             const requireUpToDate = (`${{ steps.params.outputs.require_up_to_date }}` || 'true').toLowerCase() === 'true';
+
+            const maxChangedFiles = parseInt(`${{ steps.params.outputs.max_changed_files }}` || '0', 10);
+            const maxAdditions = parseInt(`${{ steps.params.outputs.max_additions }}` || '0', 10);
+            const maxDeletions = parseInt(`${{ steps.params.outputs.max_deletions }}` || '0', 10);
 
             const prNumber = context.payload.pull_request?.number;
             if (!prNumber) {
@@ -82,38 +130,64 @@ jobs:
             });
 
             const reasons = [];
-            const labels = (pr.labels || []).map(l => (typeof l === 'string' ? l : l.name));
-            const hasLabel = labels.includes(requiredLabel);
+            const prAuthor = pr.user?.login || '';
+            const labels = (pr.labels || []).map(l => (typeof l === 'string' ? l : l.name || '')).filter(Boolean);
 
+            // Label gates
+            const hasRequired =
+              requiredLabels.length === 0
+                ? true
+                : (labelMode === 'all'
+                      ? requiredLabels.every(l => labels.includes(l))
+                      : requiredLabels.some(l => labels.includes(l)));
+            if (!hasRequired) reasons.push(`Missing required label(s) (${labelMode.toUpperCase()}): ${requiredLabels.join(', ')}`);
+
+            const hasVeto = vetoLabels.length > 0 && vetoLabels.some(l => labels.includes(l));
+            if (hasVeto) reasons.push(`Veto label present: ${vetoLabels.join(', ')}`);
+
+            // Draft / locked / conflicts
             if (pr.draft) reasons.push('PR is still a draft.');
-            if (!hasLabel) reasons.push(`Missing required label: '${requiredLabel}'.`);
-            if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
             if (pr.locked) reasons.push('PR is locked.');
+            if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
 
+            // Up-to-date gate
             if (requireUpToDate && pr.mergeable_state === 'behind') {
               reasons.push('Branch is behind base; update required.');
             }
 
-            // Approvals
+            // Size gates (optional)
+            if (Number.isFinite(maxChangedFiles) && maxChangedFiles > 0 && pr.changed_files > maxChangedFiles) {
+              reasons.push(`Too many changed files (${pr.changed_files}/${maxChangedFiles}).`);
+            }
+            if (Number.isFinite(maxAdditions) && maxAdditions > 0 && pr.additions > maxAdditions) {
+              reasons.push(`Too many additions (${pr.additions}/${maxAdditions}).`);
+            }
+            if (Number.isFinite(maxDeletions) && maxDeletions > 0 && pr.deletions > maxDeletions) {
+              reasons.push(`Too many deletions (${pr.deletions}/${maxDeletions}).`);
+            }
+
+            // Approvals (exclude bots; optionally exclude PR author)
+            const isBot = (u) => (u?.type || '').toLowerCase() === 'bot' || (u?.login || '').toLowerCase().endsWith('[bot]');
             const reviews = await github.paginate(
               github.rest.pulls.listReviews,
               { owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber, per_page: 100 }
             );
             const approvers = new Map();
             for (const r of reviews) {
-              if (r.state?.toUpperCase() === 'APPROVED' && r.user?.login) {
-                approvers.set(r.user.login, true);
-              }
-              if (r.state?.toUpperCase() === 'CHANGES_REQUESTED' && r.user?.login) {
-                approvers.delete(r.user.login);
-              }
+              const login = r.user?.login;
+              if (!login || isBot(r.user)) continue;
+              if (!allowAuthorApproval && login === prAuthor) continue;
+
+              const state = (r.state || '').toUpperCase();
+              if (state === 'APPROVED') approvers.set(login, true);
+              if (state === 'CHANGES_REQUESTED') approvers.delete(login);
             }
             const approvalCount = approvers.size;
             if (approvalCount < minApprovals) {
               reasons.push(`Not enough approvals (${approvalCount}/${minApprovals}).`);
             }
 
-            // Checks & statuses
+            // Checks & statuses (required checks must be successful or neutral/skipped)
             const ref = pr.head.sha;
             const checks = await github.rest.checks.listForRef({
               owner: context.repo.owner, repo: context.repo.repo, ref, per_page: 100
@@ -141,12 +215,15 @@ jobs:
               .addHeading('Auto-merge Preflight')
               .addTable([
                 [{data: 'Property', header: true},{data: 'Value', header: true}],
-                ['Label present', String(hasLabel)],
+                ['Required labels mode', labelMode.toUpperCase()],
+                ['Required labels present', String(hasRequired)],
+                ['Veto labels present', String(hasVeto)],
                 ['Draft', String(!!pr.draft)],
                 ['Mergeable state', pr.mergeable_state || 'unknown'],
                 ['Approvals', String(approvalCount)],
                 ['Checks OK', String(checkRunsOk && statusesOk)],
                 ['Require up-to-date', String(requireUpToDate)],
+                ['Size gates (files/add/del)', `${pr.changed_files}/${pr.additions}/${pr.deletions}`],
                 ['Eligible', eligible],
               ])
               .addRaw(reasons.length ? `\n**Reasons:** ${reasons.join(' ')}\n` : '\nAll gates passed.\n')
@@ -164,7 +241,6 @@ jobs:
         uses: peter-evans/update-branch@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # default 'merge' keeps history; change to 'rebase' if your policy prefers
           merge_method: merge
           required_approving_review_count: 0
 
@@ -179,13 +255,14 @@ jobs:
     steps:
       - name: Re-run gates
         id: gates
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request?.number;
             if (!prNumber) { core.setOutput('eligible','false'); core.setOutput('reason','No PR context'); return; }
             const { data: pr } = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber });
+
             const reasons = [];
             if (pr.draft) reasons.push('PR is still a draft.');
             if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
@@ -193,14 +270,12 @@ jobs:
             const ref = pr.head.sha;
             const checks = await github.rest.checks.listForRef({ owner: context.repo.owner, repo: context.repo.repo, ref, per_page: 100 });
             const statuses = await github.rest.repos.getCombinedStatusForRef({ owner: context.repo.owner, repo: context.repo.repo, ref });
-
             const checkRunsOk = (checks.data.check_runs || []).every(cr =>
               ['success', 'neutral', 'skipped'].includes((cr.conclusion || '').toLowerCase())
             );
             const statusesOk = (statuses.data.statuses || []).every(s =>
               ['success', 'neutral'].includes((s.state || '').toLowerCase())
             );
-
             if (!checkRunsOk || !statusesOk) reasons.push('Required checks are not all successful (post-update).');
 
             const eligible = reasons.length === 0 ? 'true' : 'false';
@@ -244,7 +319,7 @@ jobs:
               ``,
               `**Reason(s):** ${reasons || 'unknown'}`,
               ``,
-              `> Ensure required label, approvals, passing checks, and an up-to-date branch.`,
+              `> Ensure enabling label(s), no veto labels, sufficient approvals, successful required checks, size thresholds, and an up-to-date branch.`,
             ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, body
