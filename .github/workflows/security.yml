@@ -11,39 +11,53 @@ on:
 
 permissions:
   contents: read
-  security-events: write
   actions: read
+  security-events: write
 
 concurrency:
   group: security-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  ARTIFACT_RETENTION_DAYS: 14
 
 jobs:
   dependency-review:
     name: Dependency Review (PR gate)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+          allow-ghsas: |
+            # (optional) comma/newline-separated GHSAs to allowlist
+          comment-summary-in-pr: true
 
   sast-deps:
-    name: pip-audit + Bandit + Secrets scan
+    name: pip-audit + Bandit + detect-secrets
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
           cache-dependency-path: |
-            requirements*.txt
-            pyproject.toml
-            poetry.lock
+            **/requirements*.txt
+            **/pyproject.toml
+            **/poetry.lock
 
       - name: Install tools
         run: |
@@ -53,14 +67,21 @@ jobs:
       - name: Prepare security dir
         run: mkdir -p security
 
+      # Generate SARIF for each requirements* file, non-failing to avoid CI hard-stop
       - name: pip-audit → SARIF (non-failing)
+        shell: bash
         run: |
-          if [ -f requirements-dev.txt ]; then pip-audit -r requirements-dev.txt --format sarif -o security/pip-audit.dev.sarif || true; fi
-          if [ -f requirements.txt ]; then pip-audit -r requirements.txt --format sarif -o security/pip-audit.main.sarif || true; fi
-          if ls requirements-*.txt >/dev/null 2>&1; then
-            for f in requirements-*.txt; do
-              pip-audit -r "$f" --format sarif -o "security/pip-audit.${f%.txt}.sarif" || true
-            done
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for f in requirements*.txt; do
+            echo "Auditing $f"
+            pip-audit -r "$f" --format sarif -o "security/pip-audit.${f%.txt}.sarif" || true
+            found=1
+          done
+          # fallback single-run if using PEP 621/poetry without explicit req files
+          if [ $found -eq 0 ]; then
+            pip-audit --format sarif -o security/pip-audit.sarif || true
           fi
 
       - name: Bandit (non-failing)
@@ -70,7 +91,7 @@ jobs:
       - name: detect-secrets (non-failing)
         run: detect-secrets scan > security/detect-secrets.json || true
 
-      - name: Upload SARIFs
+      - name: Upload SARIFs to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
@@ -82,7 +103,7 @@ jobs:
         with:
           name: sast-deps-reports
           path: security
-          retention-days: 14
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   codeql:
     name: CodeQL (Python)
@@ -94,10 +115,14 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
+
       - uses: github/codeql-action/init@v3
         with:
           languages: python
+          queries: +security-and-quality
+
       - uses: github/codeql-action/autobuild@v3
+
       - uses: github/codeql-action/analyze@v3
         with:
           category: '/language:python'
@@ -106,10 +131,12 @@ jobs:
     name: SBOM (Syft / CycloneDX)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate SBOM (CycloneDX)
+      - name: Generate SBOM (CycloneDX) to security/sbom.cdx.json
         uses: anchore/syft-action@v0.17.0
         with:
           options: dir:. -o cyclonedx-json=security/sbom.cdx.json
@@ -119,12 +146,15 @@ jobs:
         with:
           name: sbom-cyclonedx
           path: security/sbom.cdx.json
-          retention-days: 30
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   container-scan:
     name: Dockerfile Lint + Trivy Scan
     runs-on: ubuntu-latest
     if: hashFiles('Dockerfile') != ''
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -136,6 +166,7 @@ jobs:
         with:
           dockerfile: Dockerfile
 
+      # Filesystem scan (vulns) -> SARIF, non-failing gate
       - name: Trivy FS → SARIF (non-failing)
         uses: aquasecurity/trivy-action@0.24.0
         with:
@@ -144,7 +175,10 @@ jobs:
           output: 'security/trivy-fs.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM,LOW'
           ignore-unfixed: true
+          vuln-type: 'os,library'
+          exit-code: '0'
 
+      # IaC/config scan -> SARIF, non-failing
       - name: Trivy Config → SARIF (non-failing)
         uses: aquasecurity/trivy-action@0.24.0
         with:
@@ -166,7 +200,7 @@ jobs:
         with:
           name: trivy-reports
           path: security
-          retention-days: 14
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   gate:
     name: Security Gate
