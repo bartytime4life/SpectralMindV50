@@ -83,6 +83,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.0.3] — 2025-09-03
+### 🚀 Added
+- CI bootstrap: GitHub Actions `ci.yml` smoke tests, Python lint/type-check hooks.
+- Pre-commit baseline (`.pre-commit-config.yaml`) with ruff/black/isort.
+- Initial Kaggle notebook sync script (`scripts/kaggle_submit.sh`).
+
+---
+
+## [0.0.2] — 2025-09-02
+### 🚀 Added
+- Core calibration modules scaffolded under `src/spectramind/calib/`.
+- Config directories (`configs/data`, `configs/model`, `configs/loss`) with toy YAMLs.
+- Tests skeleton under `tests/unit/`.
+
+### 🔄 Changed
+- Makefile: added `lint`, `test`, `sbom` targets.
+- Dockerfile: GPU-ready base with pinned CUDA/Torch.
+
+---
+
+## [0.0.1] — 2025-09-01
+### 🚀 Added
+- Repo initialization: LICENSE, README, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md.
+- Base `pyproject.toml`, `setup.cfg`, and Poetry lockfile stub.
+- `.github/workflows/` directory created (empty placeholders).
+- ADR system scaffolded (`ADR/0000-template.md`).
+- Initial diagrams under `assets/diagrams/`.
+
+---
+
 ## Conventions
 - Use **Added / Changed / Fixed / Deprecated / Removed / Security / Performance** buckets.
 - Dates in **YYYY-MM-DD** (UTC).
