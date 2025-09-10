@@ -15,12 +15,15 @@ concurrency:
 
 jobs:
   sweep:
-    name: Delete old artifacts
+    name: 🧹 Delete old artifacts
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - name: Checkout repo (read-only)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Remove artifacts older than 14 days (keep 5 most recent)
         uses: c-hive/gha-remove-artifacts@v1
@@ -29,5 +32,31 @@ jobs:
           skip-tags: true
           skip-recent: 5
 
+      - name: Sweep workflow run logs older than 30 days
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - 30);
+            const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+              status: "completed"
+            });
+            for (const run of runs) {
+              if (new Date(run.updated_at) < cutoff) {
+                console.log(`Deleting logs for run ${run.id} (${run.name})`);
+                await github.rest.actions.deleteWorkflowRunLogs({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id
+                });
+              }
+            }
+
       - name: Log completion
-        run: echo "🧹 Artifact cleanup complete. Old artifacts (>14d) deleted, keeping last 5."
+        run: |
+          echo "🧹 Artifact cleanup complete."
+          echo "   - Old artifacts (>14d) removed (last 5 kept)."
+          echo "   - Workflow run logs >30d pruned."
