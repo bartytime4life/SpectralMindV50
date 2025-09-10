@@ -36,9 +36,9 @@ jobs:
       - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
+          comment-summary-in-pr: true
           allow-ghsas: |
             # (optional) comma/newline-separated GHSAs to allowlist
-          comment-summary-in-pr: true
 
   sast-deps:
     name: pip-audit + Bandit + detect-secrets
@@ -115,14 +115,11 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v5
-
       - uses: github/codeql-action/init@v3
         with:
           languages: python
           queries: +security-and-quality
-
       - uses: github/codeql-action/autobuild@v3
-
       - uses: github/codeql-action/analyze@v3
         with:
           category: '/language:python'
@@ -135,12 +132,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
-
       - name: Generate SBOM (CycloneDX) to security/sbom.cdx.json
-        uses: anchore/syft-action@v0.17.0
+        uses: anchore/syft-action@v0.20.5
         with:
           options: dir:. -o cyclonedx-json=security/sbom.cdx.json
-
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
