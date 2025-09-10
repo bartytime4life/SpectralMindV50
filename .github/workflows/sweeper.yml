@@ -2,22 +2,32 @@ name: artifact-sweeper
 
 on:
   schedule:
-    - cron: "30 3 * * 0"  # Sundays 03:30 UTC
+    - cron: "30 3 * * 0"   # Sundays 03:30 UTC
   workflow_dispatch:
 
 permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: artifact-sweeper-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sweep:
+    name: Delete old artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Delete old artifacts (>14 days)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Remove artifacts older than 14 days (keep 5 most recent)
         uses: c-hive/gha-remove-artifacts@v1
         with:
           age: 14 days
           skip-tags: true
           skip-recent: 5
+
+      - name: Log completion
+        run: echo "🧹 Artifact cleanup complete. Old artifacts (>14d) deleted, keeping last 5."
