@@ -4,9 +4,30 @@ on:
   schedule:
     - cron: "30 3 * * 0"   # Sundays 03:30 UTC
   workflow_dispatch:
+    inputs:
+      days_to_keep:
+        description: 'Delete artifacts older than this many days'
+        required: false
+        default: '14'
+      keep_latest_per_name:
+        description: 'Always keep the N most-recent per artifact name'
+        required: false
+        default: '5'
+      dry_run:
+        description: 'Show what would be deleted without deleting (true/false)'
+        required: false
+        default: 'true'
+      protect_patterns:
+        description: 'Comma-separated globs to preserve (e.g. "release-*,sbom*")'
+        required: false
+        default: 'release-*,sbom*'
+      include_patterns:
+        description: 'Comma-separated globs to consider (default: all artifacts)'
+        required: false
+        default: '*'
 
 permissions:
-  actions: write
+  actions: write     # required to list/delete artifacts and run logs
   contents: read
 
 concurrency:
@@ -15,48 +36,181 @@ concurrency:
 
 jobs:
   sweep:
-    name: 🧹 Delete old artifacts
+    name: 🧹 Sweep artifacts & old run logs
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout repo (read-only)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Resolve inputs
+        id: cfg
+        shell: bash
+        run: |
+          # Inputs are empty for cron; set safe defaults
+          DAYS="${{ github.event.inputs.days_to_keep || '14' }}"
+          KEEP_N="${{ github.event.inputs.keep_latest_per_name || '5' }}"
+          DRY="${{ github.event.inputs.dry_run || 'true' }}"
+          PROTECT="${{ github.event.inputs.protect_patterns || 'release-*,sbom*' }}"
+          INCLUDE="${{ github.event.inputs.include_patterns || '*' }}"
+          echo "days=${DAYS}" >> "$GITHUB_OUTPUT"
+          echo "keep=${KEEP_N}" >> "$GITHUB_OUTPUT"
+          echo "dry=${DRY}" >> "$GITHUB_OUTPUT"
+          echo "protect=${PROTECT}" >> "$GITHUB_OUTPUT"
+          echo "include=${INCLUDE}" >> "$GITHUB_OUTPUT"
 
-      - name: Remove artifacts older than 14 days (keep 5 most recent)
-        uses: c-hive/gha-remove-artifacts@v1
-        with:
-          age: 14 days
-          skip-tags: true
-          skip-recent: 5
-
-      - name: Sweep workflow run logs older than 30 days
-        uses: actions/github-script@v7
+      - name: 🧾 Plan & prune artifacts
+        id: prune
+        uses: actions/github-script@v8
         with:
           script: |
-            const cutoff = new Date();
-            cutoff.setDate(cutoff.getDate() - 30);
-            const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 100,
-              status: "completed"
-            });
-            for (const run of runs) {
-              if (new Date(run.updated_at) < cutoff) {
-                console.log(`Deleting logs for run ${run.id} (${run.name})`);
-                await github.rest.actions.deleteWorkflowRunLogs({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  run_id: run.id
-                });
+            // ---------- helpers ----------
+            const daysToKeep = parseInt(core.getInput('days') || '14', 10);
+            const keepLatest = Math.max(0, parseInt(core.getInput('keep') || '5', 10));
+            const dryRun = (core.getInput('dry') || 'true').toLowerCase() === 'true';
+
+            const toList = (s) => (s ?? '').split(',').map(x => x.trim()).filter(Boolean);
+            const globToRegex = (g) => new RegExp('^' + g
+              .replace(/[.+^${}()|[\]\\]/g,'\\$&')
+              .replace(/\*/g,'.*')
+              .replace(/\?/g,'.') + '$','i');
+
+            const protectGlobs = toList(core.getInput('protect'));
+            const includeGlobs = toList(core.getInput('include') || '*');
+            const protectRx = protectGlobs.map(globToRegex);
+            const includeRx = includeGlobs.map(globToRegex);
+            const matchesAny = (n, rx) => rx.length === 0 || rx.some(r => r.test(n));
+
+            const cutoff = Date.now() - daysToKeep*24*60*60*1000;
+
+            // ---------- fetch all artifacts ----------
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
+            );
+
+            // group by name to keep newest N
+            const byName = new Map();
+            for (const a of artifacts) {
+              const n = a.name || `artifact-${a.id}`;
+              if (!byName.has(n)) byName.set(n, []);
+              byName.get(n).push(a);
+            }
+            for (const arr of byName.values()) {
+              arr.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+            }
+
+            let total=0, considered=0, deleted=0, kept=0, protectedCount=0, expired=0, errors=0;
+            let bytesScanned=0, bytesDeleted=0;
+
+            for (const art of artifacts) {
+              total += 1;
+              const name = art.name || `artifact-${art.id}`;
+              const size = Number(art.size_in_bytes || 0);
+              bytesScanned += size;
+              const created = new Date(art.created_at || art.updated_at || Date.now()).getTime();
+
+              // skip if not in include set
+              if (!matchesAny(name, includeRx)) { kept++; continue; }
+
+              // protected by glob
+              if (protectRx.length && protectRx.some(r => r.test(name))) {
+                protectedCount++; continue;
+              }
+
+              // keep newest N per artifact name
+              const siblings = byName.get(art.name || '') ?? [];
+              const idx = siblings.findIndex(x => x.id === art.id);
+              if (idx > -1 && idx < keepLatest) { kept++; continue; }
+
+              // expired or missing content? purge regardless of age
+              if (art.expired || !art.archive_download_url) {
+                expired++;
+                if (!dryRun) {
+                  try {
+                    await github.rest.actions.deleteArtifact({
+                      owner: context.repo.owner, repo: context.repo.repo, artifact_id: art.id
+                    });
+                    deleted++; bytesDeleted += size;
+                  } catch (e) { errors++; core.error(`Failed deleting expired ${name}: ${e.message}`); }
+                }
+                continue;
+              }
+
+              // age cutoff
+              if (created > cutoff) { kept++; continue; }
+
+              considered++;
+              if (dryRun) {
+                core.info(`[DRY] would delete: ${name} (#${art.id}) ~ ${size} bytes`);
+              } else {
+                try {
+                  await github.rest.actions.deleteArtifact({
+                    owner: context.repo.owner, repo: context.repo.repo, artifact_id: art.id
+                  });
+                  deleted++; bytesDeleted += size;
+                  core.info(`deleted: ${name} (#${art.id}) ~ ${size} bytes`);
+                } catch (e) {
+                  errors++; core.error(`Failed deleting ${name}: ${e.message}`);
+                }
               }
             }
 
-      - name: Log completion
-        run: |
-          echo "🧹 Artifact cleanup complete."
-          echo "   - Old artifacts (>14d) removed (last 5 kept)."
-          echo "   - Workflow run logs >30d pruned."
+            const fmt = (n)=>{const u=['B','KB','MB','GB','TB'];let i=0,x=n;while(x>=1024&&i<u.length-1){x/=1024;i++;}return `${x.toFixed(2)} ${u[i]}`;}
+
+            core.summary
+              .addHeading('Artifact Sweeper Report')
+              .addTable([
+                [{data:'Metric',header:true},{data:'Value',header:true}],
+                ['Days to keep', String(daysToKeep)],
+                ['Keep latest per name', String(keepLatest)],
+                ['Dry run', String(dryRun)],
+                ['Protected patterns', protectGlobs.join(', ') || '(none)'],
+                ['Included patterns', includeGlobs.join(', ') || '(all)'],
+                ['Total scanned', String(total)],
+                ['Considered', String(considered)],
+                ['Deleted', String(deleted)],
+                ['Expired auto-deleted', String(expired)],
+                ['Kept (recent/other)', String(kept)],
+                ['Errors', String(errors)],
+                ['Bytes scanned', fmt(bytesScanned)],
+                ['Bytes deleted (est.)', fmt(bytesDeleted)]
+              ])
+              .write();
+
+            core.setOutput('deleted', String(deleted));
+            core.setOutput('errors', String(errors));
+
+      - name: 🧹 Sweep workflow run logs (older than 30 days)
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const cutoff = new Date(Date.now() - 30*24*60*60*1000);
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRunsForRepo,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100, status: "completed" }
+            );
+            let pruned = 0;
+            for (const run of runs) {
+              if (new Date(run.updated_at) < cutoff) {
+                try {
+                  await github.rest.actions.deleteWorkflowRunLogs({
+                    owner: context.repo.owner, repo: context.repo.repo, run_id: run.id
+                  });
+                  pruned++;
+                } catch (e) {
+                  core.warning(`Failed to delete logs for run ${run.id}: ${e.message}`);
+                }
+              }
+            }
+            core.summary.addHeading('Run Log Sweeper').addList([`Logs pruned: ${pruned}`, `Cutoff: 30 days`]).write();
+
+      - name: Upload sweep summary
+        if: always()
+        run: cp "$GITHUB_STEP_SUMMARY" artifact-sweeper-summary.md
+
+      - name: Upload summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-sweeper-summary
+          path: artifact-sweeper-summary.md
+          retention-days: 7
