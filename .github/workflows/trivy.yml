@@ -41,6 +41,7 @@ jobs:
 
       # ---- File system (repo) scan: vuln + secrets + misconfig + license -> SARIF ----
       - name: Trivy FS → SARIF
+        id: trivy-fs
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
@@ -55,6 +56,7 @@ jobs:
 
       # ---- IaC/config scan (Terraform/K8s/Dockerfile, etc.) -> SARIF ----
       - name: Trivy Config → SARIF
+        id: trivy-config
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: config
@@ -64,7 +66,13 @@ jobs:
           timeout: 10m
         continue-on-error: true
 
-      # ---- Upload both SARIFs to GitHub code scanning (skip on forked PRs) ----
+      # ---- Ensure SARIFs exist even if scans produced no output ----
+      - name: Ensure SARIFs
+        run: |
+          [ -s trivy-fs.sarif ] || echo '{"runs":[]}' > trivy-fs.sarif
+          [ -s trivy-config.sarif ] || echo '{"runs":[]}' > trivy-config.sarif
+
+      # ---- Upload SARIF to GitHub code scanning (fork-safe) ----
       - name: Upload FS SARIF
         if: ${{ (github.event_name != 'pull_request') || (github.event.pull_request.head.repo.fork != true) }}
         uses: github/codeql-action/upload-sarif@v3
@@ -139,6 +147,7 @@ jobs:
 
       - name: Trivy Image → SARIF
         if: steps.detect.outputs.found == 'true'
+        id: trivy-image
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: image
@@ -151,6 +160,11 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM,LOW
           timeout: 10m
         continue-on-error: true
+
+      - name: Ensure image SARIF
+        if: steps.detect.outputs.found == 'true'
+        run: |
+          [ -s trivy-image.sarif ] || echo '{"runs":[]}' > trivy-image.sarif
 
       - name: Upload Image SARIF
         if: steps.detect.outputs.found == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
