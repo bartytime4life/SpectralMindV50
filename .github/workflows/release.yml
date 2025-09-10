@@ -28,17 +28,15 @@ jobs:
   validate:
     name: Validate tag & VERSION
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: { contents: read }
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       ver: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.prerelease.outputs.prerelease }}
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - name: Extract tag
         id: tag
@@ -82,12 +80,11 @@ jobs:
       image_digest: ${{ steps.buildx.outputs.digest }}
     steps:
       - name: Checkout (full history)
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -139,7 +136,7 @@ jobs:
             echo "No scripts/package_submission.sh; skipping Kaggle bundle."
           fi
 
-      - name: Upload Python dist
+      - name: Upload Python dist (+sigs)
         uses: actions/upload-artifact@v4
         with:
           name: python-dist
@@ -228,7 +225,7 @@ jobs:
           cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:latest"
 
       - name: Attest build provenance (GitHub attestation)
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.buildx.outputs.digest }}
@@ -238,11 +235,10 @@ jobs:
     name: Generate SBOMs
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    permissions: { contents: write }
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Repo SBOM (CycloneDX JSON)
         uses: anchore/sbom-action@v0.20.5
@@ -252,7 +248,7 @@ jobs:
           format: cyclonedx-json
 
       - name: Python deps SBOM (CycloneDX)
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -279,16 +275,14 @@ jobs:
     name: Create GitHub Release
     needs: [validate, build, sbom]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    permissions: { contents: write }
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Download all artifacts
         uses: actions/download-artifact@v5
-        with:
-          path: release-assets
+        with: { path: release-assets }
 
       - name: Flatten artifacts into assets/
         id: gather
@@ -296,6 +290,8 @@ jobs:
           mkdir -p assets
           shopt -s globstar nullglob
           for f in release-assets/**/*; do [ -f "$f" ] && cp -v "$f" assets/; done
+          # include container digest as a text file for convenience
+          echo "${{ needs.build.outputs.image_digest }}" > assets/image-digest.txt
           echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
           ls -l assets || true
 
@@ -326,12 +322,11 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -357,8 +352,7 @@ jobs:
     needs: [validate, build]
     runs-on: ubuntu-latest
     if: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
-    permissions:
-      contents: read
+    permissions: { contents: read }
     steps:
       - name: Download python dist
         uses: actions/download-artifact@v5
@@ -383,8 +377,7 @@ jobs:
     needs: [validate, build, testpypi-publish]
     runs-on: ubuntu-latest
     if: ${{ secrets.PYPI_API_TOKEN != '' }}
-    permissions:
-      contents: read
+    permissions: { contents: read }
     steps:
       - name: Download python dist
         uses: actions/download-artifact@v5
