@@ -34,6 +34,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
       - name: typos
         uses: crate-ci/typos@v1
         with:
@@ -59,7 +60,7 @@ jobs:
   linkcheck:
     name: External link check (lychee)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -102,6 +103,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Summarize linkcheck
+        if: always()
+        run: |
+          echo "### Lychee summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f ./lychee/results.md ]; then
+            sed -n '1,120p' ./lychee/results.md >> $GITHUB_STEP_SUMMARY || true
+          else
+            echo "_No lychee report generated._" >> $GITHUB_STEP_SUMMARY
+          fi
+
   build:
     name: Build MkDocs site
     runs-on: ubuntu-latest
@@ -110,8 +121,7 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
@@ -172,7 +182,10 @@ jobs:
         env:
           MKDOCS_CONFIG_FILE: mkdocs.yml
         run: |
-          mkdocs build --strict --verbose
+          set -euo pipefail
+          mkdocs build --strict --verbose | tee build.log
+          echo "### MkDocs build (tail)" >> $GITHUB_STEP_SUMMARY
+          tail -n 200 build.log >> $GITHUB_STEP_SUMMARY || true
 
       - name: Upload site artifact (Pages)
         uses: actions/upload-pages-artifact@v4
