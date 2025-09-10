@@ -1,3 +1,4 @@
+# src/spectramind/losses/nonneg.py
 from __future__ import annotations
 
 """
@@ -18,7 +19,7 @@ All functions are torch-only and can be composed inside any training loop or Lig
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 from torch import Tensor, nn
@@ -74,7 +75,6 @@ def _soft_hinge(x: Tensor, margin: float, p: float = 2.0, beta: float = 1.0) -> 
     Soft hinge: softplus(margin - x) ** p
     - Smoothly penalizes values below 'margin' (default margin=0)
     """
-    # softplus(z) ~ max(z, 0) but smooth; scale using beta
     z = beta * (margin - x)
     return torch.nn.functional.softplus(z) ** p
 
@@ -200,13 +200,11 @@ def bounds_penalty(
         reduction="none",
     )
 
-    # upper bound (x <= upper) → apply lower-bound penalty on (2*upper - x) trick OR directly:
+    # upper bound (x <= upper)
     if upper is not None:
         if mode == "log_barrier":
-            # For upper barrier: -log((upper - x) + eps)
             upper_pen = -torch.log((upper - x).clamp_min(0.0) + eps)
         elif mode == "soft_hinge":
-            # Penalize exceedance: softplus(x - upper) ** p
             upper_pen = torch.nn.functional.softplus((x - upper) * beta) ** p
         elif mode in {"hinge", "relu"}:
             upper_pen = torch.relu(x - upper) ** p
