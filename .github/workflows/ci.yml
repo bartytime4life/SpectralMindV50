@@ -23,7 +23,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write     # for SARIF uploads
+  security-events: write   # SARIF uploads
   actions: read
   packages: read
 
@@ -36,8 +36,8 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
   PYTHONHASHSEED: "0"
-  MPLBACKEND: "Agg"          # headless-safe matplotlib
-  PYTHONWARNINGS: "error::DeprecationWarning,ignore:::pkg_resources"  # fail on our deprecations
+  MPLBACKEND: "Agg"   # headless-safe matplotlib
+  PYTHONWARNINGS: "error::DeprecationWarning,ignore:::pkg_resources"
   ARTIFACT_RETENTION_DAYS: "14"
 
 jobs:
@@ -92,6 +92,9 @@ jobs:
         run: |
           python -m pip install "pre-commit>=3,<4"
           pre-commit run --all-files --show-diff-on-failure
+
+      - name: Ruff (format check)
+        run: ruff format --check .
 
       - name: Ruff (lint) → SARIF + check
         run: |
@@ -177,7 +180,9 @@ jobs:
             setup.cfg
             setup.py
 
-      - name: Build sdist/wheel
+      - name: Build sdist/wheel (deterministic)
+        env:
+          SOURCE_DATE_EPOCH: "1704067200"  # 2024-01-01 for reproducible builds
         run: |
           python -m pip install --upgrade pip build twine
           python -m build
@@ -228,11 +233,12 @@ jobs:
 
       - name: Run pip-audit (best-effort) → SARIF
         run: |
-          # Prefer lock/requirements if available, fall back to environment
           if ls requirements*.txt >/dev/null 2>&1; then
             : > pip-audit.sarif
             for f in requirements*.txt; do
+              echo "::group::pip-audit $f"
               pip-audit -r "$f" --format sarif --progress-spinner=off >> pip-audit.sarif || true
+              echo "::endgroup::"
             done
           else
             pip-audit --format sarif --progress-spinner=off > pip-audit.sarif || true
