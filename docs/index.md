@@ -1,79 +1,26 @@
-# SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge
+# 🛰️ SpectraMind V50 — Architecture
 
-Mission-grade, CLI-first, Hydra-driven, DVC-tracked, Kaggle-ready repository.  
+Mission-grade, CLI-first, Hydra-driven, DVC-tracked, Kaggle-ready repository.
 Physics-informed, neuro-symbolic pipeline for **multi-sensor fusion** (FGS1 + AIRS) producing calibrated μ/σ over 283 spectral bins.
 
 ---
 
-## 🚀 Quickstart
+## 📦 High-Level Design
 
-```bash
-# 1. Install dev environment
-make dev
-
-# 2. Run pipeline (example: local config)
-spectramind calibrate --config-name train +calib=nominal +env=local
-spectramind train     --config-name train +model=v50
-spectramind predict   --config-name predict
-spectramind submit    --config-name submit
-````
-
-All stages are **reproducible and Kaggle-safe** (no internet calls during pipeline execution).
-
----
-
-## 📂 Repository Layout
-
-```text
-spectramind-v50/
-├─ configs/           # Hydra config groups (env, data, calib, model, training, loss, logger)
-├─ data/              # DVC-tracked datasets (raw → interim → processed)
-├─ schemas/           # JSON Schemas (submission, events, config_snapshot)
-├─ scripts/           # Pipeline scripts (package_submission.sh, kaggle_submit.sh, etc.)
-├─ src/spectramind/   # Core Python package (cli, pipeline, models, inference, reports)
-├─ notebooks/         # Experiments (e.g., ablations, submission checks)
-├─ docs/              # MkDocs site (guides, diagrams, index.md)
-└─ .github/workflows/ # CI/CD (lint, tests, Kaggle CI, SBOM, release)
-```
-
-👉 See [ARCHITECTURE.md](../ARCHITECTURE.md) for the detailed module design.
-
----
-
-## 🛠️ Features
-
-* **Unified CLI** via Typer (`spectramind`) with autocompletion and rich error reporting.
-* **Hydra configs** for reproducible experiment composition.
-* **DVC pipeline**: `calibrate → train → predict → submit` with full lineage.
-* **Dual-channel modeling**:
-
-  * **FGS1 encoder** (time-series; Structured SSM / Mamba).
-  * **AIRS encoder** (spectral; CNN/GNN).
-  * Fused decoder outputs per-bin μ/σ.
-* **Physics-informed constraints**: smoothness, non-negativity, molecular priors.
-* **JSONL event logging** for every run (see `schemas/events.schema.json`).
-* **Kaggle-ready artifacts**: validated against `submission.schema.json`.
-
----
-
-## 📊 Diagrams
-
-### Pipeline Overview
+The repository implements a **modular pipeline**:
 
 ```mermaid
-flowchart LR
-  RAW["FGS1 / AIRS Raw Inputs"]:::raw
-  CAL["Calibration Chain"]:::stage
-  ENC_FGS1["FGS1 Encoder (SSM)"]:::model
-  ENC_AIRS["AIRS Encoder (CNN/GNN)"]:::model
-  DEC["Fusion Decoder → μ/σ (283 bins)"]:::model
-  SUB["Submission (CSV/ZIP)"]:::out
+flowchart TD
+  A["Raw Inputs<br/>FGS1 (photometry) + AIRS (spectroscopy)"]:::raw
+  B["Calibration<br/>(ADC, dark, flat, trace, phase, photometry)"]:::stage
+  C["Preprocessing<br/>tensor packs, binning, masks"]:::stage
+  D["Encoders<br/>FGS1 = SSM (Mamba)<br/>AIRS = CNN/GNN"]:::model
+  E["Fusion Decoder<br/>cross-attention → μ,σ (283 bins)"]:::model
+  F["Diagnostics<br/>GLL, FFT, UMAP, physics checks"]:::stage
+  G["Submission<br/>validated CSV/ZIP"]:::out
+  H["Kaggle Leaderboard"]:::out
 
-  RAW --> CAL --> ENC_FGS1
-  CAL --> ENC_AIRS
-  ENC_FGS1 --> DEC
-  ENC_AIRS --> DEC
-  DEC --> SUB
+  A --> B --> C --> D --> E --> F --> G --> H
 
   classDef raw fill:#f9f,stroke:#333,stroke-width:1px;
   classDef stage fill:#bbf,stroke:#333,stroke-width:1px;
@@ -83,19 +30,103 @@ flowchart LR
 
 ---
 
-## 📚 Documentation Map
+## 🧩 Core Modules
 
-* [Quickstart Guide](guides/quickstart.md)
-* [Hydra Configs](guides/hydra.md)
-* [DVC Pipelines](guides/dvc.md)
-* [Kaggle Integration](guides/kaggle.md)
-* [Architecture](../ARCHITECTURE.md)
-* [Contributing](../CONTRIBUTING.md)
+### 1. **CLI Layer**
+
+* Single entrypoint: `spectramind` (`Typer` app).
+* Subcommands: `calibrate`, `preprocess`, `train`, `predict`, `diagnose`, `submit`.
+* Features: shell autocompletion, rich error handling, JSONL event logs.
+
+### 2. **Configuration**
+
+* **Hydra** config groups (`configs/`) drive all stages:
+
+  * `env/`, `data/`, `calib/`, `model/`, `training/`, `loss/`, `logger/`.
+* **Snapshots**: configs hashed → `schemas/config_snapshot.schema.json`.
+
+### 3. **Calibration (`src/spectramind/calib/`)**
+
+* Modules: `adc`, `dark`, `flat`, `cds`, `trace`, `phase`, `photometry`.
+* All NaN-safe, Torch-first, with NumPy fallbacks.
+* Outputs: calibrated data cubes with variance propagation.
+
+### 4. **Preprocessing**
+
+* Feature packing into tensors `[B, T, C]` with masks.
+* Independent DVC stage (decoupled from calibration).
+
+### 5. **Model (`src/spectramind/models/`)**
+
+* **FGS1 encoder**: Structured State-Space Model (Mamba).
+* **AIRS encoder**: CNN/GNN spectral extractor.
+* **Fusion decoder**: cross-attention block aligning FGS1 timing with AIRS features.
+* Output: μ and σ (heteroscedastic).
+
+### 6. **Losses**
+
+* Composite Physics-Informed Loss:
+
+  * Gaussian log-likelihood (FGS1 ×58).
+  * Smoothness, non-negativity, band coherence, calibration penalties.
+
+### 7. **Diagnostics (`src/spectramind/diagnostics/`)**
+
+* GLL scoring, residual stats, FFT/UMAP projections.
+* Physics checks: non-negativity, bounded depths, σ>0.
+* HTML/JSONL report export.
+
+### 8. **Submission**
+
+* Validators check against `schemas/submission.schema.json`.
+* Packaged as Kaggle-safe CSV/ZIP.
 
 ---
 
-## 📜 License
-
-Released under the MIT License. See [LICENSE](../LICENSE).
+## 📂 Repository Layout
 
 ```
+spectramind-v50/
+├─ configs/            # Hydra configs
+├─ schemas/            # JSON Schemas (submission, events, config_snapshot)
+├─ scripts/            # CLI helpers (bump_version.sh, kaggle_submit.sh, etc.)
+├─ src/spectramind/    # Core package (cli, calib, models, diagnostics, train, submit)
+├─ notebooks/          # Experiments (ablation, error analysis, submission check)
+├─ docs/               # MkDocs site (guides, diagrams, ARCHITECTURE.md)
+└─ .github/workflows/  # CI/CD (lint, tests, Kaggle, SBOM, docs)
+```
+
+---
+
+## 🔄 Data & Reproducibility
+
+* **DVC pipeline** (`dvc.yaml`) defines stages: `calibrate → preprocess → train → predict → diagnose → submit`.
+* Each stage caches outputs; reruns only if inputs/configs change.
+* **Data lineage**: raw → interim → processed → model-ready tensors.
+
+---
+
+## 🧪 Scientific Guardrails
+
+* Smoothness + coherence constraints → prevent jagged/unphysical spectra.
+* Non-negativity + boundedness → transit depths ∈ \[0,1].
+* Honest uncertainty calibration → σ strictly >0.
+* FGS1 bin anchor → absolute transit depth always aligned.
+
+---
+
+## 📊 CI/CD & Validation
+
+* **Pre-commit**: ruff, black, isort, mypy, bandit, secrets.
+* **CI**: GitHub Actions run lint/tests, Kaggle CI, artifact sweeps, SBOM refresh.
+* **Kaggle runtime**: `bin/kaggle-boot.sh` installs deps + PyG; configs guard GPU use.
+
+---
+
+## 🌌 Scientific Context
+
+* Designed for ESA’s **Ariel mission** (launch \~2029) targeting 1,000+ exoplanets.
+* Anchored in recent JWST/ERA discoveries: CO₂, SO₂, H₂O detection.
+* Goal: reproducible, physics-credible spectra ready for science council validation.
+
+---
