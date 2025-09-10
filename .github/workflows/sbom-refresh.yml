@@ -3,10 +3,10 @@ name: release
 on:
   push:
     tags:
-      - 'v*'                    # e.g. v1.2.0, v1.2.0-rc.1
+      - 'v*'              # e.g. v1.2.0, v1.2.0-rc.1
   workflow_dispatch:
 
-# Default to least privilege; escalate per job as needed
+# Least privilege by default; escalate per job only when needed
 permissions:
   contents: read
   actions: read
@@ -72,9 +72,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # upload artifacts
-      packages: write          # push GHCR image
-      id-token: write          # keyless signing/attestations
+      contents: write      # upload artifacts
+      packages: write      # push GHCR image
+      id-token: write      # keyless signing/attestations
     outputs:
       ver: ${{ steps.v.outputs.ver }}
       image_digest: ${{ steps.buildx.outputs.digest }}
@@ -87,7 +87,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
           cache-dependency-path: |
             **/pyproject.toml
             **/setup.cfg
@@ -117,8 +117,7 @@ jobs:
 
       - name: Sign Python dist (keyless via OIDC)
         working-directory: dist
-        env:
-          COSIGN_EXPERIMENTAL: "true"
+        env: { COSIGN_EXPERIMENTAL: "true" }
         run: |
           for f in *; do
             cosign sign-blob --yes "$f" \
@@ -209,16 +208,14 @@ jobs:
 
       - name: Sign images (keyless default)
         if: ${{ !secrets.COSIGN_PRIVATE_KEY }}
-        env:
-          COSIGN_EXPERIMENTAL: "true"
+        env: { COSIGN_EXPERIMENTAL: "true" }
         run: |
           cosign sign --yes "${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}"
           cosign sign --yes "${{ env.IMAGE_NAME }}:latest"
 
       - name: Sign images (key-based)
         if: ${{ secrets.COSIGN_PRIVATE_KEY }}
-        env:
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        env: { COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }} }
         run: |
           printf '%s' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
           cosign sign --key cosign.key "${{ env.IMAGE_NAME }}:${{ steps.v.outputs.ver }}"
@@ -251,7 +248,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
       - run: |
           pip install cyclonedx-bom
           cyclonedx-bom -o sbom-python.json || true
@@ -329,7 +326,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: pip
 
       - name: Install mkdocs + plugins
         run: |
