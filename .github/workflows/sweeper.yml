@@ -1,0 +1,23 @@
+name: artifact-sweeper
+
+on:
+  schedule:
+    - cron: "30 3 * * 0"  # Sundays 03:30 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete old artifacts (>14 days)
+        uses: c-hive/gha-remove-artifacts@v1
+        with:
+          age: 14 days
+          skip-tags: true
+          skip-recent: 5
