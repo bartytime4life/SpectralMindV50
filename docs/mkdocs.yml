@@ -1,15 +1,20 @@
 # docs/mkdocs.yml — SpectraMind V50 Documentation Site
+# =============================================================================
+# MkDocs builds from docs/ by default. Ensure all referenced files live under docs/.
+# If you keep sources elsewhere, add a build step that copies them into docs/.
+# =============================================================================
 
 site_name: "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge"
 site_description: "Mission-grade, physics-informed, neuro-symbolic pipeline for exoplanet spectroscopy"
 site_author: "SpectraMind V50 Contributors"
 site_url: "https://your-org.github.io/spectramind-v50/"
 repo_url: "https://github.com/your-org/spectramind-v50"
-repo_name: "spectramind-v50"
+repo_name: "your-org/spectramind-v50"
 edit_uri: "edit/main/docs/"
 
-# NOTE: MkDocs only serves files from docs_dir (default: docs).
-# Ensure all referenced files live under docs/, or set up a build step that syncs them there.
+# Build behaviour
+strict: true            # fail the build on bad links/ref errors
+use_directory_urls: true
 
 theme:
   name: material
@@ -18,12 +23,15 @@ theme:
     - navigation.expand
     - navigation.instant
     - navigation.tabs
+    - navigation.sections
+    - navigation.tracking
+    - toc.integrate
     - search.highlight
     - search.suggest
     - content.code.copy
     - content.code.annotate
     - content.tabs.link
-    - toc.integrate
+    - announce.dismiss
   palette:
     - scheme: default
       primary: indigo
@@ -36,6 +44,14 @@ theme:
         name: Switch to dark mode
   logo: assets/logos/spectramind-logo.png      # docs/assets/logos/...
   favicon: assets/logos/spectramind-logo.png   # docs/assets/logos/...
+
+# Optional: footer / social / analytics
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/your-org/spectramind-v50
+      name: GitHub
+  generator: false
 
 nav:
   - Home: index.md
@@ -84,13 +100,16 @@ plugins:
             heading_level: 2
             separate_signature: true
             inherited_members: true
+            # you can add: filters, selection, and summary settings here if needed
   - mkdocs-jupyter:
       include_source: true
       execute: false          # set to true in CI if you want execution during build
       allow_errors: false
-  - awesome-pages
+      # render only notebooks under docs/notebooks/
+      glob_dir: "docs/notebooks"
+  - awesome-pages   # optional: honors .pages files for custom ordering if present
 
-# Mermaid (first-class with Material + pymdownx.superfences)
+# Markdown / extensions
 markdown_extensions:
   - admonition
   - attr_list
@@ -99,6 +118,7 @@ markdown_extensions:
   - md_in_html
   - toc:
       permalink: true
+      toc_depth: 3
   - pymdownx.arithmatex:
       generic: true
   - pymdownx.details
@@ -106,11 +126,12 @@ markdown_extensions:
       anchor_linenums: true
       linenums_style: pymdownx-inline
       use_pygments: true
+      pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.magiclink
   - pymdownx.mark
   - pymdownx.smartsymbols
-  - pymdownx.superfences:
+  - pymdownx.superfences:     # Mermaid fenced blocks: ```mermaid
       custom_fences:
         - name: mermaid
           class: mermaid
@@ -120,15 +141,17 @@ markdown_extensions:
   - pymdownx.tilde
 
 extra_javascript:
-  # MathJax for LaTeX
+  # MathJax for LaTeX (must be loaded before Material’s scripts finish)
   - https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.js
-  # Mermaid (Material often bundles this; keeping explicit for determinism)
+  # Mermaid (Material often bundles it via superfences; keeping explicit for determinism)
   - https://unpkg.com/mermaid@10/dist/mermaid.min.js
+  # Optional: initialize Mermaid explicitly for consistent theming
+  - javascripts/init-mermaid.js
 
 extra_css:
   - stylesheets/extra.css
 
-# Optional: include files outside docs/ during local preview (won't publish)
+# Optional: live-reload additional paths during local preview (won’t publish)
 # watch:
 #   - ../src
 #   - ../schemas
