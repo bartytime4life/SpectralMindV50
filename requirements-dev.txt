@@ -45,7 +45,7 @@ types-requests==2.32.0.20240907
 
 # --- JSON / Schema Validation ----------------------------------------
 check-jsonschema==0.33.3
-jsonschema==4.22.0            # keep in lockstep with runtime to avoid drift
+jsonschema==4.23.0            # lockstep with runtime (requirements-kaggle.txt)
 
 # --- Notebook Hygiene (pre-commit hooks) ------------------------------
 nbstripout==0.7.1             # strip outputs from notebooks
@@ -55,11 +55,11 @@ nbqa==1.8.5                   # run ruff/mypy on notebooks (optional)
 mkdocs==1.6.0
 mkdocs-material==9.5.39
 pymdown-extensions==10.8.1
-mkdocs-mermaid2-plugin==1.1.1 # you use Mermaid in docs/README; enable rendering
+mkdocs-mermaid2-plugin==1.1.1 # enable Mermaid in MkDocs builds
 
 # --- Security / SBOM --------------------------------------------------
 pip-audit==2.7.3              # Python supply-chain vuln audit
-cyclonedx-bom==7.1.0          # SBOM generation (CycloneDX)
+cyclonedx-bom==4.3.2          # SBOM generation (CycloneDX CLI)
 # bandit==1.7.9               # (optional) static security scan
 
 # --- Packaging / Release ----------------------------------------------
