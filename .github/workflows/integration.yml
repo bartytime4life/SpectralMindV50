@@ -42,6 +42,7 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   PIP_NO_PYTHON_VERSION_WARNING: '1'
+  MPLBACKEND: 'Agg'
   # SpectraMind defaults for CI/Kaggle-safe runs
   SM_SUBMISSION_BINS: '283'
   SM_CI: '1'
@@ -52,9 +53,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -67,23 +68,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install ruff pre-commit
+          pip install "ruff>=0.4,<1.0" "pre-commit>=3,<4"
 
-      - name: Ruff check
+      - name: Ruff check (github format)
         run: ruff check --output-format=github .
 
       - name: Pre-commit (selected hooks)
         if: hashFiles('.pre-commit-config.yaml') != ''
         run: |
-          pre-commit run --all-files --hook-stage manual || (echo "::warning::pre-commit found issues"; exit 1)
+          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
   types:
     name: Type check (mypy)
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -95,7 +96,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install mypy types-PyYAML types-requests
+          pip install "mypy>=1.7,<2" types-PyYAML types-requests
           # Install package in editable for import resolution
           pip install -e .
       - name: mypy
@@ -106,8 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -117,13 +118,13 @@ jobs:
       - name: Install minimal deps
         run: |
           python -m pip install --upgrade pip
-          pip install omegaconf==2.3.0 pyyaml jsonschema
+          pip install "omegaconf==2.3.0" pyyaml jsonschema
       - name: Load all Hydra/YAML configs
         run: |
           python - << 'PY'
-          import sys, glob
+          import glob
           from omegaconf import OmegaConf
-          files = glob.glob('configs/**/*.yaml', recursive=True)
+          files = sorted(glob.glob('configs/**/*.yaml', recursive=True))
           for f in files:
               OmegaConf.load(f)
           print(f"Loaded {len(files)} config files OK")
@@ -139,11 +140,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        py: ['3.10', '3.11']
+        py: ['3.10', '3.11', '3.12']
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.py }}
           cache: 'pip'
@@ -159,21 +160,23 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           pip install -e .
-          pip install pytest pytest-cov
+          pip install "pytest>=8,<9" "pytest-cov>=4,<5"
 
       - name: PyTest (fast)
         env:
           PYTHONWARNINGS: "ignore::DeprecationWarning"
         run: |
           pytest -q --disable-warnings --maxfail=1 \
-            --cov=src/spectramind --cov-report=term-missing:skip-covered
+            --cov=src/spectramind --cov-report=xml:coverage.xml
 
-      - name: Upload coverage artifact
+      - name: Upload coverage & JUnit (if present)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ matrix.py }}
-          path: ./.coverage
+          name: unit-test-artifacts-${{ matrix.py }}
+          path: |
+            coverage.xml
+            ./.coverage
           if-no-files-found: ignore
           retention-days: 7
 
@@ -182,9 +185,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -198,7 +201,7 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           pip install -e .
-          pip install dvc[s3]
+          pip install "dvc[s3]>=3,<4"
 
       # If you have OIDC S3 access, uncomment and set your role arn in secrets
       # - name: AWS OIDC
@@ -229,9 +232,9 @@ jobs:
     timeout-minutes: 10
     needs: [lint, types, config-sanity, tests]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -244,6 +247,7 @@ jobs:
           python -m pip install --upgrade pip build twine
           python -m build
           twine check dist/*
+          ls -lh dist/
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
