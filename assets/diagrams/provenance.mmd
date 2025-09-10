@@ -1,0 +1,60 @@
+flowchart TD
+  %% ==========================
+  %% PROVENANCE GRAPH (ADRs ↔ Changelog ↔ Code)
+  %% ==========================
+
+  %% ADRs
+  A0000["ADR 0000<br/>Template"]
+  A0001["ADR 0001<br/>Choose Hydra + DVC"]
+  A0002["ADR 0002<br/>Physics-Informed Losses"]
+  A0004["ADR 0004<br/>Dual Encoder Fusion (FGS1 + AIRS)"]
+
+  %% Changelog releases
+  C0001["Changelog<br/>[0.0.1]<br/>(2025-09-01)"]
+  C0002["Changelog<br/>[0.0.2]<br/>(2025-09-02)"]
+  C0003["Changelog<br/>[0.0.3]<br/>(2025-09-03)"]
+  C0100["Changelog<br/>[0.1.0]<br/>(2025-09-05)"]
+  C0110["Changelog<br/>[0.1.1]<br/>(2025-09-06)"]
+  C0120["Changelog<br/>[0.1.2]<br/>(2025-09-08)"]
+  CUNREL["Changelog<br/>[Unreleased]<br/>(rolling)"]
+
+  %% Code modules (representative anchors)
+  M_CLI["src/cli/*<br/><code>spectramind</code> Typer CLI"]
+  M_CFG["configs/*<br/>Hydra configs"]
+  M_DVC["dvc.yaml<br/>DVC pipeline"]
+  M_CALIB["src/spectramind/calib/*<br/>photometry.py, trace.py"]
+  M_DIAG["src/spectramind/diagnostics/*<br/>spectral_analysis.py, report.py"]
+  M_VALID["src/spectramind/validators/physics.py"]
+  M_ADC["src/spectramind/diagnostics/adc_diag.py"]
+
+  %% ADR -> Changelog (decision implemented)
+  A0000 --> C0001
+  A0001 --> C0100
+  A0002 --> CUNREL
+  A0004 --> CUNREL
+
+  %% Changelog -> ADR (bi-directional provenance)
+  C0001 --> A0000
+  C0100 --> A0001
+  CUNREL --> A0002
+  CUNREL --> A0004
+
+  %% Changelog -> Code (what landed where)
+  C0001 --> M_CLI
+  C0002 --> M_CFG
+  C0002 --> M_DVC
+  C0100 --> M_CFG
+  C0100 --> M_DVC
+  C0120 --> M_CALIB
+  CUNREL --> M_DIAG
+  CUNREL --> M_VALID
+  CUNREL --> M_ADC
+
+  %% Styling
+  classDef adr fill:#fff4d6,stroke:#f2b200,stroke-width:1px,color:#4a3b00;
+  classDef cl fill:#e6f2ff,stroke:#2b7bd8,stroke-width:1px,color:#193a6a;
+  classDef mod fill:#eef8f1,stroke:#2a8b57,stroke-width:1px,color:#0f3a28;
+
+  class A0000,A0001,A0002,A0004 adr;
+  class C0001,C0002,C0003,C0100,C0110,C0120,CUNREL cl;
+  class M_CLI,M_CFG,M_DVC,M_CALIB,M_DIAG,M_VALID,M_ADC mod;
