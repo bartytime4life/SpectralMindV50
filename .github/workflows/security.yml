@@ -168,7 +168,7 @@ jobs:
 
       # Filesystem scan (vulns) -> SARIF, non-failing gate
       - name: Trivy FS → SARIF (non-failing)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'fs'
           format: 'sarif'
@@ -180,7 +180,7 @@ jobs:
 
       # IaC/config scan -> SARIF, non-failing
       - name: Trivy Config → SARIF (non-failing)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'config'
           format: 'sarif'
