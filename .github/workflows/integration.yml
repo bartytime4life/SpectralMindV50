@@ -6,18 +6,26 @@ on:
     paths:
       - 'src/**'
       - 'configs/**'
+      - 'schemas/**'
       - 'dvc.yaml'
       - 'dvc.lock'
       - 'scripts/**'
+      - 'pyproject.toml'
+      - 'requirements*.txt'
+      - '.pre-commit-config.yaml'
       - '.github/workflows/integration.yml'
   pull_request:
     branches: [main, develop]
     paths:
       - 'src/**'
       - 'configs/**'
+      - 'schemas/**'
       - 'dvc.yaml'
       - 'dvc.lock'
       - 'scripts/**'
+      - 'pyproject.toml'
+      - 'requirements*.txt'
+      - '.pre-commit-config.yaml'
       - '.github/workflows/integration.yml'
   workflow_dispatch:
 
@@ -28,7 +36,147 @@ concurrency:
   group: integration-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PY_MAIN: '3.11'
+  COVERAGE_FILE: .coverage
+  PYTHONDONTWRITEBYTECODE: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_PYTHON_VERSION_WARNING: '1'
+  # SpectraMind defaults for CI/Kaggle-safe runs
+  SM_SUBMISSION_BINS: '283'
+  SM_CI: '1'
+
 jobs:
+  lint:
+    name: Ruff / Pre-commit (fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_MAIN }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            .pre-commit-config.yaml
+
+      - name: Install lint deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install ruff pre-commit
+
+      - name: Ruff check
+        run: ruff check --output-format=github .
+
+      - name: Pre-commit (selected hooks)
+        if: hashFiles('.pre-commit-config.yaml') != ''
+        run: |
+          pre-commit run --all-files --hook-stage manual || (echo "::warning::pre-commit found issues"; exit 1)
+
+  types:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_MAIN }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            mypy.ini
+      - name: Install type deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install mypy types-PyYAML types-requests
+          # Install package in editable for import resolution
+          pip install -e .
+      - name: mypy
+        run: mypy src
+
+  config-sanity:
+    name: Config & schema sanity
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_MAIN }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+      - name: Install minimal deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install omegaconf==2.3.0 pyyaml jsonschema
+      - name: Load all Hydra/YAML configs
+        run: |
+          python - << 'PY'
+          import sys, glob
+          from omegaconf import OmegaConf
+          files = glob.glob('configs/**/*.yaml', recursive=True)
+          for f in files:
+              OmegaConf.load(f)
+          print(f"Loaded {len(files)} config files OK")
+          PY
+      - name: Validate submission schema presence
+        run: |
+          test -f schemas/submission.schema.json && echo "Found schemas/submission.schema.json"
+
+  tests:
+    name: Unit tests (Py ${{ matrix.py }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ['3.10', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install -e .
+          pip install pytest pytest-cov
+
+      - name: PyTest (fast)
+        env:
+          PYTHONWARNINGS: "ignore::DeprecationWarning"
+        run: |
+          pytest -q --disable-warnings --maxfail=1 \
+            --cov=src/spectramind --cov-report=term-missing:skip-covered
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.py }}
+          path: ./.coverage
+          if-no-files-found: ignore
+          retention-days: 7
+
   dvc-cli:
     name: DVC + CLI Smoke
     runs-on: ubuntu-latest
@@ -38,7 +186,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
           cache-dependency-path: |
             requirements*.txt
@@ -49,6 +197,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install -e .
           pip install dvc[s3]
 
       # If you have OIDC S3 access, uncomment and set your role arn in secrets
@@ -73,3 +222,32 @@ jobs:
           python -m spectramind predict --help
           python -m spectramind diagnose --help
           python -m spectramind submit --help
+
+  package:
+    name: Build & verify package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [lint, types, config-sanity, tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_MAIN }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+
+      - name: Build sdist/wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          retention-days: 7
