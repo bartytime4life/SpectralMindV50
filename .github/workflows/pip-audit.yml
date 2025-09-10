@@ -22,6 +22,9 @@ env:
   AUDIT_FAIL_ON: "none"
   # Pin pip-audit for reproducibility (update periodically)
   PIP_AUDIT_VERSION: "2.7.3"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+  PYTHONUTF8: "1"
 
 jobs:
   audit:
@@ -31,10 +34,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -86,14 +89,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p .audit
           if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
             echo "::group::pip-audit (project)"
             pip-audit --format sarif --output .audit/project.sarif || true
             echo "::endgroup::"
           fi
 
-      - name: Upload SARIF to Code Scanning
-        if: always()
+      - name: Ensure at least one SARIF exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.audit/*.sarif)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo '{}' > .audit/empty.sarif
+          fi
+
+      - name: Upload SARIF to Code Scanning (fork-safe)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: .audit
@@ -121,9 +135,23 @@ jobs:
           total=0
           shopt -s nullglob
           for s in .audit/*.sarif; do
-            hits=$(jq -r '.runs[].results[]? | (.properties.severity // .level // "")' "$s" 2>/dev/null \
+            hits=$(jq -r '.runs[].results[]? | (.properties.severity // .level // .rule?.properties?.security-severity // "")' "$s" 2>/dev/null \
               | awk -v thr="$thr" '
-                  function norm(x){tolower(x); if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2; if(x=="warning"||x=="low")return 1; if(x=="error")return 3; return 0}
+                  function norm(x){
+                    x=tolower(x)
+                    if(x=="critical")return 4
+                    if(x=="high")return 3
+                    if(x=="medium")return 2
+                    if(x=="warning"||x=="low")return 1
+                    if(x=="error")return 3
+                    if(x ~ /^[0-9.]+$/){ # CVSS numeric when present
+                      if(x>=9) return 4
+                      if(x>=7) return 3
+                      if(x>=4) return 2
+                      if(x>0)  return 1
+                    }
+                    return 0
+                  }
                   { if (norm($0) >= thr) c++ } END { print c+0 }')
             total=$(( total + hits ))
           done
