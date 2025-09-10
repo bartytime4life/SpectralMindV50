@@ -2,12 +2,12 @@ name: sbom-refresh
 
 on:
   schedule:
-    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'     # Every Monday at 06:00 UTC
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write  # needed for SARIF upload
+  security-events: write     # needed for SARIF upload
   actions: read
 
 concurrency:
@@ -16,36 +16,57 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11'
+  ARTIFACT_RETENTION_DAYS: 14
+  # Optional: set to GHCR image ref to also SBOM/scan the container, e.g. ghcr.io/owner/repo:latest
+  OCI_IMAGE: ''
 
 jobs:
   sbom:
     name: Generate SBOMs
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
+    outputs:
+      has_python: ${{ steps.detect-py.outputs.has_python }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ---------- Python SBOM (CycloneDX) ----------
       - name: Set up Python
+        id: setup-py
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          cache: 'pip'
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-            pyproject.toml
-            setup.cfg
-            setup.py
+            **/requirements*.txt
+            **/pyproject.toml
+            **/setup.cfg
+            **/setup.py
+
+      - name: Detect Python deps (best-effort)
+        id: detect-py
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=( **/requirements*.txt **/pyproject.toml **/setup.cfg **/setup.py )
+          if (( ${#files[@]} > 0 )); then echo "has_python=true" >> "$GITHUB_OUTPUT"; else echo "has_python=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: Install CycloneDX (Python)
+        if: ${{ steps.detect-py.outputs.has_python == 'true' }}
         run: |
           python -m pip install --upgrade pip
           pip install cyclonedx-bom
 
+      - name: Generate Python deps SBOM (CycloneDX)
+        if: ${{ steps.detect-py.outputs.has_python == 'true' }}
+        run: |
+          cyclonedx-bom -o sbom-python.cdx.json || true
+          [ -s sbom-python.cdx.json ] && echo "Python SBOM created." || echo "No Python SBOM (no deps detected)."
+
+      # ---------- Repo SBOMs (CycloneDX + SPDX) ----------
       - name: Install Syft (SBOM generator)
         uses: anchore/sbom-action/download-syft@v0.17.0
 
@@ -59,11 +80,12 @@ jobs:
           syft dir:. -o spdx-json > sbom-repo.spdx.json
           test -s sbom-repo.spdx.json
 
-      - name: Generate Python deps SBOM (CycloneDX)
+      # ---------- Optional: OCI image SBOM ----------
+      - name: Generate image SBOM (if OCI_IMAGE is set)
+        if: ${{ env.OCI_IMAGE != '' }}
         run: |
-          # Best-effort; succeeds even if no Python deps detected
-          cyclonedx-bom -o sbom-python.cdx.json || true
-          [ -s sbom-python.cdx.json ] && echo "Python SBOM created." || echo "No Python SBOM (no deps detected)."
+          syft "${{ env.OCI_IMAGE }}" -o cyclonedx-json > sbom-image.cdx.json || true
+          [ -s sbom-image.cdx.json ] && echo "Image SBOM created." || echo "Image SBOM not generated."
 
       - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
@@ -73,15 +95,15 @@ jobs:
             sbom-repo.cdx.json
             sbom-repo.spdx.json
             sbom-python.cdx.json
+            sbom-image.cdx.json
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   scan:
     name: Vulnerability Scan (Grype → SARIF)
-    runs-on: ubuntu-latest
     needs: sbom
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
       - name: Download SBOM artifacts
         uses: actions/download-artifact@v4
@@ -93,6 +115,7 @@ jobs:
         uses: anchore/scan-action/download-grype@v3
 
       - name: Scan SBOMs with Grype (produce SARIF per SBOM)
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p sarif
@@ -102,7 +125,7 @@ jobs:
             base=$(basename "$sb")
             out="sarif/${base%.json}.sarif"
             echo "Scanning $sb → $out"
-            # Accept both CycloneDX and SPDX SBOMs
+            # Grype accepts SBOM inputs directly; keep going even if scan fails
             grype "sbom:$sb" -o sarif > "$out" || true
             count=$((count+1))
           done
