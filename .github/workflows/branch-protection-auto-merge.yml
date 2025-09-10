@@ -36,19 +36,17 @@ jobs:
   preflight:
     name: Preflight eligibility checks
     runs-on: ubuntu-latest
-
     outputs:
       eligible: ${{ steps.gates.outputs.eligible }}
       reason: ${{ steps.gates.outputs.reason }}
       merge_method: ${{ steps.params.outputs.merge_method }}
       required_label: ${{ steps.params.outputs.required_label }}
-
+      require_up_to_date: ${{ steps.params.outputs.require_up_to_date }}
     steps:
       - name: Resolve params
         id: params
         shell: bash
         run: |
-          # Pull-request context values (empty for workflow_dispatch)
           PR_NUM="${{ github.event.pull_request.number || '' }}"
 
           REQUIRED_LABEL="${{ github.event.inputs.required_label || 'automerge' }}"
@@ -68,11 +66,10 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const requiredLabel = core.getInput('required_label') || 'automerge';
-            const minApprovals = parseInt(core.getInput('min_approvals') || '1', 10);
-            const requireUpToDate = (core.getInput('require_up_to_date') || 'true').toLowerCase() === 'true';
+            const requiredLabel = `${{ steps.params.outputs.required_label }}` || 'automerge';
+            const minApprovals = parseInt(`${{ steps.params.outputs.min_approvals }}` || '1', 10);
+            const requireUpToDate = (`${{ steps.params.outputs.require_up_to_date }}` || 'true').toLowerCase() === 'true';
 
-            // Get PR (works for both PR trigger and manual dispatch if recent)
             const prNumber = context.payload.pull_request?.number;
             if (!prNumber) {
               core.setOutput('eligible', 'false');
@@ -88,22 +85,16 @@ jobs:
             const labels = (pr.labels || []).map(l => (typeof l === 'string' ? l : l.name));
             const hasLabel = labels.includes(requiredLabel);
 
-            // Draft check
             if (pr.draft) reasons.push('PR is still a draft.');
-
-            // Label gate
             if (!hasLabel) reasons.push(`Missing required label: '${requiredLabel}'.`);
-
-            // Mergeability basic (conflicts)
             if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
             if (pr.locked) reasons.push('PR is locked.');
 
-            // Up-to-date with base (optional)
             if (requireUpToDate && pr.mergeable_state === 'behind') {
               reasons.push('Branch is behind base; update required.');
             }
 
-            // Approvals: count unique approving reviewers
+            // Approvals
             const reviews = await github.paginate(
               github.rest.pulls.listReviews,
               { owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber, per_page: 100 }
@@ -114,7 +105,6 @@ jobs:
                 approvers.set(r.user.login, true);
               }
               if (r.state?.toUpperCase() === 'CHANGES_REQUESTED' && r.user?.login) {
-                // A changes-requested should negate that reviewer’s approval until they re-approve
                 approvers.delete(r.user.login);
               }
             }
@@ -123,7 +113,7 @@ jobs:
               reasons.push(`Not enough approvals (${approvalCount}/${minApprovals}).`);
             }
 
-            // Status checks & check runs
+            // Checks & statuses
             const ref = pr.head.sha;
             const checks = await github.rest.checks.listForRef({
               owner: context.repo.owner, repo: context.repo.repo, ref, per_page: 100
@@ -132,24 +122,21 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo, ref
             });
 
-            const checkRunsOk = (checks.data.check_runs || []).every(cr => {
-              // Allow neutral/skipped for optional checks
-              return ['success', 'neutral', 'skipped'].includes((cr.conclusion || '').toLowerCase());
-            });
-            const statusesOk = (statuses.data.statuses || []).every(s => {
-              return ['success', 'neutral'].includes((s.state || '').toLowerCase());
-            });
+            const checkRunsOk = (checks.data.check_runs || []).every(cr =>
+              ['success', 'neutral', 'skipped'].includes((cr.conclusion || '').toLowerCase())
+            );
+            const statusesOk = (statuses.data.statuses || []).every(s =>
+              ['success', 'neutral'].includes((s.state || '').toLowerCase())
+            );
 
             if (!checkRunsOk || !statusesOk) {
               reasons.push('Required checks are not all successful.');
             }
 
-            // Draft final decision
             const eligible = reasons.length === 0 ? 'true' : 'false';
             core.setOutput('eligible', eligible);
             core.setOutput('reason', reasons.join(' '));
 
-            // Nice summary
             core.summary
               .addHeading('Auto-merge Preflight')
               .addTable([
@@ -165,13 +152,71 @@ jobs:
               .addRaw(reasons.length ? `\n**Reasons:** ${reasons.join(' ')}\n` : '\nAll gates passed.\n')
               .write();
 
+  update-branch:
+    name: Update branch if behind
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      needs.preflight.outputs.eligible != 'true' &&
+      contains(needs.preflight.outputs.reason, 'update required')
+    steps:
+      - name: Update PR branch from base
+        uses: peter-evans/update-branch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # default 'merge' keeps history; change to 'rebase' if your policy prefers
+          merge_method: merge
+          required_approving_review_count: 0
+
+  preflight-verify:
+    name: Re-check eligibility after update
+    runs-on: ubuntu-latest
+    needs: [preflight, update-branch]
+    if: needs.update-branch.result == 'success'
+    outputs:
+      eligible: ${{ steps.gates.outputs.eligible }}
+      reason: ${{ steps.gates.outputs.reason }}
+    steps:
+      - name: Re-run gates
+        id: gates
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request?.number;
+            if (!prNumber) { core.setOutput('eligible','false'); core.setOutput('reason','No PR context'); return; }
+            const { data: pr } = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber });
+            const reasons = [];
+            if (pr.draft) reasons.push('PR is still a draft.');
+            if (pr.mergeable_state === 'dirty') reasons.push('PR has merge conflicts.');
+
+            const ref = pr.head.sha;
+            const checks = await github.rest.checks.listForRef({ owner: context.repo.owner, repo: context.repo.repo, ref, per_page: 100 });
+            const statuses = await github.rest.repos.getCombinedStatusForRef({ owner: context.repo.owner, repo: context.repo.repo, ref });
+
+            const checkRunsOk = (checks.data.check_runs || []).every(cr =>
+              ['success', 'neutral', 'skipped'].includes((cr.conclusion || '').toLowerCase())
+            );
+            const statusesOk = (statuses.data.statuses || []).every(s =>
+              ['success', 'neutral'].includes((s.state || '').toLowerCase())
+            );
+
+            if (!checkRunsOk || !statusesOk) reasons.push('Required checks are not all successful (post-update).');
+
+            const eligible = reasons.length === 0 ? 'true' : 'false';
+            core.setOutput('eligible', eligible);
+            core.setOutput('reason', reasons.join(' '));
+            core.summary.addHeading('Auto-merge Preflight (Post-Update)').addRaw(eligible === 'true' ? '\nAll gates passed.\n' : `\n**Reasons:** ${reasons.join(' ')}\n`).write();
+
   enable:
     name: Enable auto-merge
     runs-on: ubuntu-latest
-    needs: preflight
-    if: needs.preflight.outputs.eligible == 'true'
+    needs: [preflight, preflight-verify]
+    if: |
+      (needs.preflight.outputs.eligible == 'true') ||
+      (needs.preflight-verify.outputs.eligible == 'true')
     steps:
-      - name: Enable auto-merge (peter-evans)
+      - name: Enable auto-merge (GitHub native)
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
           merge-method: ${{ needs.preflight.outputs.merge_method }}
@@ -179,8 +224,11 @@ jobs:
   on-ineligible-comment:
     name: Comment on PR when ineligible
     runs-on: ubuntu-latest
-    needs: preflight
-    if: needs.preflight.outputs.eligible != 'true' && github.event_name == 'pull_request'
+    needs: [preflight, preflight-verify]
+    if: |
+      github.event_name == 'pull_request' &&
+      (needs.preflight.outputs.eligible != 'true') &&
+      (needs.preflight-verify.result != 'success' || needs.preflight-verify.outputs.eligible != 'true')
     steps:
       - name: Explain why auto-merge not enabled
         uses: actions/github-script@v7
@@ -188,13 +236,15 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request.number;
-            const reason = `${{ toJson(needs.preflight.outputs.reason) }}`.replace(/^"|"$/g,'');
+            const reason1 = `${{ toJson(needs.preflight.outputs.reason) }}`.replace(/^"|"$/g,'');
+            const reason2 = `${{ toJson(needs.preflight-verify.outputs.reason || '') }}`.replace(/^"|"$/g,'');
+            const reasons = [reason1, reason2].filter(Boolean).join(' | ');
             const body = [
               `🛑 **Auto-merge not enabled**`,
               ``,
-              `**Reason(s):** ${reason || 'unknown'}`,
+              `**Reason(s):** ${reasons || 'unknown'}`,
               ``,
-              `> Add the required label and satisfy gates (approvals, checks, up-to-date).`,
+              `> Ensure required label, approvals, passing checks, and an up-to-date branch.`,
             ].join('\n');
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, body
