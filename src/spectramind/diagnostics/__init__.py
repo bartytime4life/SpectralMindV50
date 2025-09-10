@@ -1,34 +1,54 @@
 # src/spectramind/diagnostics/__init__.py
 # =============================================================================
-# SpectraMind V50 — Diagnostics Package
+# SpectraMind V50 — Diagnostics Package (Upgraded)
 # -----------------------------------------------------------------------------
-# Provides post-hoc analysis tools for inspecting model outputs, calibration
-# artifacts, and reproducibility. Used in the DVC `diagnose` stage and via
-# `spectramind diagnose`.
+# Post-hoc analysis utilities for predictions and calibration artifacts.
+# Primary entrypoint: run_diagnostics(preds_csv, truth_csv?, out_dir).
 #
-# Features:
-#   - Metrics: Gaussian Log-Likelihood (GLL), FGS1-weighted GLL, residual stats
-#   - Sanity checks: non-negativity, boundedness, smoothness, uncertainty health
-#   - Coverage calibration: empirical 1σ / 2σ coverage
-#   - Report generation: JSON summary (+ optional minimal HTML)
+# Key capabilities
+#   • Column/order validation (mu_*, sigma_*)
+#   • Physics checks (ADR-0002): non-negativity, bounds, σ guardrails, smoothness
+#   • Likelihood metrics: GLL (mean) and FGS1-weighted GLL (default ~58× on bin 0)
+#   • Residual & z-score diagnostics (bias/variance health)
+#   • Coverage calibration @1σ/@2σ + deviation from Gaussian ideals
+#   • Reproducible reports: canonical JSON (+ .sha256) and styled HTML if available
+#
+# CI/Kaggle safe: NumPy + pandas only; Rich/HTML reporter optional.
 # =============================================================================
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
 
 # Optional rich console for CLI integration (fallback to print if missing)
-try:
+try:  # pragma: no cover
     from rich.console import Console
     _console: Optional[Console] = Console()
 except Exception:  # pragma: no cover
     _console = None
 
+# Prefer the richer report generator if present
+try:  # pragma: no cover
+    from .report import generate_diagnostics_report, generate_json_and_html  # type: ignore
+except Exception:  # pragma: no cover
+    generate_diagnostics_report = None  # type: ignore
+    generate_json_and_html = None  # type: ignore
 
+# Physics checks (ADR-0002 aware) — optional; fallback if not present
+try:  # pragma: no cover
+    from ..validators.physics import run_physics_checks  # type: ignore
+except Exception:  # pragma: no cover
+    run_physics_checks = None  # type: ignore
+
+
+# -----------------------------------------------------------------------------
+# Small console helper
+# -----------------------------------------------------------------------------
 def _print(msg: str) -> None:
     if _console:
         _console.print(msg)
@@ -36,9 +56,12 @@ def _print(msg: str) -> None:
         print(msg)
 
 
-def _load_mu_sigma_csv(csv_path: Path) -> Tuple[np.ndarray, np.ndarray, list[str], np.ndarray | None]:
+# -----------------------------------------------------------------------------
+# CSV loading / validation
+# -----------------------------------------------------------------------------
+def _load_mu_sigma_csv(csv_path: Path) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray | None]:
     """
-    Load mu_*, sigma_* columns (optionally sample_id) from a CSV file.
+    Load mu_*, sigma_* columns (optionally sample_id/id) from a CSV file.
 
     Returns:
         mus [N, B], sigmas [N, B], bin_names, sample_ids (or None)
@@ -60,13 +83,12 @@ def _load_mu_sigma_csv(csv_path: Path) -> Tuple[np.ndarray, np.ndarray, list[str
     if len(mu_cols) != len(sigma_cols):
         raise ValueError(f"Column count mismatch: {len(mu_cols)} mu vs {len(sigma_cols)} sigma in {csv_path}")
 
-    # Sort by bin index to guarantee alignment if columns are scrambled
+    # Sort by trailing 3-digit (or int) index; malformed names pushed to end
     def _key(c: str) -> int:
-        # expects names like mu_000, mu_001 ...
         try:
             return int(c.split("_")[-1])
         except Exception:
-            return 10**9  # push malformed to end
+            return 10**9
 
     mu_cols = sorted(mu_cols, key=_key)
     sigma_cols = sorted(sigma_cols, key=_key)
@@ -94,12 +116,11 @@ def _finite_and_counts(arr: np.ndarray) -> Tuple[np.ndarray, Dict[str, int]]:
     return mask, stats
 
 
+# -----------------------------------------------------------------------------
+# Metrics
+# -----------------------------------------------------------------------------
 def _smoothness_l2_second_diff(mu: np.ndarray) -> float:
-    """
-    L2 norm of second-order finite differences averaged over batch.
-    Lower is smoother (penalizes rapid oscillations).
-    mu: [N, B]
-    """
+    """Mean L2 of 2nd finite differences over batch. Lower ⇒ smoother."""
     if mu.shape[1] < 3:
         return 0.0
     d2 = mu[:, 2:] - 2 * mu[:, 1:-1] + mu[:, :-2]
@@ -107,10 +128,7 @@ def _smoothness_l2_second_diff(mu: np.ndarray) -> float:
 
 
 def _gll(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
-    """
-    Unweighted Gaussian log-likelihood per-bin (mean over all samples/bins).
-    """
-    # Clamp sigma for stability
+    """Unweighted Gaussian log-likelihood (mean per element)."""
     eps = 1e-12
     s2 = np.maximum(sigma, eps) ** 2
     term = ((y - mu) ** 2) / s2 + np.log(2.0 * np.pi * s2)
@@ -118,43 +136,48 @@ def _gll(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
 
 
 def _gll_fgs1_weighted(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray, fgs1_weight: float = 58.0) -> float:
-    """
-    FGS1-weighted Gaussian log-likelihood (~58× on bin 0, others 1×).
-    """
+    """FGS1-weighted GLL (~58× weight on bin 0)."""
     eps = 1e-12
     s2 = np.maximum(sigma, eps) ** 2
-    term = ((y - mu) ** 2) / s2 + np.log(2.0 * np.pi * s2)  # shape [N, B]
+    term = ((y - mu) ** 2) / s2 + np.log(2.0 * np.pi * s2)  # [N, B]
     w = np.ones_like(term)
     if term.shape[1] > 0:
-        w[:, 0] = fgs1_weight
-    # mean of weighted NLL per element
-    n = term.size
+        w[:, 0] = float(fgs1_weight)
     return float(-0.5 * np.sum(w * term) / np.sum(w))
 
 
 def _coverage(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray, k: float) -> float:
-    """
-    Empirical coverage: fraction of bins where |y - mu| <= k * sigma.
-    """
+    """Empirical coverage fraction for |y − μ| ≤ k σ."""
     eps = 1e-12
     s = np.maximum(sigma, eps)
     ok = np.abs(y - mu) <= k * s
     return float(np.mean(ok))
 
 
-def _write_html_report(summary: Dict[str, Any], out_html: Path) -> Path:
+def _zscore(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+    """Elementwise z = (y − μ)/σ, σ clamped for stability."""
+    eps = 1e-12
+    s = np.maximum(sigma, eps)
+    return (y - mu) / s
+
+
+# -----------------------------------------------------------------------------
+# Minimal HTML fallback (used only if rich reporter isn't available)
+# -----------------------------------------------------------------------------
+def _write_html_report_minimal(summary: Dict[str, Any], out_html: Path) -> Path:
     out_html.parent.mkdir(parents=True, exist_ok=True)
     html = [
-        "<html><head><meta charset='utf-8'><title>SpectraMind V50 Diagnostics</title>",
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        "<title>SpectraMind V50 Diagnostics</title>",
         "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 16px}"
-        "code,pre{background:#f6f8fa;padding:4px 6px;border-radius:4px}</style></head><body>",
+        "code,pre{background:#f6f8fa;padding:6px;border-radius:6px;overflow:auto}</style></head><body>",
         "<h1>SpectraMind V50 — Diagnostics Report</h1>",
         "<h2>Summary</h2><pre>",
         json.dumps(summary, indent=2),
         "</pre>",
         "</body></html>",
     ]
-    out_html.write_text("\n".join(html))
+    out_html.write_text("\n".join(html), encoding="utf-8")
     return out_html
 
 
@@ -166,6 +189,9 @@ def run_diagnostics(
     truth_path: Optional[Path] = None,
     out_dir: Path = Path("artifacts/diagnostics"),
     report_name: str = "report.html",
+    *,
+    fgs1_weight: Optional[float] = None,      # default from env or 58.0
+    physics_thresholds: Optional[Dict[str, float]] = None,  # see below
 ) -> Dict[str, Any]:
     """
     Run diagnostics on predictions (and optionally ground truth).
@@ -175,18 +201,35 @@ def run_diagnostics(
     preds_path : Path
         Path to predictions CSV (mu_* / sigma_* per bin).
     truth_path : Path, optional
-        Path to ground-truth CSV (matched mu_* columns) if available.
+        Path to ground-truth CSV (aligned mu_* columns) if available.
     out_dir : Path
         Directory where diagnostics artifacts will be written.
     report_name : str
-        Name of the generated HTML report file (set to '' to skip HTML).
+        Name of the generated HTML report file ('' to skip HTML).
+    fgs1_weight : Optional[float]
+        Weight for bin 0 in the weighted GLL. Defaults to
+        float(os.getenv('SM_FGS1_WEIGHT', 58.0)).
+    physics_thresholds : Optional[Dict[str, float]]
+        Optional thresholds forwarded to validators.physics.run_physics_checks, e.g.:
+        {
+          "sigma_min": 1e-6, "sigma_max": 0.5,
+          "tv_rel_thresh": 0.25, "curvature_rel_thresh": 0.15,
+          "intervals_k": 1.0, "intervals_min_frac": 0.95
+        }
 
     Returns
     -------
     Dict[str, Any]
-        Summary metrics and sanity checks.
+        Summary metrics and sanity checks (JSON-serializable).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve FGS1 weight
+    if fgs1_weight is None:
+        try:
+            fgs1_weight = float(os.getenv("SM_FGS1_WEIGHT", "58.0"))
+        except Exception:
+            fgs1_weight = 58.0
 
     _print("[bold cyan]Diagnostics[/bold cyan]" if _console else "Diagnostics")
     _print(f"Predictions: {preds_path}")
@@ -194,14 +237,16 @@ def run_diagnostics(
         _print(f"Ground truth: {truth_path}")
 
     # --- Load predictions ---
-    mus, sigmas, mu_cols, _sample_ids = _load_mu_sigma_csv(preds_path)
+    mus, sigmas, mu_cols, _sample_ids = _load_mu_sigma_csv(Path(preds_path))
     n_samples, n_bins = mus.shape
+    mus = mus.astype(np.float64, copy=False)
+    sigmas = sigmas.astype(np.float64, copy=False)
 
     # --- Basic health on predictions ---
     mu_finite_mask, mu_finite_stats = _finite_and_counts(mus)
     sigma_finite_mask, sigma_finite_stats = _finite_and_counts(sigmas)
 
-    # Clamp σ to avoid zero/negatives (for metrics downstream)
+    # Clamp σ for stable downstream metrics (do NOT persist back)
     eps = 1e-12
     sigmas_clamped = np.maximum(sigmas, eps)
 
@@ -222,7 +267,27 @@ def run_diagnostics(
             "avg_sigma": avg_sigma,
             "smoothness_l2_second_diff": smoothness,
         },
+        "fgs1_weight": float(fgs1_weight),
     }
+
+    # --- Physics checks (optional thresholds) ---
+    if run_physics_checks is not None:
+        thresholds = physics_thresholds or {}
+        phys = run_physics_checks(
+            mus, sigmas,
+            fgs1_index=0,
+            sigma_min=thresholds.get("sigma_min"),
+            sigma_max=thresholds.get("sigma_max"),
+            tv_rel_thresh=thresholds.get("tv_rel_thresh"),
+            curvature_rel_thresh=thresholds.get("curvature_rel_thresh"),
+            intervals_k=thresholds.get("intervals_k", 1.0),
+            intervals_min_frac=thresholds.get("intervals_min_frac"),
+        )
+        summary["physics_checks"] = phys
+        summary["all_passed"] = bool(phys.get("all_passed", False))
+    else:
+        summary["physics_checks"] = {"available": False}
+        summary["all_passed"] = True  # do not fail when validator module absent
 
     # --- If ground truth available, compute residual metrics & coverage ---
     if truth_path and Path(truth_path).exists():
@@ -238,13 +303,22 @@ def run_diagnostics(
         mse = float(np.mean(resid**2))
         mae = float(np.mean(np.abs(resid)))
 
-        # GLL (unweighted) and FGS1-weighted GLL
-        gll = _gll(y_true, mus, sigmas_clamped)
-        gll_fgs1 = _gll_fgs1_weighted(y_true, mus, sigmas_clamped, fgs1_weight=58.0)
+        # z-scores
+        z = _zscore(y_true, mus, sigmas_clamped)
+        z_mean = float(np.mean(z))
+        z_std = float(np.std(z))
+        z_abs_mean = float(np.mean(np.abs(z)))
 
-        # Coverage calibration
-        cov_1sigma = _coverage(y_true, mus, sigmas_clamped, k=1.0)
-        cov_2sigma = _coverage(y_true, mus, sigmas_clamped, k=2.0)
+        # Likelihoods
+        gll = _gll(y_true, mus, sigmas_clamped)
+        gll_fgs1 = _gll_fgs1_weighted(y_true, mus, sigmas_clamped, fgs1_weight=float(fgs1_weight))
+
+        # Coverage & deviation from Gaussian ideals
+        cov1 = _coverage(y_true, mus, sigmas_clamped, k=1.0)
+        cov2 = _coverage(y_true, mus, sigmas_clamped, k=2.0)
+        ideal1, ideal2 = 0.682689492, 0.954499736  # 1σ/2σ for Gaussian
+        cov1_err = float(cov1 - ideal1)
+        cov2_err = float(cov2 - ideal2)
 
         summary.update(
             {
@@ -258,23 +332,39 @@ def run_diagnostics(
                     "gll_mean": gll,
                     "gll_fgs1_weighted": gll_fgs1,
                 },
+                "zscore_stats": {
+                    "z_mean": z_mean,
+                    "z_std": z_std,
+                    "z_abs_mean": z_abs_mean,
+                },
                 "coverage": {
-                    "emp_cov_1sigma": cov_1sigma,  # ideal ≈ 0.6827 for perfect Gaussian cal
-                    "emp_cov_2sigma": cov_2sigma,  # ideal ≈ 0.9545
+                    "emp_cov_1sigma": cov1,
+                    "emp_cov_2sigma": cov2,
+                    "cov1_minus_ideal": cov1_err,
+                    "cov2_minus_ideal": cov2_err,
                 },
             }
         )
 
-    # --- Save JSON summary ---
-    summary_path = out_dir / "summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2))
+    # --- Persist artifacts (prefer canonical reporter) ---
+    summary_json = out_dir / "summary.json"
+    if generate_json_and_html is not None:
+        # dual write: <out_dir>/summary.{json,html} (+ .sha256)
+        generate_json_and_html(summary, out_base=out_dir / "summary", title="SpectraMind V50 — Diagnostics")
+        # also keep legacy name if user expects a specific file
+        summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if report_name:
+            # generate a second HTML with the requested name for back-compat
+            generate_diagnostics_report(  # type: ignore
+                summary, out_path=out_dir / report_name, title="SpectraMind V50 — Diagnostics"
+            )
+    else:
+        # plain JSON + minimal HTML fallback
+        summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if report_name:
+            _write_html_report_minimal(summary, out_dir / report_name)
 
-    # --- Optional minimal HTML report ---
-    if report_name:
-        report_path = out_dir / report_name
-        _write_html_report(summary, report_path)
-
-    _print(f"[green]✓ Diagnostics complete[/green] → {summary_path}" if _console else f"Diagnostics complete → {summary_path}")
+    _print(f"[green]✓ Diagnostics complete[/green] → {summary_json}" if _console else f"Diagnostics complete → {summary_json}")
     return summary
 
 
