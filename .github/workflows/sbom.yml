@@ -26,6 +26,8 @@ env:
   ARTIFACT_RETENTION_DAYS: 14
   # Optional: set to an OCI image (e.g. ghcr.io/owner/repo:latest) to SBOM the container too
   OCI_IMAGE: ''
+  # Optional license allow-list gate (comma-separated SPDX IDs); leave empty to disable
+  LICENSE_ALLOWLIST: ''
 
 jobs:
   cyclonedx:
@@ -119,7 +121,6 @@ jobs:
           summarize() {
             f="$1"
             [ -f "$f" ] || return 0
-            # CycloneDX: components[*].name and licenses[*].license.id/name
             comps=$(jq -r '[.components[]?.name] | length' "$f" 2>/dev/null || echo 0)
             lic=$(jq -r '
               [.components[]?.licenses[]?
@@ -145,6 +146,43 @@ jobs:
               --output-signature "$f.sig" \
               --output-certificate "$f.cert"
           done
+
+      - name: Verify SBOM signatures (OIDC, repo subject)
+        env: { COSIGN_EXPERIMENTAL: "true" }
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in reports/*.json; do
+            [ -f "$f.sig" ] || continue
+            cosign verify-blob \
+              --certificate "$f.cert" \
+              --signature "$f.sig" \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "$f"
+          done
+
+      # ---------- Optional license allow-list gate ----------
+      - name: Enforce license allow-list (optional)
+        if: ${{ env.LICENSE_ALLOWLIST != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a ALLOWED <<< "${LICENSE_ALLOWLIST}"
+          mapfile -t SBOMS < <(ls reports/*.cdx.json 2>/dev/null || true)
+          bad=0
+          for f in "${SBOMS[@]}"; do
+            jq -r '.components[]?.licenses[]? | (.license.id // .license.name // .expression // "UNKNOWN")' "$f" \
+            | sort -u | while read -r lic; do
+                [[ -z "$lic" ]] && continue
+                ok=0; for a in "${ALLOWED[@]}"; do [[ "$lic" == "$a" ]] && ok=1 && break; done
+                if [[ $ok -eq 0 ]]; then
+                  echo "::error file=$f::Disallowed license detected: $lic"
+                  bad=$((bad+1))
+                fi
+              done
+          done
+          [[ ${bad:-0} -eq 0 ]] || { echo "License gate failed."; exit 1; }
 
       - name: Upload SBOM bundle
         uses: actions/upload-artifact@v4
