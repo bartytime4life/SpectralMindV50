@@ -3,14 +3,30 @@ name: codeql
 on:
   push:
     branches: [ main ]
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - "setup.cfg"
+      - "setup.py"
+      - "requirements*.txt"
+      - ".github/workflows/codeql.yml"
   pull_request:
     branches: [ main ]
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - "setup.cfg"
+      - "setup.py"
+      - "requirements*.txt"
+      - ".github/workflows/codeql.yml"
   schedule:
     - cron: "0 5 * * 1"  # Mondays 05:00 UTC
+  workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
+  actions: read
 
 concurrency:
   group: codeql-${{ github.ref }}
@@ -18,7 +34,7 @@ concurrency:
 
 jobs:
   analyze:
-    name: CodeQL Analyze
+    name: CodeQL Analyze (Python)
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -33,11 +49,55 @@ jobs:
         language: [ python ]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Helps CodeQL resolve stdlib and site-packages for Python projects
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
+
+      # Optional: install deps so CodeQL sees third-party types/APIs.
+      # If you prefer autobuild-only, delete this step.
+      - name: Install dependencies (optional)
+        run: |
+          python -m pip install --upgrade pip wheel
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then pip install -e . || true; fi
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+          queries: security-extended,security-and-quality
+          # If you keep the "Install dependencies" step, autobuild is not required for Python.
+          # But keeping it is harmless; it will no-op for Python if already built.
+          tools: latest
+
+      # For Python, autobuild is generally a no-op but safe. Keeps parity if you add other languages later.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        id: analyze
+        uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:${{matrix.language}}"
+          category: "/language:${{ matrix.language }}"
+          upload: true
+
+      # Useful for debugging query results locally with the CodeQL CLI
+      - name: Upload CodeQL database (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-db-${{ matrix.language }}
+          path: ${{ steps.analyze.outputs.database-path }}
+          retention-days: 7
