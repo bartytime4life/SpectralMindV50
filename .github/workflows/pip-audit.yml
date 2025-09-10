@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write  # needed for SARIF upload
+  security-events: write  # SARIF upload
 
 concurrency:
   group: pip-audit-${{ github.ref }}
@@ -18,7 +18,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  # Set to "none" (default) to never fail CI, or one of: critical | high | medium | low
+  # Set to "none" (default) to never fail CI; else one of: critical | high | medium | low
   AUDIT_FAIL_ON: "none"
   # Pin pip-audit for reproducibility (update periodically)
   PIP_AUDIT_VERSION: "2.7.3"
@@ -50,8 +50,7 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "pip-audit==${PIP_AUDIT_VERSION}"
-          sudo apt-get update && sudo apt-get install -y jq
+          python -m pip install "pip-audit==${PIP_AUDIT_VERSION}" jq
 
       - name: Discover requirement files
         id: discover
@@ -59,16 +58,28 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t REQS < <(git ls-files \
-            ':!:**/.venv/**' \
-            ':!:**/site-packages/**' \
-            '**/requirements*.txt' \
-            'requirements.txt' \
-            'requirements-dev.txt' \
-            'requirements-kaggle.txt' 2>/dev/null | sort -u || true)
+            ':!:**/.venv/**' ':!:**/site-packages/**' \
+            '**/requirements*.txt' 'requirements.txt' \
+            'requirements-dev.txt' 'requirements-kaggle.txt' 2>/dev/null | sort -u || true)
           if [ "${#REQS[@]}" -gt 0 ]; then
             printf 'reqs=%s\n' "$(printf '%s ' "${REQS[@]}")" >> "$GITHUB_OUTPUT"
           else
             echo "No requirements*.txt files found."
+          fi
+
+      - name: Load ignore list (if present)
+        id: ignore
+        shell: bash
+        run: |
+          set -euo pipefail
+          IGN_FILE=".github/pip-audit.ignore"
+          if [ -f "$IGN_FILE" ]; then
+            # Build repeated --ignore-vuln flags from lines (strip comments/empties)
+            flags=$(sed -E 's/#.*$//' "$IGN_FILE" | sed '/^\s*$/d' | sed 's/^/--ignore-vuln /' | xargs -r echo)
+            echo "flags=$flags" >> "$GITHUB_OUTPUT"
+            echo "Using ignore list: $IGN_FILE"
+          else
+            echo "flags=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Audit requirement files → SARIF
@@ -81,7 +92,7 @@ jobs:
           for f in "${REQS[@]}"; do
             out=".audit/$(echo "$f" | tr '/.' '__').sarif"
             echo "::group::pip-audit -r $f"
-            pip-audit -r "$f" --format sarif --output "$out" || true
+            pip-audit -r "$f" --format sarif --output "$out" ${{ steps.ignore.outputs.flags }} || true
             echo "::endgroup::"
           done
 
@@ -92,7 +103,7 @@ jobs:
           mkdir -p .audit
           if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
             echo "::group::pip-audit (project)"
-            pip-audit --format sarif --output .audit/project.sarif || true
+            pip-audit --format sarif --output .audit/project.sarif ${{ steps.ignore.outputs.flags }} || true
             echo "::endgroup::"
           fi
 
@@ -105,6 +116,33 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then
             echo '{}' > .audit/empty.sarif
           fi
+
+      - name: Build summary table
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "### pip-audit summary" >> $GITHUB_STEP_SUMMARY
+          printf '| Report | Critical | High | Medium | Low |\n|---|---:|---:|---:|---:|\n' >> $GITHUB_STEP_SUMMARY
+          shopt -s nullglob
+          for s in .audit/*.sarif; do
+            # Extract severities, normalize, and count
+            read -r crit high med low < <(jq -r '
+              [ .runs[].results[]? | (
+                  .properties.severity // .level // .rule.properties.security-severity // "" ) ] |
+              map( if test("^[0-9.]+$") then
+                      (if (tonumber>=9) then "critical"
+                       elif (tonumber>=7) then "high"
+                       elif (tonumber>=4) then "medium"
+                       elif (tonumber>0) then "low" else "none" end)
+                   else ascii_downcase end ) |
+              [ (map(select(.=="critical"))|length),
+                (map(select(.=="high"))|length),
+                (map(select(.=="medium"))|length),
+                (map(select(.=="low" or .=="warning"))|length) ] | @tsv
+            ' "$s")
+            printf '| %s | %s | %s | %s | %s |\n' "$(basename "$s")" "${crit:-0}" "${high:-0}" "${med:-0}" "${low:-0}" >> $GITHUB_STEP_SUMMARY
+          done
 
       - name: Upload SARIF to Code Scanning (fork-safe)
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
@@ -129,30 +167,23 @@ jobs:
           set -euo pipefail
           lvl="${AUDIT_FAIL_ON,,}"
           [[ "$lvl" == "none" || -z "$lvl" ]] && { echo "Gate disabled (AUDIT_FAIL_ON=$lvl)."; exit 0; }
-          # Rank severities (critical > high > medium > low)
           declare -A rank=( [low]=1 [medium]=2 [high]=3 [critical]=4 )
           thr=${rank[$lvl]:-0}
           total=0
           shopt -s nullglob
           for s in .audit/*.sarif; do
-            hits=$(jq -r '.runs[].results[]? | (.properties.severity // .level // .rule?.properties?.security-severity // "")' "$s" 2>/dev/null \
-              | awk -v thr="$thr" '
-                  function norm(x){
-                    x=tolower(x)
-                    if(x=="critical")return 4
-                    if(x=="high")return 3
-                    if(x=="medium")return 2
-                    if(x=="warning"||x=="low")return 1
-                    if(x=="error")return 3
-                    if(x ~ /^[0-9.]+$/){ # CVSS numeric when present
-                      if(x>=9) return 4
-                      if(x>=7) return 3
-                      if(x>=4) return 2
-                      if(x>0)  return 1
-                    }
-                    return 0
-                  }
-                  { if (norm($0) >= thr) c++ } END { print c+0 }')
+            hits=$(jq -r '
+              [ .runs[].results[]? | (
+                .properties.severity // .level // .rule.properties.security-severity // "" ) ] |
+              map( if test("^[0-9.]+$") then
+                      (if (tonumber>=9) then "critical"
+                       elif (tonumber>=7) then "high"
+                       elif (tonumber>=4) then "medium"
+                       elif (tonumber>0) then "low" else "none" end)
+                   else ascii_downcase end )' "$s" \
+            | awk -v lvl="$lvl" '
+              function r(x){ if(x=="critical")return 4; if(x=="high")return 3; if(x=="medium")return 2; if(x=="low"||x=="warning")return 1; return 0 }
+              { if (r($0) >= (lvl=="critical"?4:lvl=="high"?3:lvl=="medium"?2:lvl=="low"?1:5)) c++ } END { print c+0 }')
             total=$(( total + hits ))
           done
           if (( total > 0 )); then
