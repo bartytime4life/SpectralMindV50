@@ -1,6 +1,6 @@
 # Pinned to Kaggle CUDA 12.1 + cuDNN 8, Ubuntu 22.04
 # Path: ./Dockerfile.ci.cuda
-FROM nvidia/cuda:12.1.105-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
