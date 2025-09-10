@@ -138,7 +138,7 @@ def coherence_local_fit(
 
     Notes
     -----
-    - Uses coordinate indices as x ∈ [0..k-1] per window, zero-centered to stabilize.
+    - Uses coordinate indices as x ∈ [-m..+m] per window, zero-centered to stabilize.
     - Efficient vectorized implementation via conv1d on sufficient statistics.
     - Replicate padding at borders to keep length N.
 
@@ -158,45 +158,42 @@ def coherence_local_fit(
     B, N = mu.shape
     if window < 3 or N < window:
         # If too small, fall back to moving average penalty
-        return coherence_ma(mu, mask=mask, window=min(max(window, 2), N-1))
+        return coherence_ma(mu, mask=mask, window=min(max(window, 2), N - 1))
 
-    # Build centered coordinate kernel: x ∈ [-m, ..., 0, ..., +m]
+    # Centered coordinate kernel: x ∈ [-m, ..., 0, ..., +m]
     m = (window - 1) // 2
     x = torch.arange(-m, m + 1, device=mu.device, dtype=mu.dtype)  # [window]
-    # Precompute sums for each window via conv1d
+
+    # Prepare kernels
     ones_k = torch.ones(window, device=mu.device, dtype=mu.dtype).view(1, 1, -1)
     x_k = x.view(1, 1, -1)
-    x2_k = (x**2).view(1, 1, -1)
+    x2_k = (x ** 2).view(1, 1, -1)
 
     mu_ = mu.unsqueeze(1)  # [B,1,N]
-    # Sufficient statistics per centered window
-    sum_y = F.conv1d(mu_, ones_k, padding=m).squeeze(1)     # [B,N]
-    sum_x = F.conv1d(mu_, x_k, padding=m).squeeze(1)        # [B,N]  (dot with x vector)
-    sum_xx = F.conv1d(mu.new_ones(B, 1, N), x2_k, padding=m).squeeze(1)  # [B,N]
-    sum_xy = F.conv1d(mu_, x_k, padding=m).squeeze(1)       # same as sum_x when y==1? NO:
-    # Correct sum_xy: convolve y with (x) kernel directly
-    sum_xy = F.conv1d(mu_, x_k, padding=m).squeeze(1)       # [B,N]
 
+    # Sufficient statistics per centered window
+    # k = window length (constant)
     k = float(window)
-    # Solve normal equations per center for slope/intercept of local fit:
-    # [sum_xx  sum_x ] [a] = [sum_xy]
-    # [sum_x    k   ] [b]   [sum_y ]
-    # Determinant Δ = sum_xx * k - sum_x^2 + ridge
+    sum_y = F.conv1d(mu_, ones_k, padding=m).squeeze(1)                     # [B, N]  Σ y
+    sum_xy = F.conv1d(mu_, x_k, padding=m).squeeze(1)                        # [B, N]  Σ x*y
+    sum_x = F.conv1d(mu.new_ones(B, 1, N), x_k, padding=m).squeeze(1)        # [B, N]  Σ x
+    sum_xx = F.conv1d(mu.new_ones(B, 1, N), x2_k, padding=m).squeeze(1)      # [B, N]  Σ x^2
+
+    # Solve normal equations per center for slope/intercept:
+    # [Σx^2  Σx] [a] = [Σxy]
+    # [Σx     k] [b]   [Σy ]
     det = (sum_xx * k - sum_x.pow(2)) + ridge
     a = (k * sum_xy - sum_x * sum_y) / det
     b = (sum_xx * sum_y - sum_x * sum_xy) / det
 
-    # Predicted local line at center index (x_center=0): ŷ_center = b
-    # But we want deviations across the whole signal, not just centers.
-    # Approximate residual per center as |μ[i] - b[i]|; that's the deviation at center.
-    resid = (mu - b).pow(2)   # [B, N]
+    # Use deviation at center (x=0): ŷ_center = b
+    resid_center = (mu - b).pow(2)  # [B, N]
 
-    # Masking
     w = None
     if mask is not None:
         w = mask.to(mu.dtype)
 
-    return _masked_mean(resid, w)
+    return _masked_mean(resid_center, w)
 
 
 # ----------------------------------------------------------------------------- #
