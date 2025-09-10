@@ -9,54 +9,167 @@ on:
       - "src/**"
       - "pyproject.toml"
       - "requirements*.txt"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "docker/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "requirements*.txt"
   workflow_dispatch:
 
+# Least-privilege for all jobs
 permissions:
   contents: read
-  packages: write
+  packages: write          # push to GHCR
+  security-events: write   # upload Trivy SARIF
+  attestations: write      # build provenance
+  id-token: write          # OIDC for provenance
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # docker/metadata-action will normalize
+  PLATFORM: linux/amd64
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 40
 
-      - name: Login GHCR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: |
+          set -euo pipefail
+          # Prefer tag -> commit count -> short SHA
+          v="$(git describe --tags --always --dirty=-wip || true)"
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+
+      - name: Docker meta (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,event=push,enable={{is_default_branch}},value=latest
+          labels: |
+            org.opencontainers.image.title=SpectraMind V50
+            org.opencontainers.image.description=NeurIPS 2025 Ariel Data Challenge runtime
+            org.opencontainers.image.vendor=SpectraMind
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build image
+      # PRs: build locally (no push), so Trivy can scan the image
+      - name: Build (PR) — load to local Docker
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: ${{ env.PLATFORM }}
+          load: true
           push: false
-          tags: ${{ env.IMAGE_NAME }}
+          target: ""                 # optionally set a multi-stage target
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Trivy image scan
+      # main branch: push to GHCR
+      - name: Build & Push (main)
+        id: build-push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORM }}
+          push: true
+          provenance: false          # we attest in a separate step
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- SBOM (CycloneDX) as artifact and label reference ---
+      - name: Generate SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@v0.17.6
+        with:
+          path: .
+          output-file: sbom.cdx.json
+          format: cyclonedx-json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # --- Vulnerability scan (Trivy) ---
+      # PRs: scan the local image
+      - name: Trivy image scan (PR)
+        if: github.event_name == 'pull_request'
         uses: aquasecurity/trivy-action@0.24.0
         with:
-          image-ref: ${{ env.IMAGE_NAME }}
+          scan-type: image
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
           ignore-unfixed: true
           vuln-type: "os,library"
-          format: "table"
+          format: sarif
+          output: trivy.sarif
 
-      - name: Push image (main only)
-        if: github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v6
+      # main: scan by digest (pushed image)
+      - name: Trivy image scan (main)
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@0.24.0
         with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          scan-type: image
+          image-ref: ${{ steps.meta.outputs.tags }}
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          format: sarif
+          output: trivy.sarif
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-docker
+
+      # --- Build provenance attestation (GHCR) ---
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build-push.outputs.digest }}
+          push-to-registry: true
