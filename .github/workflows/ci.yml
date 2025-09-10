@@ -38,6 +38,7 @@ env:
   PYTHONHASHSEED: "0"
   MPLBACKEND: "Agg"          # headless-safe matplotlib
   PYTHONWARNINGS: "error::DeprecationWarning,ignore:::pkg_resources"  # fail on our deprecations
+  ARTIFACT_RETENTION_DAYS: "14"
 
 jobs:
   lint-test-typecheck:
@@ -82,13 +83,14 @@ jobs:
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           # Tooling (pin majors; allow patch updates)
-          pip install "ruff>=0.5,<1.0" "flake8>=7,<8" "mypy>=1.10,<2" \
-                      "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
+          python -m pip install \
+            "ruff>=0.5,<1.0" "flake8>=7,<8" "mypy>=1.10,<2" \
+            "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
 
       - name: Pre-commit (optional)
         if: hashFiles('.pre-commit-config.yaml') != ''
         run: |
-          pip install "pre-commit>=3,<4"
+          python -m pip install "pre-commit>=3,<4"
           pre-commit run --all-files --show-diff-on-failure
 
       - name: Ruff (lint) → SARIF + check
@@ -110,7 +112,7 @@ jobs:
         run: |
           mkdir -p reports
           pytest -n auto --disable-warnings --maxfail=1 \
-            --cov=src --cov-report=xml:reports/coverage.xml \
+            --cov=src --cov-branch --cov-report=xml:reports/coverage.xml \
             --durations=25 \
             --junitxml=reports/tests-junit.xml
 
@@ -122,13 +124,14 @@ jobs:
           path: |
             ruff.sarif
             reports/
-          retention-days: 14
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: Upload Ruff SARIF (skip on fork PRs)
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ruff.sarif
+          category: ruff-lint
 
       - name: Publish Unit Test Results to Job Summary
         if: always()
@@ -241,3 +244,4 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: pip-audit.sarif
+          category: pip-audit
