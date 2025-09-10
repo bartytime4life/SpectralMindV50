@@ -13,24 +13,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Integration tests: calibration chain (`tests/integration/test_calib_chain.py`) and CLI end-to-end smoke test (`tests/integration/test_end_to_end_cli.py`).
 - Kaggle assets: finalized `kaggle/README.md`, notebook template wiring, and pinned `requirements-kaggle.txt`.
 - Docs: expanded calibration internals (aperture/optimal, Horne-style trace), pipeline diagrams, and repo conventions.
+- Diagnostics:
+  - FFT/UMAP analysis (`spectral_analysis.py`, `dimensionality.py`) — see **ADR 0004 Dual Encoder Fusion**.
+  - Physics-informed checks (`validators/physics.py`) — see **ADR 0002 Physics-Informed Losses**.
+  - Unified HTML/JSONL report generator (`diagnostics/report.py`) — see **ADR 0002** + **ADR 0004**.
+- ADC quick-look: mission-grade ADC diagnostics module (`diagnostics/adc_diag.py`) with histograms + HTML report — see **ADR 0002**.
 
 ### 🔄 Changed
 - Trace modeling: multi-order ready center/width, NaN-safe math, stable denominators, background models (`column_median`, `row_poly`), and Torch-first execution.
 - Photometry: batch-aware `[..., T, H, W]`, adaptive apertures, PSF-weighted optimal extraction with variance propagation, full NaN safety.
 - CI: hardened workflows (matrix pinning, cache keys, deterministic pytest); pre-commit stack updated (ruff/black/isort/mypy/bandit/secrets).
 - Schemas: tightened submission/events schema; added drift tests.
+- Diagnostics: improved JSON/HTML report generator with inline CSS, title support, and deterministic UTF-8 output — see **ADR 0002**.
 
 ### 🛠️ Fixed
 - Time-axis normalization and mask/variance alignment across calibration modules.
 - PSF normalization edge cases (degenerate/empty masks) in optimal extraction.
 - Docstring mismatches and dtype inconsistencies in Torch/NumPy paths.
+- ADC calibration diagnostics now clamp NaN/Inf inputs and guard matplotlib fallbacks — see **ADR 0002**.
 
 ### 🧪 Performance
 - Vectorized photometry loops and reduced tensor allocations.
 - NumPy fallback only for polyfit/smoothing (Torch-first everywhere else).
+- FFT analysis normalized per-sample, NaN-safe, batch-aware — see **ADR 0004**.
 
 ### 🔒 Security
-- None in this cycle (all workflows passed CodeQL/Bandit).
+- All new diagnostics modules passed Bandit + CodeQL scanning.
+- No issues flagged in this cycle.
 
 ### ⚠️ Deprecated
 - None.
@@ -117,3 +126,4 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Use **Added / Changed / Fixed / Deprecated / Removed / Security / Performance** buckets.
 - Dates in **YYYY-MM-DD** (UTC).
 - Patch = bug fixes & safety; minor = features; major = breaking changes.
+- Cross-link new features to **ADRs** for full design context (e.g. ADR 0002, ADR 0004).
