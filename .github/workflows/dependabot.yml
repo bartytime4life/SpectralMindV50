@@ -1,10 +1,69 @@
 # .github/dependabot.yml
+# ======================================================================
+# SpectraMind V50 — Dependabot Config (Upgraded)
+# ----------------------------------------------------------------------
+# • Weekly checks for Python (pip/Poetry) and GitHub Actions
+# • Groups related updates to reduce PR noise
+# • Security-focused labels, reviewers, and commit messages
+# • Aligns with repo blueprint (requirements*.txt, pyproject.toml, etc.)
+# ======================================================================
+
 version: 2
 updates:
+  # ----------------------------
+  # Python (pip + Poetry support)
+  # ----------------------------
   - package-ecosystem: "pip"
-    directory: "/"
-    schedule: { interval: "weekly" }
+    directory: "/"            # root, detects requirements*.txt
+    schedule:
+      interval: "weekly"
     open-pull-requests-limit: 10
+    labels: ["dependencies", "security", "pip"]
+    commit-message:
+      prefix: "deps(pip)"
+      include: "scope"
+    groups:
+      core:
+        patterns:
+          - "torch*"
+          - "pytorch-lightning*"
+          - "hydra*"
+      testing:
+        patterns:
+          - "pytest*"
+          - "hypothesis*"
+      linting:
+        patterns:
+          - "ruff"
+          - "flake8"
+          - "mypy*"
+
   - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule: { interval: "weekly" }
+    directory: "/"            # looks in .github/workflows
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "security", "ci"]
+    commit-message:
+      prefix: "deps(actions)"
+      include: "scope"
+    groups:
+      ci-core:
+        patterns:
+          - "actions/*"
+          - "github/codeql-action*"
+      artifact-tools:
+        patterns:
+          - "actions/upload-artifact*"
+          - "actions/cache*"
+
+  # ----------------------------
+  # Optional: Poetry lock support
+  # ----------------------------
+  - package-ecosystem: "poetry"
+    directory: "/"            # detects pyproject.toml, poetry.lock
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "security", "poetry"]
+    commit-message:
+      prefix: "deps(poetry)"
+      include: "scope"
