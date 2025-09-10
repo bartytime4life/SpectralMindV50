@@ -1,5 +1,10 @@
 # src/spectramind/losses/__init__.py
-# Re-export public API for convenient imports.
+# =============================================================================
+# SpectraMind V50 — Losses Public API
+# -----------------------------------------------------------------------------
+# Re-export a clean, stable surface so downstream code can import:
+#   from spectramind.losses import gaussian_nll, CompositeLoss, ...
+# =============================================================================
 
 from .gaussian import gaussian_nll
 from .penalties import (
