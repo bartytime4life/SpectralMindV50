@@ -5,26 +5,49 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: "0 6 * * 2"  # Tuesdays
+    - cron: "0 6 * * 2"   # Tuesdays
+  workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
+  actions: read
+
+concurrency:
+  group: trivy-scan-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   fs-scan:
+    name: Trivy FS Scan
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Trivy FS
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy FS → SARIF
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: fs
           ignore-unfixed: true
           format: sarif
           output: trivy-fs.sarif
-      - name: Upload SARIF
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+        continue-on-error: true  # do not fail the workflow, just report
+
+      - name: Upload SARIF to Code Scanning
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-fs.sarif
+
+      - name: Upload Trivy report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs.sarif
+          retention-days: 14
+
+      - name: Log completion
+        run: echo "✅ Trivy FS scan completed and results uploaded (SARIF + artifact)."
