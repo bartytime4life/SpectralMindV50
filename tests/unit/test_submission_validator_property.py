@@ -1,26 +1,40 @@
+from __future__ import annotations
 """
 Property-based tests for submission validator (Upgraded).
 
 Covers schema compliance, sigma positivity, NaN/Inf checks, ID uniqueness,
-strict column order (optionally), duplicate/missing columns, gzip/CRLF,
+strict column order (optionally), duplicate/missing columns, gzip/CRLF/BOM,
 and coercibility behaviors using Hypothesis. Aligned with SpectraMind V50
 and the Kaggle submission schema.
 
-The tests are tolerant of validators that normalize some cases (e.g., trim
-header whitespace, auto-drop index columns, coerce numeric strings), but
+Tests are tolerant of validators that normalize some cases (e.g., trim
+header whitespace, drop stray index columns, coerce numeric strings), but
 still insist on descriptive error messages for strict validators.
 """
 
-from __future__ import annotations
 import importlib
+import io
 import os
 from pathlib import Path
-from typing import Callable, Optional, Tuple, Union, Any, List, Dict
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import pytest
-from hypothesis import given, settings, strategies as st, example
+from hypothesis import HealthCheck, example, given, settings, strategies as st
+
+# ----------------------------------------------------------------------------- #
+# Global test profile (CI friendly, deterministic)
+# ----------------------------------------------------------------------------- #
+# Keep these modest to stay fast in Kaggle/CI; allow deadline=None to avoid flaky timeouts.
+settings.register_profile(
+    "spectramind_v50_ci",
+    max_examples=20,
+    suppress_health_check=(HealthCheck.function_scoped_fixture,),
+    deadline=None,
+    derandomize=True,
+)
+settings.load_profile("spectramind_v50_ci")
 
 # ----------------------------------------------------------------------------- #
 # Config via env (bins, order)
@@ -39,7 +53,6 @@ EXPECTED_COLUMNS: List[str] = (
     + [f"{MU_PREFIX}{i:03d}" for i in range(N_BINS)]
     + [f"{SIGMA_PREFIX}{i:03d}" for i in range(N_BINS)]
 )
-
 ENFORCE_COLUMN_ORDER = os.environ.get("SM_ENFORCE_SUBMISSION_ORDER", "0") == "1"
 
 # ----------------------------------------------------------------------------- #
@@ -141,6 +154,15 @@ def _write_csv(tmp_path: Path, df: pd.DataFrame, name: str = "sub.csv", newline:
     return p
 
 
+def _write_csv_with_bom(tmp_path: Path, df: pd.DataFrame, name: str = "bom.csv") -> Path:
+    p = tmp_path / name
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    data = "\ufeff" + buf.getvalue()  # prepend UTF-8 BOM
+    p.write_text(data, encoding="utf-8-sig")
+    return p
+
+
 def _allowed_id() -> st.SearchStrategy[str]:
     # Alphanumerics, underscore, hyphen — keep it simple and schema-friendly.
     alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
@@ -148,12 +170,12 @@ def _allowed_id() -> st.SearchStrategy[str]:
 
 
 def _finite_float() -> st.SearchStrategy[float]:
-    # Strictly finite floats for μ. Avoid NaN/Inf; those are tested separately.
-    return st.floats(allow_nan=False, allow_infinity=False, width=64)
+    # Strictly finite floats for μ. Exercise small/large magnitudes too.
+    return st.floats(allow_nan=False, allow_infinity=False, width=64).filter(lambda v: np.isfinite(v))
 
 
-def _pos_float(min_value: float = 1e-9, max_value: float = 1e3) -> st.SearchStrategy[float]:
-    # Strictly > 0 for σ (with tiny epsilon floor).
+def _pos_float(min_value: float = 1e-9, max_value: float = 1e6) -> st.SearchStrategy[float]:
+    # Strictly > 0 for σ (with epsilon floor).
     return st.floats(min_value=min_value, max_value=max_value, allow_nan=False, allow_infinity=False, width=64)
 
 # ----------------------------------------------------------------------------- #
@@ -186,7 +208,6 @@ def st_permutation(lst: List[str]) -> st.SearchStrategy[List[str]]:
 # ----------------------------------------------------------------------------- #
 # Properties — happy path
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=20, deadline=None)
 @given(df=st_valid_df())
 def test_valid_frames_always_pass(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     # Path input
@@ -205,11 +226,9 @@ def test_valid_frames_always_pass(tmp_path: Path, validator: ValidatorFn, df: pd
         # Some validators may demand a path (csv), which is acceptable here:
         assert ("dataframe" in joined or "data frame" in joined or "path" in joined or "csv" in joined) or len(errs3) == 0
 
-
 # ----------------------------------------------------------------------------- #
 # Properties — σ > 0, NaN/Inf
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=20, deadline=None)
 @given(
     df=st_valid_df(),
     idx=st.integers(min_value=0, max_value=N_BINS - 1),
@@ -223,7 +242,6 @@ def test_sigma_non_positive_fails(tmp_path: Path, validator: ValidatorFn, df: pd
     assert any(("sigma" in e.lower() and ("pos" in e.lower() or ">" in e or "non" in e.lower())) for e in errs), f"errors={errs}"
 
 
-@settings(max_examples=20, deadline=None)
 @given(df=st_valid_df(), which=st.sampled_from(["nan_mu", "inf_mu", "nan_sigma", "inf_sigma"]))
 def test_nan_inf_fail(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame, which: str):
     if which == "nan_mu":
@@ -243,7 +261,6 @@ def test_nan_inf_fail(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame, 
 # ----------------------------------------------------------------------------- #
 # Properties — missing/extra/duplicate columns & order
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=15, deadline=None)
 @given(df=st_valid_df())
 def test_missing_or_extra_columns_fail(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     # Remove a known column and add an unknown one
@@ -256,7 +273,6 @@ def test_missing_or_extra_columns_fail(tmp_path: Path, validator: ValidatorFn, d
     assert ("missing" in j or "schema" in j or "column" in j or "expected" in j) and ("extra" in j or "unknown" in j)
 
 
-@settings(max_examples=15, deadline=None)
 @given(df=st_valid_df())
 def test_duplicate_columns_fail_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     # Introduce a duplicate column name by renaming one sigma to an existing mu header
@@ -269,7 +285,6 @@ def test_duplicate_columns_fail_property(tmp_path: Path, validator: ValidatorFn,
     assert any(tok in " ".join(errs).lower() for tok in ("duplicate", "ambiguous", "column"))
 
 
-@settings(max_examples=15, deadline=None)
 @given(df=st_valid_df())
 def test_strict_column_order_required(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     # Permute columns but keep the same set → expect failure if validator requires exact order
@@ -293,7 +308,6 @@ def test_strict_column_order_required(tmp_path: Path, validator: ValidatorFn, df
 # ----------------------------------------------------------------------------- #
 # Properties — sample_id rules
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=12, deadline=None)
 @given(df=st_valid_df())
 def test_id_column_presence_and_uniqueness(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     # Duplicate an ID → should fail
@@ -315,7 +329,6 @@ def test_id_column_presence_and_uniqueness(tmp_path: Path, validator: ValidatorF
     assert "sample_id" in ji or "id" in ji or "missing" in ji or "schema" in ji
 
 
-@settings(max_examples=12, deadline=None)
 @given(df=st_valid_df())
 def test_non_string_or_missing_ids_fail_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     df2 = df.copy()
@@ -332,9 +345,8 @@ def test_non_string_or_missing_ids_fail_property(tmp_path: Path, validator: Vali
     assert "sample_id" in txt and any(tok in txt for tok in ("string", "missing", "null", "dtype", "type"))
 
 # ----------------------------------------------------------------------------- #
-# Properties — optional behaviors (header whitespace, coercible strings, gzip, CRLF)
+# Properties — optional behaviors (header whitespace, coercible strings, gzip, CRLF, BOM, index col)
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=10, deadline=None)
 @given(df=st_valid_df())
 def test_header_whitespace_optional_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     # Rename a couple of headers with extra spaces
@@ -345,7 +357,6 @@ def test_header_whitespace_optional_property(tmp_path: Path, validator: Validato
     assert ok or not ok
 
 
-@settings(max_examples=10, deadline=None)
 @given(df=st_valid_df())
 def test_mu_sigma_coercible_strings_optional_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     df.loc[0, f"{MU_PREFIX}001"] = "0.123"
@@ -358,7 +369,19 @@ def test_mu_sigma_coercible_strings_optional_property(tmp_path: Path, validator:
     assert any(tok in txt for tok in ("numeric", "float", "number", "dtype", "parse"))
 
 
-@settings(max_examples=8, deadline=None)
+@given(df=st_valid_df())
+def test_index_column_optional_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
+    # Add a stray index-like column often created by pandas: 'Unnamed: 0'
+    df2 = df.copy()
+    df2.insert(0, "Unnamed: 0", np.arange(len(df2)))
+    p = _write_csv(tmp_path, df2, "stray_index.csv")
+    ok, errs = validator(p)
+    # Accept either strict failure with message, or auto-drop behavior.
+    if not ok:
+        joined = " ".join(errs).lower()
+        assert any(tok in joined for tok in ("unexpected", "extra", "unknown", "schema", "column"))
+
+
 @given(df=st_valid_df())
 def test_gzipped_csv_optional_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     import gzip
@@ -374,7 +397,6 @@ def test_gzipped_csv_optional_property(tmp_path: Path, validator: ValidatorFn, d
             assert False, f"Validator rejected gzipped CSV unexpectedly: {errs}"
 
 
-@settings(max_examples=8, deadline=None)
 @given(df=st_valid_df())
 def test_crlf_csv_optional_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
     p = _write_csv(tmp_path, df, "crlf.csv", newline="\r\n")
@@ -382,10 +404,20 @@ def test_crlf_csv_optional_property(tmp_path: Path, validator: ValidatorFn, df: 
     # Expect robust validators to accept; allow strict ones to fail (log reason)
     assert ok or ("newline" in " ".join(errs).lower() or "parse" in " ".join(errs).lower())
 
+
+@given(df=st_valid_df())
+def test_bom_header_optional_property(tmp_path: Path, validator: ValidatorFn, df: pd.DataFrame):
+    p = _write_csv_with_bom(tmp_path, df, "bom.csv")
+    ok, errs = validator(p)
+    # Accept either behavior; if failing, require a useful hint.
+    if not ok:
+        j = " ".join(errs).lower()
+        assert any(tok in j for tok in ("bom", "utf-8", "encoding", "decode", "header"))
+
+
 # ----------------------------------------------------------------------------- #
 # Properties — single-cell corruption (NaN/Inf/non-numeric) must fail
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=20, deadline=None)
 @given(
     df=st_valid_df(),
     which=st.sampled_from(["mu", "sigma"]),
@@ -413,7 +445,6 @@ def test_single_cell_corruption_must_fail(tmp_path: Path, validator: ValidatorFn
 # ----------------------------------------------------------------------------- #
 # Properties — env override (small bins) honored or schema-mismatch explained
 # ----------------------------------------------------------------------------- #
-@settings(max_examples=5, deadline=None)
 @given(rows=st.integers(min_value=1, max_value=4))
 def test_env_override_small_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validator: ValidatorFn, rows: int):
     """
