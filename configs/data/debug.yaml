@@ -1,30 +1,90 @@
 # configs/data/debug.yaml
+# ======================================================================
 # SpectraMind V50 — Debug dataset profile (tiny, deterministic)
-# Use:
-#   python -m spectramind train data=debug
+# Overlay this on top of any base data profile:
+#   python -m spectramind.train +data=nominal,data/debug
+#   python -m spectramind.train +env=kaggle +data=kaggle,data/debug
+# ======================================================================
 
-# Subsampling controls consumed by your datamodule
+# ---------------------------------------
+# Subsampling controls (consumed by DM)
+# ---------------------------------------
 subset:
   enable: true
-  train_frac: 0.02      # 2% of train
-  val_frac: 0.02        # 2% of val
-  test_frac: 0.02       # optional
-  seed: 123
+  # Two modes are supported by the datamodule; use exactly one:
+  mode: fraction           # "fraction" | "indices"
+  # Fractions (ignored if mode=="indices")
+  train_frac: 0.02         # 2% of train
+  val_frac:   0.02         # 2% of val
+  test_frac:  0.02         # optional
+  # Deterministic seed (will fall back to ${seed} if present)
+  seed: ${seed,123}
 
-# Data loader batch sizes kept small for speed/VRAM
-batch_size:
-  train: 8
-  val: 8
-  test: 8
+  # Optional fixed indices (use with mode=="indices")
+  # indices:
+  #   train: [0, 1, 2, 3, 4, 5, 6, 7]
+  #   val:   [0, 1, 2, 3]
+  #   test:  [0, 1, 2, 3]
 
-# Keep workers low to reduce boot time on CI/Kaggle
-dataloader:
-  num_workers: 0
-  persistent_workers: false
-  pin_memory: false
+# ---------------------------------------
+# Dataloader overrides (top-level style)
+# ---------------------------------------
+batch_size:       8
+eval_batch_size:  8
+num_workers:      0
+pin_memory:       false
+persistent_workers: false
+prefetch_factor:  2
+drop_last_train:  false
 
-# Optional: fixed indices (overrides fracs if provided)
-# subset_indices:
-#   train: [0, 1, 2, 3, 4, 5, 6, 7]
-#   val:   [0, 1, 2, 3]
-#   test:  [0, 1, 2, 3]
+# ---------------------------------------
+# Dataloader overrides (loader.* style)
+# (If your base profile uses loader.train/valid/test maps.)
+# ---------------------------------------
+loader:
+  train:
+    batch_size: 8
+    num_workers: 0
+    shuffle: true
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor: 2
+    drop_last: false
+    sampler:
+      type: none
+      seed: ${seed,123}
+  valid:
+    batch_size: 8
+    num_workers: 0
+    shuffle: false
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor: 2
+    drop_last: false
+  test:
+    batch_size: 8
+    num_workers: 0
+    shuffle: false
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor: 2
+    drop_last: false
+
+# ---------------------------------------
+# Sampler — force non-DDP for fastest debug
+# (If trainer runs DDP, the datamodule can still override.)
+# ---------------------------------------
+sampler:
+  type: none
+  seed: ${seed,123}
+
+# ---------------------------------------
+# Fail-fast guards & small previews
+# ---------------------------------------
+debug:
+  validate_paths:  true      # stat() declared files
+  strict_headers:  false     # turn on if you want header enforcement during debug
+  print_first_rows: 5        # small preview of each split after subsampling
+  fail_on_missing: true
+  headers:
+    required: ["sample_id"]  # extend to match your DM expectations
