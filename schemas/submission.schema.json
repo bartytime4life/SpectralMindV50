@@ -3,26 +3,36 @@
   "$id": "https://spectramind-v50.org/schemas/submission.schema.json",
   "title": "Ariel Submission (SpectraMind V50)",
   "description": "Single-record JSON representation of a Kaggle submission row for the Ariel Data Challenge. Exactly one of `sample_id` (preferred) or legacy `id` must be present. Two equivalent shapes are valid: (1) compact arrays (mu/sigma) or (2) flattened fields mu_000..mu_282 and sigma_000..sigma_282.",
-
   "type": "object",
   "additionalProperties": false,
 
   "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$",
+      "description": "SHA-256 hex digest"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp in RFC 3339 format"
+    },
+    "relaxedId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_\\-]+$",
+      "examples": ["00012345", "row_000001", "planet-42"]
+    },
     "idFields": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "sample_id": {
-          "type": "string",
-          "description": "Preferred ID field for a submission row. Must use alphanumerics, underscore, or hyphen.",
-          "pattern": "^[A-Za-z0-9_\\-]+$",
-          "examples": ["00012345", "row_000001", "planet-42"]
+          "$ref": "#/$defs/relaxedId",
+          "description": "Preferred ID field for a submission row."
         },
         "id": {
-          "type": "string",
-          "description": "Legacy ID field for backward compatibility with earlier CSVs. Prefer `sample_id`.",
-          "pattern": "^[A-Za-z0-9_\\-]+$",
-          "examples": ["00012345", "row_000001", "planet-42"]
+          "$ref": "#/$defs/relaxedId",
+          "description": "Legacy ID field for backward compatibility with earlier CSVs. Prefer `sample_id`."
         }
       },
       "oneOf": [
@@ -30,21 +40,28 @@
         { "required": ["id"] }
       ]
     },
+    "idx3": {
+      "type": "string",
+      "description": "Three-digit index 000–282 inclusive",
+      "pattern": "^(?:[01]\\d\\d|2[0-7]\\d|28[0-2])$"
+    },
+    "muField": {
+      "type": "string",
+      "pattern": "^mu_(?:[01]\\d\\d|2[0-7]\\d|28[0-2])$",
+      "description": "mu_000 … mu_282"
+    },
+    "sigmaField": {
+      "type": "string",
+      "pattern": "^sigma_(?:[01]\\d\\d|2[0-7]\\d|28[0-2])$",
+      "description": "sigma_000 … sigma_282"
+    },
 
     "provenance": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "config_hash": {
-          "type": "string",
-          "description": "Optional SHA256 hash of the Hydra/DVC config snapshot that produced this row.",
-          "pattern": "^[A-Fa-f0-9]{64}$"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Optional UTC timestamp of when this record was generated."
-        }
+        "config_hash": { "$ref": "#/$defs/sha256", "description": "Optional SHA256 of the composed Hydra/DVC config snapshot." },
+        "created_at": { "$ref": "#/$defs/dateTime", "description": "Optional UTC timestamp of when this record was generated." }
       }
     },
 
@@ -52,62 +69,46 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "sample_id": { "$ref": "#/$defs/idFields/properties/sample_id" },
-        "id": { "$ref": "#/$defs/idFields/properties/id" },
+        "sample_id": { "$ref": "#/$defs/relaxedId" },
+        "id":        { "$ref": "#/$defs/relaxedId" },
         "mu": {
           "type": "array",
           "description": "Mean transmission spectrum across exactly 283 wavelength bins (mu_000 … mu_282).",
-          "items": {
-            "type": "number",
-            "description": "Mean transit depth for a single wavelength bin."
-          },
           "minItems": 283,
-          "maxItems": 283
+          "maxItems": 283,
+          "items": { "type": "number", "description": "Mean transit depth for a single wavelength bin." }
         },
         "sigma": {
           "type": "array",
           "description": "Uncertainty (standard deviation) per wavelength bin (sigma_000 … sigma_282). Must be non-negative.",
-          "items": {
-            "type": "number",
-            "minimum": 0,
-            "description": "Non-negative standard deviation for a single wavelength bin."
-          },
           "minItems": 283,
-          "maxItems": 283
+          "maxItems": 283,
+          "items": { "type": "number", "minimum": 0, "description": "Non-negative standard deviation for a single wavelength bin." }
         },
-        "config_hash": { "$ref": "#/$defs/provenance/properties/config_hash" },
-        "created_at": { "$ref": "#/$defs/provenance/properties/created_at" }
+        "config_hash": { "$ref": "#/$defs/sha256" },
+        "created_at":  { "$ref": "#/$defs/dateTime" }
       },
       "required": ["mu", "sigma"],
-      "allOf": [
-        { "$ref": "#/$defs/idFields" }
-      ]
+      "allOf": [ { "$ref": "#/$defs/idFields" } ]
     },
 
     "flattenedForm": {
       "type": "object",
       "description": "Flattened object mirroring CSV columns: id + mu_000..mu_282 + sigma_000..sigma_282.",
+      "additionalProperties": false,
       "properties": {
-        "sample_id": { "$ref": "#/$defs/idFields/properties/sample_id" },
-        "id": { "$ref": "#/$defs/idFields/properties/id" },
-        "config_hash": { "$ref": "#/$defs/provenance/properties/config_hash" },
-        "created_at": { "$ref": "#/$defs/provenance/properties/created_at" }
+        "sample_id":  { "$ref": "#/$defs/relaxedId" },
+        "id":         { "$ref": "#/$defs/relaxedId" },
+        "config_hash":{ "$ref": "#/$defs/sha256" },
+        "created_at": { "$ref": "#/$defs/dateTime" }
       },
       "patternProperties": {
-        "^mu_\\d{3}$": {
-          "type": "number",
-          "description": "Mean transit depth for a single wavelength bin (e.g., mu_000)."
-        },
-        "^sigma_\\d{3}$": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Non-negative standard deviation for a single wavelength bin (e.g., sigma_000)."
-        }
+        "^mu_(?:[01]\\d\\d|2[0-7]\\d|28[0-2])$":    { "type": "number", "description": "Mean transit depth for a single wavelength bin." },
+        "^sigma_(?:[01]\\d\\d|2[0-7]\\d|28[0-2])$": { "type": "number", "minimum": 0, "description": "Non-negative standard deviation for a single wavelength bin." }
       },
-      "additionalProperties": false,
-      "allOf": [
-        { "$ref": "#/$defs/idFields" }
-      ]
+      "allOf": [ { "$ref": "#/$defs/idFields" } ]
+      /* $comment: JSON Schema cannot natively assert “exactly 283 mu_* and 283 sigma_*” properties.
+         If you require that strictly, add a tiny post-validator to count fields by prefix. */
     }
   },
 
@@ -119,8 +120,8 @@
   "examples": [
     {
       "sample_id": "row_000001",
-      "mu": [0.0012, 0.0013, 0.0011, 0.0010, 0.0012],
-      "sigma": [0.0001, 0.0001, 0.0002, 0.0002, 0.0001],
+      "mu":   [0.0012, 0.0013, 0.0011, 0.0010, 0.0012, "… 278 more …"],
+      "sigma":[0.0001, 0.0001, 0.0002, 0.0002, 0.0001, "… 278 more …"],
       "config_hash": "5f2d6f4e5b8c4a91d23e9c1f3aa4d80f29e613a768e345a91c1de7bb14a02a8b",
       "created_at": "2025-09-07T23:55:00Z"
     },
