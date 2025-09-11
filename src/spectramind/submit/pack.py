@@ -1,30 +1,3 @@
-# src/spectramind/utils/pack.py
-"""
-SpectraMind V50 — Submission Packaging Utility
-==============================================
-
-Packs prediction CSV(s) into a Kaggle-ready ZIP archive with a JSON metadata manifest.
-
-Highlights
-----------
-- Deterministic output (fixed timestamps & ordering) when `seed` is provided
-- UTF-8 JSON with sorted keys for stable diffs
-- SHA-256 fingerprints of payload files
-- Stable Unix-style permissions (0644) on all members
-- Zip64 enabled; chunked hashing to bound memory
-- Optional schema validation via spectramind.submit.validate
-
-Typical usage
--------------
->>> from spectramind.utils.pack import pack
->>> pack("out/submission.csv", "out/submission.zip", meta={"run_id": "v50.1"}, seed=42)
-
-Notes
------
-- Kaggle expects the primary CSV at arcname "submission.csv". You may attach
-  extra files (e.g., explanation) under "assets/..." via `extras`.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -44,11 +17,6 @@ Pathish = Union[str, Path]
 # -----------------------------------------------------------------------------#
 
 _CHUNK = 1024 * 1024  # 1 MiB read chunks
-
-
-def _read_bytes(path: Path) -> bytes:
-    with path.open("rb") as f:
-        return f.read()
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -85,15 +53,61 @@ def _zipinfo_for(
     return zi
 
 
+def _platform_info() -> Dict[str, Any]:
+    return {
+        "platform": os.name,
+        "sys_platform": sys.platform,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+    }
+
+
+def _validate_csv_header_exact(path: Path) -> Optional[str]:
+    """
+    Fast header validation (no pandas): ensure exact submission header order.
+    Returns an error string or None if ok.
+    """
+    try:
+        from spectramind.submit.format import submission_columns  # local import
+    except Exception:
+        return None  # if module not available, skip strict header check
+
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            header_line = fh.readline().rstrip("\r\n")
+        header = header_line.split(",") if header_line else []
+    except Exception as e:
+        return f"failed to read CSV header: {type(e).__name__}: {e}"
+
+    expected = submission_columns()
+    if header != expected:
+        missing = [c for c in expected if c not in header]
+        extra = [c for c in header if c not in expected]
+        return (
+            "CSV header mismatch with required submission header.\n"
+            f"  Expected {len(expected)} columns, got {len(header)}.\n"
+            f"  Missing: {missing[:5]}{'...' if len(missing)>5 else ''}\n"
+            f"  Extra: {extra[:5]}{'...' if len(extra)>5 else ''}"
+        )
+    return None
+
+
 def _validate_csv_light(path: Path) -> None:
+    """
+    Lightweight safety checks: file exists, non-empty, optional header order check.
+    """
     if not path.exists():
         raise FileNotFoundError(f"Missing submission CSV: {path}")
     if path.stat().st_size == 0:
         raise ValueError(f"Submission CSV is empty: {path}")
-    # Extension check is advisory only; allow .CSV etc.
+
+    # Advisory extension check (do not block .CSV)
     if path.suffix.lower() != ".csv":
-        # Non-fatal: keep going. Kaggle requires submission.csv arcname anyway.
-        return
+        pass
+
+    # If we can check the exact header cheaply, do so
+    hdr_err = _validate_csv_header_exact(path)
+    if hdr_err:
+        raise ValueError(hdr_err)
 
 
 def _try_strict_validate(csv_path: Path) -> Optional[str]:
@@ -105,19 +119,30 @@ def _try_strict_validate(csv_path: Path) -> Optional[str]:
         from spectramind.submit import validate_csv  # type: ignore
     except Exception:
         return None
-
     report = validate_csv(csv_path)
     if not report.ok:
-        return "Strict validation failed:\n- " + "\n- ".join(report.errors)
+        return "Strict validation failed:\n- " + "\n- ".join(report.errors[:10])
     return None
 
 
-def _platform_info() -> Dict[str, Any]:
-    return {
-        "platform": os.name,
-        "sys_platform": sys.platform,
-        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-    }
+def _stream_file_into_zip(
+    zf: zipfile.ZipFile,
+    zi: zipfile.ZipInfo,
+    src_path: Path,
+    *,
+    compress_type: int,
+    compresslevel: Optional[int],
+) -> None:
+    """
+    Stream file into a zip entry without loading whole file into memory.
+    """
+    with zf.open(zi, mode="w", force_zip64=True) as dst, src_path.open("rb") as src:
+        if compresslevel is not None and hasattr(dst, "compresslevel"):
+            # no direct API to set compresslevel on open handle; zf.writestr handles it.
+            # For streaming we rely on compressor defaults in Python's zipfile.
+            pass
+        for chunk in iter(lambda: src.read(_CHUNK), b""):
+            dst.write(chunk)
 
 
 # -----------------------------------------------------------------------------#
@@ -148,7 +173,7 @@ def pack(
     Args:
         csv_path: Path to the predictions CSV (Kaggle schema).
         out_zip: Output path for the zip archive.
-        meta: Optional extra metadata (merged with defaults).
+        meta: Optional extra metadata (merged with defaults; user keys win).
         seed: If set, produces deterministic timestamps/content ordering (UTC).
         extras: Optional iterable of extra files to embed under 'assets/'.
                 Each element may be:
@@ -164,7 +189,9 @@ def pack(
     csv_path = Path(csv_path)
     out_zip = Path(out_zip)
 
+    # Basic checks + header enforcement if available
     _validate_csv_light(csv_path)
+
     if strict_validate:
         err = _try_strict_validate(csv_path)
         if err:
@@ -184,8 +211,7 @@ def pack(
         "env": _platform_info(),
     }
     if meta:
-        # User-provided keys win on conflict
-        manifest.update(meta)
+        manifest.update(meta)  # user keys win
 
     # Normalize extras -> List[ExtraFile]
     extra_items: List[ExtraFile] = []
@@ -200,50 +226,34 @@ def pack(
     # Ensure output directory exists
     out_zip.parent.mkdir(parents=True, exist_ok=True)
 
-    # Zip64 for big files; deterministic order: main CSV first, then extras (sorted by arcname)
+    # Zip64 for big files; deterministic order: main CSV first, then extras sorted, then meta.json
     with zipfile.ZipFile(out_zip, mode="w", allowZip64=True) as zf:
-        # Write main CSV under canonical arcname
-        csv_bytes = _read_bytes(csv_path)
-        zi_csv = _zipinfo_for(
-            "submission.csv",
-            ts_unix=ts_unix,
-            compress_type=compression,
-        )
-        zf.writestr(zi_csv, csv_bytes, compress_type=compression, compresslevel=compresslevel)
+        # submission.csv (canonical arcname)
+        zi_csv = _zipinfo_for("submission.csv", ts_unix=ts_unix, compress_type=compression)
+        _stream_file_into_zip(zf, zi_csv, csv_path, compress_type=compression, compresslevel=compresslevel)
 
-        # Write extras under assets/
+        # extras under assets/
         for extra in sorted(extra_items, key=lambda e: e.arcname):
             p = Path(extra.path)
             if not p.exists():
                 raise FileNotFoundError(f"Extra file not found: {p}")
-            data = _read_bytes(p)
             arc = f"assets/{extra.arcname.lstrip('/')}"
-            zi = _zipinfo_for(
-                arc,
-                ts_unix=ts_unix,
-                compress_type=compression,
-            )
-            zf.writestr(zi, data, compress_type=compression, compresslevel=compresslevel)
+            zi = _zipinfo_for(arc, ts_unix=ts_unix, compress_type=compression)
+            _stream_file_into_zip(zf, zi, p, compress_type=compression, compresslevel=compresslevel)
+
+            # Hash lazily (once) for manifest; chunked I/O
             manifest["extras"].append(
                 {
                     "arcname": arc,
-                    "size_bytes": int(len(data)),
-                    "sha256": _sha256_bytes(data),
+                    "size_bytes": int(p.stat().st_size),
+                    "sha256": _sha256_file(p),
                     "src": str(p),
                 }
             )
 
-        # Add JSON metadata with deterministic encoding (UTF-8, sorted keys)
-        zi_meta = _zipinfo_for(
-            "meta.json",
-            ts_unix=ts_unix,
-            compress_type=compression,
-        )
-        zf.writestr(
-            zi_meta,
-            json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8"),
-            compress_type=compression,
-            compresslevel=compresslevel,
-        )
+        # meta.json last (deterministic encoding)
+        meta_bytes = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        zi_meta = _zipinfo_for("meta.json", ts_unix=ts_unix, compress_type=compression)
+        zf.writestr(zi_meta, meta_bytes, compress_type=compression, compresslevel=compresslevel)
 
     return out_zip
