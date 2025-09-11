@@ -1,35 +1,35 @@
-%% SpectraMind V50 — End-to-End Pipeline (GitHub-compatible, minimal)
+%% SpectraMind V50 — End-to-End Pipeline (strict GitHub-safe)
 
 flowchart TB
 
   %% Entry & Orchestration
-  subgraph Entry[Entry & Orchestration]
+  subgraph Entry_and_Orchestration
     direction TB
-    UCI[User / CI]
-    CLI[spectramind CLI: calibrate | preprocess | train | predict | diagnose | submit]
-    HYDRA[Hydra configs (configs/**/*.yaml + overrides)]
-    DVCCTL[DVC pipeline (dvc.yaml)]
+    UCI[User or CI]
+    CLI[spectramind CLI: calibrate, preprocess, train, predict, diagnose, submit]
+    HYDRA[Hydra configs]
+    DVCCTL[DVC pipeline]
     UCI --> CLI --> HYDRA --> DVCCTL
   end
 
   %% Environment
-  subgraph Env[Runtime Environment]
+  subgraph Runtime_Environment
     direction TB
-    LOCAL[Local / CI]
+    LOCAL[Local or CI]
     KAGGLE[Kaggle]
   end
   DVCCTL --> LOCAL
   DVCCTL --> KAGGLE
 
   %% External Inputs
-  subgraph Inputs[External Inputs]
+  subgraph External_Inputs
     direction TB
-    RAW[Ariel dataset (/kaggle/input/ariel-data-challenge-2025)]
-    CFG[.yaml configs (Hydra)]
+    RAW[Ariel dataset path]
+    CFG[Config files]
   end
 
   %% DVC Stages
-  subgraph Pipe[Reproducible Pipeline (DVC stages)]
+  subgraph Reproducible_Pipeline
     direction TB
     Calib[calibrate]
     Prep[preprocess]
@@ -52,14 +52,14 @@ flowchart TB
   RAW --> Calib
 
   %% Artifacts
-  subgraph Artifacts[Versioned Artifacts]
+  subgraph Versioned_Artifacts
     direction TB
-    CALOUT[calibrated/]
-    FEAT[features/]
-    CKPT[models/checkpoints/]
-    PRED[predictions/]
-    REP[diagnostics/reports/]
-    SUBCSV[submission.csv]
+    CALOUT[calibrated]
+    FEAT[features]
+    CKPT[model checkpoints]
+    PRED[predictions]
+    REP[diagnostics reports]
+    SUBCSV[submission csv]
   end
 
   %% Stage outputs
@@ -78,21 +78,21 @@ flowchart TB
   CKPT --> Diagnose
   FEAT --> Diagnose
 
-  %% Kaggle notes
-  subgraph KaggleHints[Notes for Kaggle Mode]
+  %% Kaggle specifics
+  subgraph Kaggle_Notes
     direction TB
-    KIN[Inputs under /kaggle/input/*]
-    KOUT[Outputs under /kaggle/working/*]
+    KIN[inputs under kaggle input]
+    KOUT[outputs under kaggle working]
   end
   RAW --> KIN
   SUBCSV --> KOUT
 
   %% Reproducibility
-  subgraph Repro[Integrity & Reproducibility]
+  subgraph Integrity_and_Reproducibility
     direction TB
-    SNAP[Config snapshot (JSON + SHA256)]
-    JSONL[Run manifest (events.jsonl)]
-    DVCLOCK[dvc.lock]
+    SNAP[config snapshot]
+    JSONL[run manifest]
+    DVCLOCK[dvc lock]
   end
   HYDRA --> SNAP
   DVCCTL --> DVCLOCK
