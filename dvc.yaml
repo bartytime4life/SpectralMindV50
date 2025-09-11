@@ -1,25 +1,16 @@
 # ==============================================================================
 # dvc.yaml — SpectraMind V50 (Reproducible Pipeline, Refactored)
 # ------------------------------------------------------------------------------
-# Stages (expanded granularity):
-#   calibrate → preprocess → train → predict → diagnose → submit
-#
-# Conventions
-# - Hydra-like selectors (env/model/etc.) live in params.yaml under `hydra.*`.
-# - Use:
-#     dvc exp run \
-#       -S hydra.env=kaggle \
-#       -S hydra.model=v50 \
-#       -S hydra.config_name_train=train
-# - `data/calibrated` and `data/processed` are persisted (reuse & Kaggle packaging).
-# - Keep metrics lightweight JSON; heavy logs → outs_no_cache.
-# - CLI mapping (updated):
-#     spectramind calibrate run <raw_dir> [--config ...] [--set k=v ...]
-#     spectramind preprocess run <calib_dir> [--config ...] [--set k=v ...]
-#     spectramind train run [--config ...] [--set k=v ...]
-#     spectramind predict run <ckpt> [--out-csv ...]
-#     spectramind diagnose run <preds_csv> [--truth ...] [--out-dir ...]
-#     spectramind submit package <preds_csv> [--out-zip ...]
+# Stages: calibrate → preprocess → train → predict → diagnose → submit
+# Conventions:
+#   • Hydra selectors live in params.yaml under hydra.*
+#   • Use DVC experiments to switch profiles:
+#       dvc exp run \
+#         -S hydra.env=kaggle \
+#         -S hydra.model=v50 \
+#         -S hydra.config_name_train=train
+#   • Persist calibrated/processed data for reuse & Kaggle packaging.
+#   • Keep metrics small JSON; heavy logs/artifacts stay out of cache or use live.
 # ==============================================================================
 
 stages:
@@ -31,9 +22,9 @@ stages:
       --set hydra.data=${params.hydra.data}
       --set hydra.calib=${params.hydra.calib}
     deps:
+      - data/raw
       - configs/
       - src/
-      - data/raw
     params:
       - hydra.env
       - hydra.data
@@ -91,9 +82,9 @@ stages:
       - logs/train/
     metrics:
       - artifacts/metrics.json:
-          cache: false
           type: json
           xpath: .
+          cache: false
 
   predict:
     desc: "Run inference on processed data → predictions CSV"
@@ -115,7 +106,7 @@ stages:
         cache: true
 
   diagnose:
-    desc: "Post-hoc diagnostics: GLL, sanity checks + JSON summary & HTML report"
+    desc: "Diagnostics: GLL/MAE/RMSE/coverage + plots + report"
     cmd: >
       spectramind diagnose run artifacts/predictions/preds.csv
       --out-dir artifacts/diagnostics
@@ -134,15 +125,21 @@ stages:
       - path: artifacts/diagnostics/plots/
         cache: true
     plots:
-      - artifacts/diagnostics/plots/
+      - artifacts/diagnostics/plots/:
+          cache: false
     metrics:
       - artifacts/diagnostics/summary.json:
-          cache: false
           type: json
           xpath: .
+          cache: false
+    # Optional live logging (DVC studio/HTML); enable in CLI when desired:
+    # live:
+    #   artifacts/diagnostics/live:
+    #     summary: true
+    #     html: true
 
   submit:
-    desc: "Package submission artifacts (ZIP with MANIFEST); validate optionally upstream"
+    desc: "Package submission artifacts (ZIP with MANIFEST); schema-validate"
     cmd: >
       spectramind submit package artifacts/predictions/preds.csv
       --out-zip dist/submission.zip
