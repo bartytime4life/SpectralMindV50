@@ -1,17 +1,19 @@
+# tests/integration/test_kaggle_guardrails.py
 from __future__ import annotations
 
 import os
 import socket
 from pathlib import Path
-from typing import Tuple
+from typing import Iterable, Tuple
 
 import pytest
 
+# ------------------------------------------------------------------------------
+# Kaggle detection
+# ------------------------------------------------------------------------------
 
-# ------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------
 def _kaggle_env_markers() -> list[str]:
+    # Common identifiers set by Kaggle kernels
     return [
         "KAGGLE_KERNEL_RUN_TYPE",
         "KAGGLE_CONTAINER_NAME",
@@ -23,61 +25,11 @@ def _kaggle_env_markers() -> list[str]:
 def _is_kaggle() -> bool:
     """
     Heuristic: Kaggle mounts /kaggle tree and sets one or more env markers.
-    Both checks are useful to avoid false positives in local CI containers that mirror the FS.
+    Both checks help avoid false positives in similar containers.
     """
     dirs_ok = Path("/kaggle").exists() and Path("/kaggle/working").exists()
     env_ok = any(os.environ.get(k) for k in _kaggle_env_markers())
     return dirs_ok and env_ok
-
-
-def _try_write(p: Path, data: bytes = b"ok") -> tuple[bool, str]:
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("wb") as f:
-            f.write(data)
-        return True, "wrote"
-    except Exception as e:  # noqa: BLE001 - we want the exact exception string
-        return False, f"{type(e).__name__}: {e}"
-
-
-def _tcp_connect_blocked(host: str, port: int, timeout: float = 2.0) -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        try:
-            s.connect((host, port))
-            return False  # connected: not blocked
-        except Exception:
-            return True
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
-
-
-def _udp_send_blocked(host: str, port: int, timeout: float = 2.0) -> bool:
-    """
-    UDP "connect" doesn't handshake; we emulate an egress check by send+recv with timeout.
-    In a no-internet environment, we expect timeouts or network-level errors.
-
-    Return True if we see clear evidence of egress being blocked (timeout or socket error).
-    """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(timeout)
-    try:
-        try:
-            s.sendto(b"\x00", (host, port))
-            # Most environments won't route/rsp; we expect timeout here
-            s.recvfrom(1)
-            return False  # got a response; egress not blocked
-        except Exception:
-            return True
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
 
 
 # All tests in this file are Kaggle-only.
@@ -85,14 +37,63 @@ pytestmark = pytest.mark.skipif(not _is_kaggle(), reason="Not running inside Kag
 
 
 # ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+def _try_write(p: Path, data: bytes = b"ok") -> tuple[bool, str]:
+    """
+    Attempt a safe write; return (ok, message). We don't remove the file because
+    Kaggle /kaggle/input should be RO. For RW paths we don't care if the artifact remains.
+    """
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("wb") as f:
+            f.write(data)
+        return True, "wrote"
+    except Exception as e:  # noqa: BLE001 — exact message useful for triage
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _tcp_connect_blocked(host: str, port: int, timeout: float = 1.0) -> bool:
+    """
+    Return True if we *could not* connect (blocked/timeout), False if we did connect.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        try:
+            s.connect((host, port))
+            return False
+        except Exception:
+            return True
+
+
+def _udp_send_blocked(host: str, port: int, timeout: float = 1.0) -> bool:
+    """
+    UDP "connect" doesn't handshake; emulate egress by send+recv with short timeout.
+    In a no-internet environment, we expect timeout or network error.
+
+    Return True if egress appears blocked (timeout/error), False if we get any response.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        try:
+            s.sendto(b"\x00", (host, port))
+            s.recvfrom(1)  # most likely times out
+            return False  # got a response; egress not blocked
+        except Exception:
+            return True
+
+
+# ------------------------------------------------------------------------------
 # Filesystem layout & permissions
 # ------------------------------------------------------------------------------
+
 def test_kaggle_directories_present() -> None:
     """
     Kaggle kernels mount a canonical directory structure:
-      - /kaggle/input  (datasets & competition data, RO)
+      - /kaggle/input   (datasets & competition data, RO)
       - /kaggle/working (current working directory, RW)
-      - /kaggle/temp   (scratch, RW)
+      - /kaggle/temp    (scratch, RW)
     """
     assert Path("/kaggle").exists(), "/kaggle root missing"
     assert Path("/kaggle/input").exists(), "/kaggle/input missing"
@@ -101,24 +102,20 @@ def test_kaggle_directories_present() -> None:
 
 
 def test_cwd_is_working_dir() -> None:
-    """
-    By convention, Kaggle kernels cd into /kaggle/working.
-    """
+    """By convention, Kaggle kernels cd into /kaggle/working."""
     assert Path.cwd().resolve() == Path("/kaggle/working"), f"cwd is not /kaggle/working: {Path.cwd()}"
 
 
 def test_readonly_input_writable_working_temp() -> None:
     """
     /kaggle/input should be read-only; working and temp should be writable.
-    We check both os.access + a real write attempt for /kaggle/input.
+    We check os.access + a real write attempt for /kaggle/input.
     """
-    # RO check via permission bit + write attempt
     ro_root = Path("/kaggle/input")
     assert not os.access(ro_root, os.W_OK), "/kaggle/input appears writable via os.access"
     ok_ro, msg_ro = _try_write(ro_root / "__guardrails_test_ro.txt")
     assert not ok_ro, f"/kaggle/input unexpectedly writable: {msg_ro}"
 
-    # RW checks
     ok_wrk, msg_wrk = _try_write(Path("/kaggle/working/__guardrails_test_wrk.txt"))
     assert ok_wrk, f"/kaggle/working not writable: {msg_wrk}"
 
@@ -129,20 +126,15 @@ def test_readonly_input_writable_working_temp() -> None:
 # ------------------------------------------------------------------------------
 # Network egress is blocked in Kaggle kernels
 # ------------------------------------------------------------------------------
+
 def test_network_blocked_via_tcp_and_udp() -> None:
     """
-    Kaggle disables outbound internet. Both raw TCP and UDP attempts should fail or timeout quickly.
-    We probe a couple of well-known endpoints.
+    Kaggle disables outbound internet. Both raw TCP and UDP should fail or timeout quickly.
+    Probe a couple of well-known endpoints (public DNS).
     """
-    # Public DNS over TCP/UDP
-    blocked_tcp = any(
-        _tcp_connect_blocked(host, 53)
-        for host in ("8.8.8.8", "1.1.1.1")
-    )
-    blocked_udp = any(
-        _udp_send_blocked(host, 53)
-        for host in ("8.8.8.8", "1.1.1.1")
-    )
+    hosts = ("8.8.8.8", "1.1.1.1")
+    blocked_tcp = any(_tcp_connect_blocked(h, 53) for h in hosts)
+    blocked_udp = any(_udp_send_blocked(h, 53) for h in hosts)
     assert blocked_tcp, "TCP egress unexpectedly allowed (DNS TCP connect succeeded)"
     assert blocked_udp, "UDP egress unexpectedly allowed (DNS UDP exchange succeeded)"
 
@@ -150,26 +142,25 @@ def test_network_blocked_via_tcp_and_udp() -> None:
 def test_network_blocked_via_http_lib() -> None:
     """
     A higher-level HTTP request should also fail due to no internet in Kaggle.
-    This is a "nice to have": we xfail rather than fail if urllib is missing or behaves differently.
+    This is 'nice to have' — xfail if urllib behaves unexpectedly; socket test above is authoritative.
     """
     try:
-        import urllib.request
+        import urllib.request  # stdlib
 
         with pytest.raises(Exception):
             urllib.request.urlopen("http://example.com", timeout=2).read()
     except Exception:
-        # If urllib isn't available or behaves differently, don't hard-fail;
-        # the socket-level test above already asserts the guardrail.
         pytest.xfail("HTTP egress check inconclusive; socket guardrail already enforced.")
 
 
 # ------------------------------------------------------------------------------
 # Environment sanity (soft checks)
 # ------------------------------------------------------------------------------
+
 def test_kaggle_environment_markers_present() -> None:
     """
-    Kaggle sets several identifiers that are useful for runtime behavior & logging.
-    We only soft-assert presence of at least one common marker.
+    Kaggle sets identifiers useful for runtime behavior & logging.
+    Soft-assert presence of at least one common marker.
     """
     markers = _kaggle_env_markers()
     assert any(os.environ.get(k) for k in markers), f"No Kaggle env markers found among {markers}"
@@ -177,11 +168,10 @@ def test_kaggle_environment_markers_present() -> None:
 
 def test_thread_env_limits_soft() -> None:
     """
-    Soft assertion: when thread caps are set (by environment or harness), they should be modest.
-    We don't enforce values rigidly (env varies); this is a smoke check only.
+    Soft assertion: when thread caps are set (by environment or harness), they should be modest (1..8).
+    We don't enforce presence; we only validate values if set.
     """
     caps = {k: os.environ.get(k) for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")}
-    # If caps are present, they should parse to small-ish integers and not be zero.
     for k, v in caps.items():
         if not v:
             continue
@@ -189,22 +179,20 @@ def test_thread_env_limits_soft() -> None:
             n = int(v)
         except ValueError:
             pytest.fail(f"{k} is not an integer: {v!r}")
-        # Accept 1..8 as a reasonable range in shared runtimes.
         assert 1 <= n <= 8, f"{k} value {n} is outside the expected small range (1..8)"
 
 
 # ------------------------------------------------------------------------------
 # Optional: verify dataset mount is accessible (read-only list)
 # ------------------------------------------------------------------------------
+
 def test_list_input_datasets_ro() -> None:
     """
     Listing under /kaggle/input should be possible without write access.
     This is optional and only asserts the listing works and entries are directories/files.
     """
     root = Path("/kaggle/input")
-    # Should not raise
-    children = list(root.iterdir())
-    # If empty (rare), nothing more to assert
-    for child in children[:10]:  # cap to avoid long runtimes if many datasets
+    children = list(root.iterdir())  # should not raise
+    for child in children[:10]:  # cap to avoid long runtimes
         assert child.exists()
         assert child.is_dir() or child.is_file()
