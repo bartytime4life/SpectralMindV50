@@ -1,0 +1,13 @@
+# Preprocessing before model
+features:
+  use_fgs1: true
+  use_airs: true
+  standardize_airs: true
+  clip_sigma: 5.0
+  impute: median
+
+aug:
+  enabled: true
+  fgs1_jitter_pct: 0.01
+  airs_gauss_std: 0.002
+  dropout_channels_pct: 0.0
