@@ -1,28 +1,40 @@
-# configs/submit.yaml
 # ======================================================================
-# SpectraMind V50 — Submission Packaging Config
+# SpectraMind V50 — Submission Packaging Config (Hydra 1.x)
 # ======================================================================
-# Hydra config for the final submission stage.
-# Validates predictions, builds a deterministic ZIP, and (optionally) uploads
-# to Kaggle. Safe for local, CI, and Kaggle runtimes.
+# Validates predictions, builds a deterministic ZIP, and (optionally)
+# submits to Kaggle. Safe for local, CI, and Kaggle runtimes.
 # ======================================================================
 
 defaults:
+  - env: local
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
+
+# ----------------------------------------------------------------------
+# Canonical paths (ENV-driven: portable across local/CI/Kaggle)
+# ----------------------------------------------------------------------
+paths:
+  data_root: ${env.data_root}
+  artifacts_root: ${env.artifacts_root}
+  runs: ${paths.artifacts_root}/runs
+  logs: ${hydra:run.dir}/logs
+  outputs: ${paths.artifacts_root}/submission
+  schema_dir: ${hydra:runtime.cwd}/schemas
+  predictions_dir: ${paths.artifacts_root}/predictions
+  manifests_dir: ${paths.artifacts_root}/manifests
 
 # ----------------------------------------------------------------------
 # I/O
 # ----------------------------------------------------------------------
 inputs:
-  predictions: ${oc.env:SM_PREDICTIONS, artifacts/predictions.csv}     # CSV with columns: id, mu[0..282], sigma[0..282] OR long format
-  schema:      ${oc.env:SM_SUBMISSION_SCHEMA, schemas/submission.schema.json}
+  # CSV with either wide (id, mu_0..mu_282, sigma_0..sigma_282) or long format
+  predictions: ${oc.env:SM_PREDICTIONS, ${paths.predictions_dir}/submission.csv}
+  schema:      ${oc.env:SM_SUBMISSION_SCHEMA, ${paths.schema_dir}/submission.schema.json}
 
 outputs:
-  out_zip:   ${oc.env:SM_SUBMISSION_ZIP, artifacts/submission.zip}     # final Kaggle bundle
-  manifest:  ${oc.env:SM_MANIFEST, artifacts/manifest.json}            # provenance manifest (JSON)
-  readme_md: ${oc.env:SM_README, artifacts/SUBMISSION_README.md}       # optional README included in zip
-  # If provided, include extra files alongside predictions (e.g., license)
+  out_zip:   ${oc.env:SM_SUBMISSION_ZIP, ${paths.outputs}/submission.zip}
+  manifest:  ${oc.env:SM_MANIFEST, ${paths.manifests_dir}/manifest_submission.json}
+  readme_md: ${oc.env:SM_README, ${paths.outputs}/SUBMISSION_README.md}
   extra_files:
     - path: LICENSE
       required: false
@@ -33,11 +45,10 @@ outputs:
 # Packaging
 # ----------------------------------------------------------------------
 package:
-  # root directory inside the ZIP (null → place files at top-level)
   zip_root: null
-  compression: "ZIP_DEFLATED"    # ZIP_STORED | ZIP_DEFLATED
-  compresslevel: 6               # 0..9 when supported
-  deterministic: true            # stable file order & timestamps (UTC epoch)
+  compression: "ZIP_DEFLATED"       # ZIP_STORED | ZIP_DEFLATED
+  compresslevel: 6                   # 0..9 when supported
+  deterministic: true                # fixed timestamps/order for reproducibility
   include:
     - ${inputs.predictions}
     - ${outputs.manifest}
@@ -45,24 +56,23 @@ package:
     - "**/__pycache__/**"
     - "**/*.tmp"
     - "**/*.log"
-  max_zip_bytes: 157286400       # 150 MiB safety cap (override as needed)
+  max_zip_bytes: 157286400           # 150 MiB cap
   zip_comment: "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge"
 
 # ----------------------------------------------------------------------
 # Kaggle parameters
 # ----------------------------------------------------------------------
 kaggle:
-  enabled: true                       # if false → build only, no CLI interaction
+  enabled: true
   competition: ${oc.env:KAGGLE_COMP, neurips-2025-ariel-data-challenge}
   title: ${oc.env:KAGGLE_TITLE, "SpectraMind V50 submission"}
   message: ${oc.env:KAGGLE_MSG, "Automated submission from SpectraMind V50 pipeline"}
-  # CLI flags / behavior
   dry_run: ${oc.env:KAGGLE_DRY_RUN, false}
   no_upload: ${oc.env:KAGGLE_NO_UPLOAD, false}
   retries: 3
   backoff_seconds: 10
   timeout_seconds: 600
-  visibility: "private"               # private | public (if allowed)
+  visibility: "private"              # private | public (if allowed)
   verify_ssl: true
 
 # ----------------------------------------------------------------------
@@ -72,24 +82,20 @@ validate:
   strict: true
   quiet: false
 
-  # JSON Schema for structural checks (e.g., 283 μ/σ elements, nonneg σ)
+  # JSON Schema for structural checks (283 μ/σ elements, etc.)
   schema:
     path: ${inputs.schema}
     enabled: true
 
-  # Tabular sanity checks (applied before schema for fast fail)
+  # Tabular sanity checks (fast fail)
   csv:
     header_required: true
-    # Expected columns: either wide (id, mu_0..mu_282, sigma_0..sigma_282) OR long (id, mu[283], sigma[283])
-    allowed_layouts:
-      - "wide"
-      - "long"
+    allowed_layouts: ["wide", "long"]
     id:
       required: true
       unique: true
       nonempty: true
-      # optional prefix guard to catch wrong competition files
-      prefix: null                   # e.g., "sample_" or null to disable
+      prefix: null             # e.g. "sample_"; null disables
     mu:
       bins: 283
       finite: true
@@ -98,15 +104,13 @@ validate:
       finite: true
       nonnegative: true
       allow_zero: true
-    # Optional target row count (null disables)
-    expected_rows: null
+    expected_rows: null        # set to an int to gate row count
     allow_nan: false
     allow_inf: false
 
-  # File existence / size checks
   files:
     require_inputs: true
-    max_csv_bytes: 104857600         # 100 MiB cap (override if needed)
+    max_csv_bytes: 104857600   # 100 MiB cap
 
 # ----------------------------------------------------------------------
 # Provenance metadata (auto-filled at runtime by submit.py)
@@ -116,7 +120,7 @@ meta:
   version: ${oc.env:SM_VERSION, "0.1.0"}
   run_id: null                        # uuid4
   created_at: null                    # ISO8601 UTC
-  env: ${oc.env:SM_ENV, "local"}      # local|ci|kaggle
+  env: ${oc.env:SM_ENV, ${env.name}} # local|ci|kaggle
   user: ${oc.env:USER, "unknown"}
   git:
     hash: null
@@ -128,12 +132,12 @@ meta:
     manifest_sha256: null
     zip_sha256: null
   config_snapshot:
-    train: null                       # path or dict snapshot (if captured)
+    train: null
     data: null
     model: null
 
 # ----------------------------------------------------------------------
-# Diagnostics (optional emit of quick plots & summaries)
+# Diagnostics (optional quick plots & summaries)
 # ----------------------------------------------------------------------
 diagnostics:
   enabled: true
@@ -145,11 +149,13 @@ diagnostics:
   save_csv_summary: true
 
 # ----------------------------------------------------------------------
-# Hydra runtime
+# Hydra runtime (under env.artifacts_root)
 # ----------------------------------------------------------------------
 hydra:
   run:
-    dir: outputs/submit/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}_submit
   sweep:
-    dir: multirun/submit/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.artifacts_root}/sweeps
     subdir: ${hydra.job.num}
+  job:
+    name: "spectramind_v50_submit"
