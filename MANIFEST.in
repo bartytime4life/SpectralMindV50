@@ -1,34 +1,71 @@
-# MANIFEST.in — SpectraMind V50
-# Ensure non-Python runtime assets (configs, schemas, diagrams, docs, etc.)
-# are included in source distributions, matching wheel package-data.
+# ==============================================================================
+# MANIFEST.in — SpectraMind V50 (upgraded)
+# Ensure non-Python runtime assets (configs, schemas, diagrams, docs, CI, kaggle)
+# ship in sdists to match wheel package-data.
+# ==============================================================================
 
-# -------------------------------------------------------------------
-# Core runtime assets (Hydra configs, JSON schemas, diagrams)
-# -------------------------------------------------------------------
-recursive-include src/spectramind/configs *.yml *.yaml
-recursive-include src/spectramind/schemas *.json
-recursive-include src/spectramind/assets/diagrams *.mmd *.svg *.png
-
-# -------------------------------------------------------------------
-# Documentation & guides
-# -------------------------------------------------------------------
-include README.md LICENSE VERSION CHANGELOG.md
-recursive-include docs *.md *.yml *.yaml *.svg *.png
-
-# -------------------------------------------------------------------
-# Repo metadata & CI
-# -------------------------------------------------------------------
-include pyproject.toml setup.cfg
-include .editorconfig .pre-commit-config.yaml
+# --- Project docs & metadata (top-level) --------------------------------------
+include README.md
+include CHANGELOG.md
+include LICENSE
+include VERSION
+include CITATION.cff
+include .editorconfig
+include .pre-commit-config.yaml
+include .cz.toml
+include .secrets.baseline
+include pyproject.toml
+include setup.cfg
 recursive-include .github/workflows *.yml
 
-# -------------------------------------------------------------------
-# Scripts (CLI helpers, Kaggle, diagrams)
-# -------------------------------------------------------------------
-recursive-include scripts *.sh
-recursive-include bin *.sh
+# --- Repo-root configs (Hydra profiles etc.) ----------------------------------
+# If you mirror runtime configs outside package (for docs/examples), include them.
+graft configs
+global-include configs/*.yml configs/*.yaml
 
-# -------------------------------------------------------------------
-# Exclusions (compiled, temp, binary junk)
-# -------------------------------------------------------------------
-global-exclude *.py[cod] __pycache__ *.so *.dylib *.dll *.bak *.tmp
+# --- Package runtime assets (inside src/) -------------------------------------
+# Hydra configs, schemas, templates, diagrams, GUI tokens, logos, etc.
+recursive-include src/spectramind/configs *.yml *.yaml
+recursive-include src/spectramind/schemas *.json
+recursive-include src/spectramind/validators *.json *.yaml
+recursive-include src/spectramind/diagnostics/templates *.j2 *.jinja *.html *.css
+recursive-include src/spectramind/assets/diagrams *.mmd *.svg *.png
+recursive-include src/spectramind/assets/gui *.json *.svg *.png
+recursive-include src/spectramind/assets/logos *.svg *.png
+recursive-include src/spectramind/assets *.css *.js
+
+# --- Kaggle assets -------------------------------------------------------------
+# Notebooks/templates and pinned requirements for Kaggle runtime.
+recursive-include kaggle *.md *.txt *.ipynb *.py
+
+# --- Scripts / CLI helpers -----------------------------------------------------
+recursive-include scripts *.sh *.py
+recursive-include bin *.sh *.py
+
+# --- Docs site & references ----------------------------------------------------
+recursive-include docs *.md *.yml *.yaml *.svg *.png
+recursive-include docs/adr *.md
+
+# --- Examples / notebooks (optional runtime docs) -----------------------------
+recursive-include notebooks *.ipynb *.md
+prune notebooks/**/.ipynb_checkpoints
+
+# --- Exclusions (compiled, temp, caches, data, large/binary junk) -------------
+global-exclude *.py[cod] __pycache__ *.so *.dylib *.dll *.bak *.tmp *.log
+global-exclude .DS_Store Thumbs.db
+prune .venv
+prune venv
+prune env
+prune .mypy_cache
+prune .ruff_cache
+prune .pytest_cache
+prune build
+prune dist
+prune site
+prune htmlcov
+prune coverage
+prune reports
+prune logs
+prune artifacts
+prune data
+prune .dvc
