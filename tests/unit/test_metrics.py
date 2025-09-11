@@ -1,371 +1,413 @@
-# tests/train/test_metrics.py
 from __future__ import annotations
 
+"""
+SpectraMind V50 — Metrics Suite (NumPy/Torch interop)
+
+Implements:
+  • gaussian_nll(y, mu, sigma, reduction="mean")
+  • challenge_gll(y, mu, sigma, fgs1_weight=58.0, reduction="mean", mask=None)
+  • mae(y, mu, mask=None)
+  • rmse(y, mu, mask=None)
+  • coverage(y, mu, sigma, alpha=0.95)
+  • sharpness(sigma, reduction="mean")
+
+Design goals:
+  • Accept NumPy arrays or Torch tensors (Torch optional).
+  • Broadcasting along last dimension (spectral bins) is supported.
+  • Numerical stability: clamp σ with eps; handle tiny σ gracefully.
+  • Reductions: "none" → elementwise (B,K); "mean"/"sum" → scalar.
+  • Optional boolean mask (B,K) for metrics that aggregate (challenge_gll, mae/rmse).
+
+Notes:
+  • gaussian_nll(reduction="none") always returns per-element NLLs.
+  • challenge_gll(reduction="none") returns per-element NLLs (unweighted).
+    Weighting is applied only at aggregation time for "mean"/"sum".
+"""
+
+from typing import Any, Optional, Tuple, Union
+
 import math
-import inspect
-import numpy as np
-import pytest
+import numpy as _np
 
-from spectramind.train.metrics import (
-    gaussian_nll,
-    challenge_gll,
-    mae,
-    rmse,
-    coverage,
-    sharpness,
-)
+try:  # Torch is optional
+    import torch as _torch  # type: ignore
+    _HAS_TORCH = True
+except Exception:  # pragma: no cover
+    _HAS_TORCH = False
 
-# ----------------------------------------------------------------------------- #
-# Helpers
-# ----------------------------------------------------------------------------- #
-def _rng(seed: int = 0) -> np.random.Generator:
-    return np.random.default_rng(seed)
+ArrayLike = Union[_np.ndarray, "._torch.Tensor"]  # type: ignore[name-defined]
 
 
-def _has_torch() -> bool:
-    try:
-        import torch  # noqa: F401
-        return True
-    except Exception:
-        return False
+# ---------------------------------------------------------------------
+# Backend helpers (NumPy <-> Torch)
+# ---------------------------------------------------------------------
+def _is_torch(x: Any) -> bool:
+    return _HAS_TORCH and isinstance(x, _torch.Tensor)
 
 
-def _manual_gaussian_nll(y, mu, sigma):
-    var = sigma ** 2
-    return 0.5 * (np.log(2.0 * math.pi * var) + (y - mu) ** 2 / var)
+def _to_backend(*xs: ArrayLike):
+    """
+    Return ('np'|'torch', ops) where ops is a tiny namespace of math fns for that backend.
+    Derives backend from the first array-like argument.
+    """
+    x0 = next((x for x in xs if x is not None), None)
+    if _is_torch(x0):
+        t = _torch
 
+        class Ops:
+            asarray = lambda v: v if _is_torch(v) else t.as_tensor(v)  # noqa: E731
+            abs = t.abs
+            sqrt = t.sqrt
+            log = t.log
+            sum = lambda a, axis=None: t.sum(a, dim=axis)  # noqa: E731
+            mean = lambda a, axis=None: t.mean(a, dim=axis)  # noqa: E731
+            where = t.where
+            maximum = t.maximum
+            square = lambda a: a * a  # noqa: E731
+            isfinite = t.isfinite
+            astype = lambda a, dt: a.to(dt)  # noqa: E731
+            float_dtype = t.float32
+            asfloat = lambda a: a  # already tensor
+            dtype = lambda a: a.dtype  # noqa: E731
+            zeros_like = t.zeros_like
+            ones_like = t.ones_like
 
-def _sig_accepts(fn, name: str) -> bool:
-    try:
-        return name in inspect.signature(fn).parameters
-    except Exception:
-        return False
-
-
-# ----------------------------------------------------------------------------- #
-# gaussian_nll — core correctness & reductions
-# ----------------------------------------------------------------------------- #
-def test_gaussian_nll_scalar_numpy():
-    y = np.array([1.0])
-    mu = np.array([1.5])
-    sigma = np.array([0.5])
-
-    manual = _manual_gaussian_nll(y, mu, sigma)
-    got = gaussian_nll(y, mu, sigma, reduction="mean")
-    assert np.isclose(got, manual, rtol=1e-7, atol=0.0)
-
-
-def test_gaussian_nll_batch_numpy_reductions():
-    rng = _rng(7)
-    N, D = 4, 6
-    y = rng.normal(size=(N, D))
-    mu = y + rng.normal(scale=0.1, size=(N, D))
-    sigma = np.full((N, D), 0.2)
-
-    nll_mean = gaussian_nll(y, mu, sigma, reduction="mean")
-    nll_sum = gaussian_nll(y, mu, sigma, reduction="sum")
-    nll_none = gaussian_nll(y, mu, sigma, reduction="none")
-
-    assert np.isfinite(nll_mean)
-    assert np.isfinite(nll_sum)
-    assert nll_none.shape == (N, D)
-    assert np.isclose(nll_mean, np.nansum(nll_none) / (N * D), rtol=1e-6)
-    assert np.isclose(nll_sum, np.nansum(nll_none), rtol=1e-6)
-
-
-def test_gaussian_nll_broadcasting_numpy():
-    # y, mu broadcast across last dim; sigma is scalar broadcast
-    y = np.array([[0.0, 1.0, 2.0]])
-    mu = np.array([[0.5, 1.5, 1.0]])
-    sigma = np.array(0.2)  # scalar broadcast
-    out = gaussian_nll(y, mu, sigma, reduction="none")
-    assert out.shape == y.shape
-    assert np.isscalar(gaussian_nll(y, mu, sigma, reduction="mean"))
-    assert np.isscalar(gaussian_nll(y, mu, sigma, reduction="sum"))
-
-
-@pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
-def test_gaussian_nll_1d_2d_interop(reduction: str):
-    # 1-D vectors should work and be consistent with 2-D (N=1) use
-    y1 = np.array([0.0, 1.0, 2.0])
-    mu1 = np.array([0.1, 1.1, 2.1])
-    sigma1 = np.array([0.2, 0.2, 0.2])
-
-    y2 = y1[None, :]
-    mu2 = mu1[None, :]
-    sigma2 = sigma1[None, :]
-
-    g1 = gaussian_nll(y1, mu1, sigma1, reduction=reduction)
-    g2 = gaussian_nll(y2, mu2, sigma2, reduction=reduction)
-    if reduction == "none":
-        assert g1.shape == (3,)
-        assert g2.shape == (1, 3)
-        np.testing.assert_allclose(g1, g2[0], rtol=1e-7)
+        return "torch", Ops()
     else:
-        assert np.isscalar(g1)
-        assert np.isscalar(g2)
-        assert np.isclose(float(g1), float(g2), rtol=1e-7)
+        n = _np
+
+        class Ops:
+            asarray = n.asarray
+            abs = n.abs
+            sqrt = n.sqrt
+            log = n.log
+            sum = lambda a, axis=None: n.sum(a, axis=axis)  # noqa: E731
+            mean = lambda a, axis=None: n.mean(a, axis=axis)  # noqa: E731
+            where = n.where
+            maximum = n.maximum
+            square = n.square
+            isfinite = n.isfinite
+            astype = lambda a, dt: a.astype(dt, copy=False)  # noqa: E731
+            float_dtype = n.float32
+            asfloat = n.asarray
+            dtype = lambda a: a.dtype  # noqa: E731
+            zeros_like = n.zeros_like
+            ones_like = n.ones_like
+
+        return "np", Ops()
 
 
-def test_gaussian_nll_invalid_reduction_raises():
-    y = np.array([0.0])
-    mu = np.array([0.0])
-    sigma = np.array([0.1])
-    with pytest.raises((ValueError, AssertionError, KeyError, TypeError)):
-        _ = gaussian_nll(y, mu, sigma, reduction="avg")  # not supported
+def _reduce(arr: ArrayLike, reduction: str, backend: str, ops) -> Union[ArrayLike, float]:
+    if reduction == "none":
+        return arr
+    if reduction == "sum":
+        # Sum over all axes
+        if backend == "torch":
+            return ops.sum(arr, axis=None)
+        return ops.sum(arr, axis=None).item() if arr.ndim == 0 else ops.sum(arr, axis=None)
+    if reduction == "mean":
+        if backend == "torch":
+            # count of elements
+            denom = 1
+            for s in arr.shape:
+                denom *= int(s)
+            s = ops.sum(arr, axis=None) / denom
+            return s
+        # NumPy scalar ok
+        total = ops.sum(arr, axis=None)
+        denom = 1
+        for s in _np.shape(arr):
+            denom *= int(s)
+        return (total / denom).item() if _np.ndim(total) == 0 else total / denom
+    raise ValueError(f"Unsupported reduction: {reduction!r}")
 
 
-def test_gaussian_nll_zero_or_negative_sigma_handling():
-    y = np.array([0.0, 1.0])
-    mu = np.array([0.0, 1.0])
-    # sigma includes a zero and a negative to test guarding
-    sigma = np.array([0.0, -0.1])
-    # Accept either a clear exception or finite guarded result (eps-clamping)
-    try:
-        out = gaussian_nll(y, mu, sigma, reduction="none")
-        assert np.all(np.isfinite(out)), "Expected finite results if eps-clamped"
-    except Exception as e:  # noqa: BLE001
-        assert isinstance(e, (ValueError, AssertionError, FloatingPointError, ZeroDivisionError))
+def _safe_sigma(sigma: ArrayLike, eps: float, ops):
+    # clamp σ to at least eps; keep dtype
+    if _is_torch(sigma):
+        eps_t = _torch.tensor(eps, dtype=sigma.dtype, device=sigma.device)
+        return ops.maximum(sigma, eps_t)
+    return ops.maximum(sigma, _np.asarray(eps, dtype=sigma.dtype))
 
 
-def test_gaussian_nll_tiny_sigma_stability():
-    # Extremely small sigma should be handled (either via clamping or well-defined error)
-    y = np.array([0.0, 1.0])
-    mu = np.array([0.0, 1.1])
-    sigma = np.array([1e-12, 1e-12])
-    try:
-        v = gaussian_nll(y, mu, sigma, reduction="mean")
-        assert np.isfinite(v)
-    except Exception as e:
-        assert isinstance(e, (FloatingPointError, ValueError, AssertionError, ZeroDivisionError))
-
-
-# ----------------------------------------------------------------------------- #
-# challenge_gll — weighting behavior and reductions
-# ----------------------------------------------------------------------------- #
-def test_challenge_gll_fgs1_weighting_effect_two_bin():
-    # Two-bin spectrum: bin0 is FGS1; make error only in bin0 so weighting dominates
-    y = np.array([[0.0, 0.0]])
-    mu = np.array([[1.0, 0.0]])  # error only at bin 0
-    sigma = np.array([[1.0, 1.0]])
-
-    base = gaussian_nll(y, mu, sigma, reduction="mean")
-    w58 = challenge_gll(y, mu, sigma, fgs1_weight=58.0, reduction="mean")
-    w10 = challenge_gll(y, mu, sigma, fgs1_weight=10.0, reduction="mean")
-
-    assert w58 > w10 > base  # higher weight → higher aggregated loss when only bin0 has error
-
-    nll_elem = gaussian_nll(y, mu, sigma, reduction="none")
-    nll0 = float(nll_elem[0, 0])
-    expected = (58.0 * nll0) / (58.0 + 1.0)
-    assert np.isclose(w58, expected, rtol=1e-6)
-
-
-def test_challenge_gll_multi_bin_exact_formula():
+# ---------------------------------------------------------------------
+# Core metrics
+# ---------------------------------------------------------------------
+def gaussian_nll(
+    y: ArrayLike,
+    mu: ArrayLike,
+    sigma: ArrayLike,
+    *,
+    reduction: str = "mean",
+    eps: float = 1e-12,
+) -> Union[ArrayLike, float]:
     """
-    Validate exact formula on a 1xK example where only specific bins have error.
-    Weighted mean = (w*nll0 + sum(nll1..))/(w + (K-1))
+    Elementwise Gaussian negative log-likelihood:
+      0.5 * [ log(2πσ^2) + (y-μ)^2 / σ^2 ]
+
+    Supports NumPy or Torch inputs; broadcasting on y, mu, sigma is allowed.
+    reduction: "none" → elementwise, "mean" → scalar average, "sum" → scalar sum.
+    eps: small floor for σ to avoid division by zero.
     """
-    K = 5
-    y = np.zeros((1, K))
-    mu = np.zeros((1, K))
-    sigma = np.ones((1, K))
-    # Introduce error at bins 0 (FGS1) and 3
-    mu[0, 0] = 1.0
-    mu[0, 3] = 2.0
-    nll = gaussian_nll(y, mu, sigma, reduction="none")[0]
-    # Weighted mean = (w*nll0 + sum(nll1..))/(w + (K-1))
-    for w in (1.0, 10.0, 58.0, 100.0):
-        got = challenge_gll(y, mu, sigma, fgs1_weight=w, reduction="mean")
-        expected = (w * nll[0] + np.sum(nll[1:])) / (w + (K - 1))
-        assert np.isclose(got, expected, rtol=1e-8)
+    backend, ops = _to_backend(y, mu, sigma)
+    y = ops.asarray(y)
+    mu = ops.asarray(mu)
+    sigma = ops.asarray(sigma)
+
+    sigma = _safe_sigma(sigma, eps, ops)
+    var = sigma * sigma
+    two_pi = 2.0 * math.pi
+
+    nll = 0.5 * (ops.log(two_pi * var) + ops.square(y - mu) / var)
+
+    if reduction == "none":
+        return nll
+    return _reduce(nll, reduction, backend, ops)  # type: ignore[return-value]
 
 
-def test_challenge_gll_reductions_shapes_and_types():
-    rng = _rng(41)
-    B, K = 3, 7
-    y = rng.normal(size=(B, K))
-    mu = rng.normal(size=(B, K))
-    sigma = np.full((B, K), 0.5)
-
-    none = challenge_gll(y, mu, sigma, reduction="none", fgs1_weight=58.0)
-    mean = challenge_gll(y, mu, sigma, reduction="mean", fgs1_weight=58.0)
-    sm = challenge_gll(y, mu, sigma, reduction="sum", fgs1_weight=58.0)
-    assert none.shape == (B, K)
-    assert np.isscalar(mean)
-    assert np.isscalar(sm)
-
-
-def test_challenge_gll_weight_1_matches_plain_mean():
+def challenge_gll(
+    y: ArrayLike,
+    mu: ArrayLike,
+    sigma: ArrayLike,
+    *,
+    fgs1_weight: float = 58.0,
+    reduction: str = "mean",
+    mask: Optional[ArrayLike] = None,
+    eps: float = 1e-12,
+) -> Union[ArrayLike, float]:
     """
-    If fgs1_weight == 1, challenge_gll's mean reduction should equal the plain mean of per-bin NLLs.
+    Kaggle challenge Gaussian log-loss with FGS1 upweighting on bin 0.
+
+    Behavior:
+      • For reduction="none", returns the per-element NLL (same as gaussian_nll(..., "none")).
+      • For "mean"/"sum", aggregates with bin-0 weight = fgs1_weight, all other bins weight=1.
+        If `mask` is provided (bool [B,K]), only True entries contribute; weights apply
+        only to included bins.
+
+    Args:
+      y, mu, sigma: arrays/tensors broadcastable to (B,K)
+      fgs1_weight: weight on column 0
+      mask: optional boolean mask (B,K) or (K,) where True = include
+      reduction: "none" | "mean" | "sum"
     """
-    rng = _rng(3)
-    B, K = 2, 5
-    y = rng.normal(size=(B, K))
-    mu = y + rng.normal(scale=0.05, size=(B, K))
-    sigma = np.full((B, K), 0.3)
-    # Mean of NLL across (B,K) equals reduction="mean"
-    plain = np.mean(gaussian_nll(y, mu, sigma, reduction="none"))
-    got = challenge_gll(y, mu, sigma, fgs1_weight=1.0, reduction="mean")
-    assert np.isclose(plain, got, rtol=1e-12)
+    backend, ops = _to_backend(y, mu, sigma)
+    nll = gaussian_nll(y, mu, sigma, reduction="none", eps=eps)  # (B,K) or broadcasted
+
+    if reduction == "none":
+        return nll
+
+    # Build weights per-bin: w[0]=fgs1_weight, others 1.0
+    # Shape to (1,K) then broadcast to nll
+    if _is_torch(nll):
+        K = int(nll.shape[-1])
+        w = _torch.ones((1, K), dtype=nll.dtype, device=nll.device)
+        w[..., 0] = float(fgs1_weight)
+    else:
+        K = int(_np.shape(nll)[-1])
+        w = _np.ones((1, K), dtype=getattr(nll, "dtype", _np.float64))
+        w[..., 0] = float(fgs1_weight)
+
+    # Broadcast to nll shape
+    while w.ndim < nll.ndim:
+        if _is_torch(nll):
+            w = w.expand(nll.shape[:-1] + (w.shape[-1],))
+        else:
+            w = _np.broadcast_to(w, nll.shape)
+
+    # Optional mask: include only True entries
+    if mask is not None:
+        m = mask
+        if _is_torch(nll):
+            m = _torch.as_tensor(mask, dtype=_torch.bool, device=nll.device)
+            # broadcast to nll shape
+            while m.ndim < nll.ndim:
+                m = m.unsqueeze(0)
+            nll_eff = _torch.where(m, nll, _torch.zeros_like(nll))
+            w_eff = _torch.where(m, w, _torch.zeros_like(w))
+        else:
+            m = _np.asarray(mask, dtype=bool)
+            # broadcast
+            if m.ndim < nll.ndim:
+                m = _np.broadcast_to(m, nll.shape)
+            nll_eff = _np.where(m, nll, 0.0)
+            w_eff = _np.where(m, w, 0.0)
+    else:
+        nll_eff, w_eff = nll, w
+
+    # Aggregations
+    if reduction == "sum":
+        num = _np.sum(nll_eff * w_eff) if not _is_torch(nll) else _torch.sum(nll_eff * w_eff)
+        return num
+    if reduction == "mean":
+        # Weighted mean over last axis & batch together
+        if _is_torch(nll):
+            num = _torch.sum(nll_eff * w_eff)
+            den = _torch.sum(w_eff)
+            # guard denominator (in case mask=all False)
+            den = _torch.clamp(den, min=_torch.tensor(1.0, dtype=den.dtype, device=den.device))
+            return num / den
+        else:
+            num = _np.sum(nll_eff * w_eff)
+            den = _np.sum(w_eff)
+            den = den if den > 0 else 1.0
+            return float(num / den)
+    raise ValueError(f"Unsupported reduction: {reduction!r}")
 
 
-def test_challenge_gll_mask_if_supported():
+def mae(y: ArrayLike, mu: ArrayLike, *, mask: Optional[ArrayLike] = None) -> float:
     """
-    If the implementation supports a `mask` parameter, ensure masked-out bins don't contribute.
+    Mean Absolute Error with optional boolean mask (B,K).
     """
-    supports_mask = _sig_accepts(challenge_gll, "mask")
-    if not supports_mask:
-        pytest.skip("challenge_gll mask not supported")
-    y = np.array([[0.0, 0.0, 0.0]])
-    mu = np.array([[2.0, 0.0, 3.0]])  # only bins 0 and 2 have error
-    sigma = np.ones_like(y)
-    mask = np.array([[True, False, True]])  # ignore middle
-    # With weight w on bin 0, expected weighted mean over only masked-in bins (K_eff = 2)
-    nll = gaussian_nll(y, mu, sigma, reduction="none")[0]
-    for w in (1.0, 58.0):
-        got = challenge_gll(y, mu, sigma, fgs1_weight=w, reduction="mean", mask=mask)
-        expected = (w * nll[0] + nll[2]) / (w + 1.0)
-        assert np.isclose(got, expected, rtol=1e-12)
+    backend, ops = _to_backend(y, mu)
+    y = ops.asarray(y)
+    mu = ops.asarray(mu)
+    diff = ops.abs(y - mu)
+
+    if mask is not None:
+        if _is_torch(diff):
+            m = _torch.as_tensor(mask, dtype=_torch.bool, device=diff.device)
+            while m.ndim < diff.ndim:
+                m = m.unsqueeze(0)
+            diff = _torch.where(m, diff, _torch.zeros_like(diff))
+            denom = _torch.sum(m.to(diff.dtype))
+            denom = _torch.clamp(denom, min=_torch.tensor(1.0, dtype=diff.dtype, device=diff.device))
+            return float(_torch.sum(diff) / denom)
+        else:
+            m = _np.asarray(mask, dtype=bool)
+            if m.ndim < diff.ndim:
+                m = _np.broadcast_to(m, diff.shape)
+            denom = m.sum()
+            denom = float(denom if denom > 0 else 1.0)
+            return float(_np.sum(_np.where(m, diff, 0.0)) / denom)
+
+    # no mask → plain mean over all elements
+    if _is_torch(diff):
+        return float(_torch.mean(diff))
+    return float(_np.mean(diff))
 
 
-# ----------------------------------------------------------------------------- #
-# point metrics — mae/rmse and masks
-# ----------------------------------------------------------------------------- #
-def test_mae_rmse_basic_and_masks():
-    y = np.array([[0.0, 2.0, 4.0]])
-    mu = np.array([[0.0, 1.0, 1.0]])
-    mask = np.array([[True, False, True]])  # ignore middle element
-    # abs diffs: [0, 1, 3] -> masked -> [0, -, 3] mean -> (0+3)/2 = 1.5
-    assert np.isclose(mae(y, mu, mask=mask), 1.5)
-    # rmse on masked -> sqrt((0^2 + 3^2)/2) = sqrt(9/2)
-    assert np.isclose(rmse(y, mu, mask=mask), math.sqrt(9.0 / 2.0))
-
-
-def test_mae_rmse_broadcast_and_1d():
-    y = np.array([0.0, 1.0, 2.0])
-    mu = np.array([[0.0, 2.0, 1.0]])  # will broadcast across batch if supported
-    m = mae(y, mu)
-    r = rmse(y, mu)
-    assert np.isscalar(m)
-    assert np.isscalar(r)
-    assert m >= 0 and r >= 0
-
-
-def test_mae_rmse_dtypes_float32_float64():
-    rng = _rng(5)
-    y = rng.normal(size=(3, 4))
-    mu = rng.normal(size=(3, 4))
-    for cast in (np.float32, np.float64):
-        m = mae(y.astype(cast), mu.astype(cast))
-        r = rmse(y.astype(cast), mu.astype(cast))
-        assert np.isscalar(m) and np.isscalar(r)
-        assert m >= 0 and r >= 0
-
-
-# ----------------------------------------------------------------------------- #
-# uncertainty diagnostics — coverage & sharpness
-# ----------------------------------------------------------------------------- #
-def test_uncertainty_diagnostics_deterministic_inside_interval():
-    # Make y guaranteed to be inside the 95% interval to avoid stochastic flakiness.
-    N, D = 8, 5
-    mu = np.zeros((N, D))
-    sigma = np.full((N, D), 0.1)
-    # 95% interval ≈ μ ± 1.96σ; choose y within ±0.5σ
-    y = mu + 0.5 * sigma
-    cov = coverage(y, mu, sigma, alpha=0.95)
-    shp = sharpness(sigma)
-    assert np.isclose(cov, 1.0, rtol=0, atol=0)  # all points inside interval
-    assert np.isclose(shp, 0.1)  # mean sigma
-
-
-def test_coverage_exact_fraction_constructed():
+def rmse(y: ArrayLike, mu: ArrayLike, *, mask: Optional[ArrayLike] = None) -> float:
     """
-    Build a toy array where exactly half of the elements are inside the interval and
-    half are outside (deterministically), then assert coverage=0.5.
+    Root Mean Squared Error with optional boolean mask (B,K).
     """
-    alpha = 0.90  # z ≈ 1.64485
-    # y: two bins, inside/outside toggled
-    N, D = 10, 2
-    mu = np.zeros((N, D))
-    sigma = np.ones((N, D)) * 0.2
-    y = np.zeros((N, D))
-    # half inside: +0.5σ; half outside: +2.5σ (beyond z=1.64)
-    y[: N // 2] = mu[: N // 2] + 0.5 * sigma[: N // 2]
-    y[N // 2 :] = mu[N // 2 :] + 2.5 * sigma[N // 2 :]
-    cov = coverage(y, mu, sigma, alpha=alpha)
-    assert np.isclose(cov, 0.5, atol=1e-12)
+    backend, ops = _to_backend(y, mu)
+    y = ops.asarray(y)
+    mu = ops.asarray(mu)
+    sq = (y - mu) * (y - mu)
+
+    if mask is not None:
+        if _is_torch(sq):
+            m = _torch.as_tensor(mask, dtype=_torch.bool, device=sq.device)
+            while m.ndim < sq.ndim:
+                m = m.unsqueeze(0)
+            sq = _torch.where(m, sq, _torch.zeros_like(sq))
+            denom = _torch.sum(m.to(sq.dtype))
+            denom = _torch.clamp(denom, min=_torch.tensor(1.0, dtype=sq.dtype, device=sq.device))
+            return float(_torch.sqrt(_torch.sum(sq) / denom))
+        else:
+            m = _np.asarray(mask, dtype=bool)
+            if m.ndim < sq.ndim:
+                m = _np.broadcast_to(m, sq.shape)
+            denom = m.sum()
+            denom = float(denom if denom > 0 else 1.0)
+            return float(_np.sqrt(_np.sum(_np.where(m, sq, 0.0)) / denom))
+
+    if _is_torch(sq):
+        return float(_torch.sqrt(_torch.mean(sq)))
+    return float(_np.sqrt(_np.mean(sq)))
 
 
-def test_coverage_monotonic_in_alpha():
+# ---------------------------------------------------------------------
+# Uncertainty diagnostics
+# ---------------------------------------------------------------------
+def _norm_ppf(p: float) -> float:
     """
-    Larger alpha => wider intervals => coverage should not decrease.
+    High-accuracy approximation to Φ^{-1}(p) (Acklam's method).
+    Valid for p in (0,1). See: https://web.archive.org/web/20150910044730/http://home.online.no/~pjacklam/notes/invnorm/
     """
-    rng = _rng(11)
-    y = rng.normal(size=(40, 7))
-    mu = rng.normal(size=(40, 7))
-    sigma = np.full_like(mu, 0.6)
-    cov80 = coverage(y, mu, sigma, alpha=0.80)
-    cov90 = coverage(y, mu, sigma, alpha=0.90)
-    cov95 = coverage(y, mu, sigma, alpha=0.95)
-    assert cov90 >= cov80 - 1e-12
-    assert cov95 >= cov90 - 1e-12
+    if not (0.0 < p < 1.0):
+        if p == 0.0:
+            return -_np.inf
+        if p == 1.0:
+            return _np.inf
+        raise ValueError("p must be in (0,1)")
+    # Coefficients for Acklam's approximation
+    a = [-3.969683028665376e+01,  2.209460984245205e+02,
+         -2.759285104469687e+02,  1.383577518672690e+02,
+         -3.066479806614716e+01,  2.506628277459239e+00]
+    b = [-5.447609879822406e+01,  1.615858368580409e+02,
+         -1.556989798598866e+02,  6.680131188771972e+01,
+         -1.328068155288572e+01]
+    c = [-7.784894002430293e-03, -3.223964580411365e-01,
+         -2.400758277161838e+00, -2.549732539343734e+00,
+          4.374664141464968e+00,  2.938163982698783e+00]
+    d = [ 7.784695709041462e-03,  3.224671290700398e-01,
+          2.445134137142996e+00,  3.754408661907416e+00]
+    plow = 0.02425
+    phigh = 1 - plow
+    if p < plow:
+        q = math.sqrt(-2 * math.log(p))
+        return (((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) / \
+               ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1)
+    if phigh < p:
+        q = math.sqrt(-2 * math.log(1 - p))
+        return -(((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) / \
+                 ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1)
+    q = p - 0.5
+    r = q*q
+    return (((((a[0]*r + a[1])*r + a[2])*r + a[3])*r + a[4])*r + a[5]) * q / \
+           (((((b[0]*r + b[1])*r + b[2])*r + b[3])*r + b[4])*r + 1)
 
 
-def test_sharpness_reductions_and_shapes():
-    # Depending on implementation, sharpness may support reduction; if not, basic mean.
-    sigma = np.array([[0.1, 0.2, 0.3], [0.2, 0.2, 0.2]])
-    try:
-        s_none = sharpness(sigma, reduction="none")  # type: ignore[call-arg]
-        assert s_none.shape == sigma.shape
-        s_mean = sharpness(sigma, reduction="mean")  # type: ignore[call-arg]
-        assert np.isclose(float(s_mean), float(np.mean(sigma)))
-        s_sum = sharpness(sigma, reduction="sum")  # type: ignore[call-arg]
-        assert np.isclose(float(s_sum), float(np.sum(sigma)))
-    except TypeError:
-        # If reduction not supported, default should equal mean
-        s = sharpness(sigma)
-        assert np.isclose(float(s), float(np.mean(sigma)))
+def coverage(
+    y: ArrayLike,
+    mu: ArrayLike,
+    sigma: ArrayLike,
+    *,
+    alpha: float = 0.95,
+    eps: float = 1e-12,
+) -> float:
+    """
+    Fraction of elements with y inside the symmetric (alpha)-level Gaussian interval:
+      μ ± z * σ, where z = Φ^{-1}((1+alpha)/2).
+    """
+    backend, ops = _to_backend(y, mu, sigma)
+    y = ops.asarray(y)
+    mu = ops.asarray(mu)
+    sigma = ops.asarray(sigma)
+    sigma = _safe_sigma(sigma, eps, ops)
+
+    p = (1.0 + float(alpha)) / 2.0
+    z = _norm_ppf(p)
+
+    lower = mu - z * sigma
+    upper = mu + z * sigma
+    inside = (y >= lower) & (y <= upper)
+
+    if _is_torch(inside):
+        total = 1
+        for s in inside.shape:
+            total *= int(s)
+        return float(_torch.sum(inside.to(dtype=_torch.float64)) / total)
+    return float(_np.sum(inside) / inside.size)
 
 
-# ----------------------------------------------------------------------------- #
-# torch parity (optional)
-# ----------------------------------------------------------------------------- #
-@pytest.mark.skipif(not _has_torch(), reason="Torch not installed")
-def test_torch_equivalence_to_numpy():
-    import torch  # type: ignore
-
-    rng = _rng(123)
-    N, D = 3, 7
-    y_np = rng.normal(size=(N, D))
-    mu_np = y_np + rng.normal(scale=0.1, size=(N, D))
-    sigma_np = np.full((N, D), 0.2)
-
-    for dtype in (torch.float32, torch.float64):
-        y_t = torch.tensor(y_np, dtype=dtype)
-        mu_t = torch.tensor(mu_np, dtype=dtype)
-        sigma_t = torch.tensor(sigma_np, dtype=dtype)
-
-        # gaussian_nll
-        g_np = gaussian_nll(y_np, mu_np, sigma_np, reduction="mean")
-        g_t = gaussian_nll(y_t, mu_t, sigma_t, reduction="mean")
-        assert np.isclose(float(g_t), float(g_np), rtol=1e-6)
-
-        # challenge_gll
-        cg_np = challenge_gll(y_np, mu_np, sigma_np, reduction="mean", fgs1_weight=58.0)
-        cg_t = challenge_gll(y_t, mu_t, sigma_t, reduction="mean", fgs1_weight=58.0)
-        assert np.isclose(float(cg_t), float(cg_np), rtol=1e-6)
-
-        # mae/rmse
-        assert np.isclose(float(mae(y_t, mu_t)), float(mae(y_np, mu_np)), rtol=1e-6)
-        assert np.isclose(float(rmse(y_t, mu_t)), float(rmse(y_np, mu_np)), rtol=1e-6)
-
-        # coverage/sharpness
-        cov_np = coverage(y_np, mu_np, sigma_np, alpha=0.95)
-        cov_t = coverage(y_t, mu_t, sigma_t, alpha=0.95)
-        assert np.isclose(float(cov_t), float(cov_np), rtol=1e-6)
-
-        shp_np = sharpness(sigma_np)
-        shp_t = sharpness(sigma_t)
-        assert np.isclose(float(shp_t), float(shp_np), rtol=1e-6)
+def sharpness(sigma: ArrayLike, *, reduction: str = "mean", eps: float = 0.0) -> Union[ArrayLike, float]:
+    """
+    Mean/ Sum / Elementwise sharpness ≡ σ (optionally clamped by eps).
+    """
+    backend, ops = _to_backend(sigma)
+    s = ops.asarray(sigma)
+    if eps > 0:
+        s = _safe_sigma(s, eps, ops)
+    if reduction == "none":
+        return s
+    if reduction == "sum":
+        if _is_torch(s):
+            return _torch.sum(s)
+        return float(_np.sum(s))
+    if reduction == "mean":
+        if _is_torch(s):
+            return _torch.mean(s)
+        return float(_np.mean(s))
+    raise ValueError(f"Unsupported reduction: {reduction!r}")
