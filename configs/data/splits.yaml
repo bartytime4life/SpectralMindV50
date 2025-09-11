@@ -1,107 +1,107 @@
 # configs/data/splits.yaml
-# ----------------------------------------------------------------------
+# ======================================================================
 # Dataset split configuration — SpectraMind V50
 # ----------------------------------------------------------------------
-# Controls how training/validation/test splits are created or loaded.
-# This file is consumed by the data module before dataloaders are built.
-#
-# Supported schemes:
-#   - "holdout"     → random split with optional stratify/group
-#   - "kfold"       → (Stratified)KFold or GroupKFold based on columns
-#   - "timeseries"  → TimeSeriesSplit (ordered by a time column)
-#   - "precomputed" → read split assignments from a CSV/Parquet file
-#
-# Usage examples:
-#   python -m spectramind.train data.splits.scheme=holdout
-#   python -m spectramind.train data.splits.scheme=kfold data.splits.n_splits=5
-#   python -m spectramind.train data.splits.scheme=precomputed \
-#       data.splits.precomputed.path=configs/data/splits/train_folds.csv
-# ----------------------------------------------------------------------
+# Consumed by the DataModule BEFORE DataLoaders are built.
+# Select with e.g.:
+#   +data.splits.scheme=holdout
+#   +data.splits.scheme=kfold +data.splits.kfold.n_splits=5
+#   +data.splits.scheme=precomputed +data.splits.precomputed.path=...
+# ======================================================================
 
 splits:
 
   # One of: ["holdout", "kfold", "timeseries", "precomputed"]
-  scheme: "kfold"
+  scheme: kfold
 
-  # RNG seed for reproducibility (used when shuffling or assigning folds)
-  seed: 1337
+  # Reproducibility
+  seed: ${oc.env:SM_SPLIT_SEED,1337}
 
-  # Column mapping (as present in your metadata/dataframe)
+  # Column mapping (names must exist in the in-memory metadata DataFrame)
   columns:
-    id: "id"                  # unique sample id
-    group: "star_id"          # optional; if set, enables GroupKFold/blocked holdout
-    stratify: "target_bucket" # optional; discrete label for stratified splits
-    time: "obs_mjd"           # optional; monotonically increasing numeric/time for TimeSeriesSplit
+    id:         ${oc.env:SM_COL_ID,id}                  # unique sample id
+    group:      ${oc.env:SM_COL_GROUP,star_id}          # group id (prevents leakage across splits)
+    stratify:   ${oc.env:SM_COL_STRAT,target_bucket}    # label/bucket for class balance
+    time:       ${oc.env:SM_COL_TIME,obs_mjd}           # numeric/time for ordering (timeseries)
 
-  # KFold settings (used when scheme=="kfold")
+  # -------------------------------
+  # KFold settings
+  # -------------------------------
   kfold:
-    n_splits: 5               # number of folds
-    shuffle: true             # shuffle before split (ignored if groups set)
-    # Strategy resolution:
-    #   - If columns.group is set → use GroupKFold
-    #   - Else if columns.stratify is set → use StratifiedKFold
-    #   - Else → plain KFold
-    # For group+stratify together, group takes precedence (leak-safe).
+    n_splits: ${oc.env:SM_KFOLDS,5}
+    shuffle:  true
+    # Resolution priority:
+    #   1) columns.group      → GroupKFold (no group leakage)
+    #   2) columns.stratify   → StratifiedKFold (balanced bins)
+    #   3) else               → KFold
+    # If both group & stratify provided → group takes precedence.
 
-  # Holdout settings (used when scheme=="holdout")
+  # -------------------------------
+  # Holdout settings
+  # -------------------------------
   holdout:
-    val_size: 0.1             # fraction in (0,1) or integer count
-    test_size: 0.0            # optional separate test holdout (0 disables)
-    shuffle: true             # shuffle before split
-    # Strategy resolution (same precedence as kfold):
-    #   - group column → grouped holdout (no group leakage)
-    #   - else stratify column → stratified holdout
-    #   - else → random holdout
+    val_size:   ${oc.env:SM_VAL_SIZE,0.1}    # fraction in (0,1] OR absolute count
+    test_size:  ${oc.env:SM_TEST_SIZE,0.0}   # 0 disables a separate test split
+    shuffle:    true
+    # Same resolution priority as kfold.
 
-  # Time series split (used when scheme=="timeseries")
+  # -------------------------------
+  # Time series split (walk-forward)
+  # -------------------------------
   timeseries:
-    n_splits: 5               # number of folds (walk-forward)
-    max_train_size: null      # optional cap on train window (int or null)
-    # Notes:
-    #   - Requires columns.time to be set.
-    #   - Data must be sortable by the time column (ascending).
+    n_splits:       ${oc.env:SM_TS_SPLITS,5}
+    max_train_size: null           # int or null (unbounded)
+    # Requires columns.time to be present & sortable ascending.
 
-  # Precomputed split locations (used when scheme=="precomputed")
-  # Expected format: contains at least {id, split} or {id, fold}
-  #   - For kfold-like usage, provide "fold" integer in [0..n_splits-1]
-  #   - For holdout-like usage, provide "split" with values in {"train","val","test"}
+  # -------------------------------
+  # Precomputed splits
+  # -------------------------------
+  # Expected file has at least {id, split} or {id, fold}
+  #   - KFold-like → integer "fold" ∈ [0..n_splits-1]
+  #   - Holdout-like → string  "split" ∈ {"train","val","test"}
   precomputed:
-    path: null                # set to CSV or Parquet path when used
-    format: "csv"             # "csv" | "parquet"
-    id_col: "id"
-    fold_col: "fold"
-    split_col: "split"
+    path:    null                  # set to CSV/Parquet path when used
+    format:  ${oc.env:SM_SPLITS_FMT,csv}     # csv|parquet
+    id_col:  ${splits.columns.id}
+    fold_col:  fold
+    split_col: split
 
-  # Constraints / safety rails to avoid leakage and enforce scientific realism
+  # -------------------------------
+  # Constraints / guardrails
+  # -------------------------------
   constraints:
-    disjoint_groups_across_splits: true   # never put same group in train & val/test
-    disjoint_time_future_leak: true       # when timeseries, enforce train_time_max < val_time_min
-    enforce_min_per_fold: 1               # minimum samples per fold
-    # Optional: ensure each fold keeps stratification support bins
-    enforce_strata_balance: true          # if stratify is provided
+    disjoint_groups_across_splits: true   # group leak guard
+    disjoint_time_future_leak:     true   # max(train.time) < min(val/test.time) for timeseries
+    enforce_min_per_fold:          1      # each fold must contain ≥ N samples
+    enforce_strata_balance:        true   # if stratify set, check per-fold class support
 
-  # Optional export of computed splits for reproducibility / DVC tracking
+  # -------------------------------
+  # Export artifacts (for DVC / reproducibility)
+  # -------------------------------
   export:
-    enable: true
-    dir: "./configs/data/splits_artifacts"
-    # Filenames will include scheme, seed, and timestamp, e.g.:
-    #   splits_kfold_s5_seed1337_YYYYMMDD_HHMM.csv
-    format: "csv"             # "csv" | "parquet"
-    include_columns:          # extra columns to emit (if present in metadata)
-      - "${splits.columns.id}"
-      - "${splits.columns.group}"
-      - "${splits.columns.stratify}"
-      - "${splits.columns.time}"
+    enable: ${oc.env:SM_EXPORT_SPLITS,true}
+    dir:    ${oc.env:SM_EXPORT_SPLITS_DIR,./configs/data/splits_artifacts}
+    format: ${oc.env:SM_EXPORT_SPLITS_FMT,csv} # csv|parquet
+    # Filenames include scheme/seed/timestamp, e.g.: splits_kfold_s5_seed1337_YYYYMMDD_HHMM.csv
+    include_columns:
+      - ${splits.columns.id}
+      - ${splits.columns.group}
+      - ${splits.columns.stratify}
+      - ${splits.columns.time}
 
-  # Diagnostics (printed once when splits are made/loaded)
+  # -------------------------------
+  # Diagnostics (printed once on build/load)
+  # -------------------------------
   diagnostics:
-    show_class_balance: true      # requires stratify column to exist
+    show_class_balance: true      # requires stratify
     show_group_overlap: true
-    show_time_windows: true
-    print_head: 5                 # preview first rows of assignments (0 disables)
+    show_time_windows:  true
+    print_head:          5        # 0 disables
 
+  # -------------------------------
   # Runtime checks (raise if violated)
+  # -------------------------------
   strict:
-    require_columns: true         # error if referenced columns are missing
-    require_precomputed_path: true  # when scheme=="precomputed"
-    error_on_empty_fold: true
+    require_columns:          true     # referenced columns must exist
+    require_precomputed_path: true     # when scheme == precomputed
+    error_on_empty_fold:      true     # guard degenerate folds
