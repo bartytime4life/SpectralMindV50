@@ -1,64 +1,146 @@
 #!/usr/bin/env python3
 # =============================================================================
-# SpectraMind V50 — Tiny AIRS Test Spectrum Generator
+# SpectraMind V50 — Tiny AIRS Test Spectrum Generator (Upgraded)
 # -----------------------------------------------------------------------------
-# Generates a small, deterministic synthetic AIRS spectrum for use in unit/integration tests.
-# Characteristics:
-#   • 283 bins (default) matching Ariel Challenge spectral dimension
-#   • Smooth baseline (~1% transit depth) with faint sinusoidal features
-#   • Gaussian noise (small amplitude, reproducible via RNG seed)
-#   • Clipped to [0, 1] for physical plausibility (transit depths cannot be negative)
-#
-# Output:
-#   tests/data/tiny/airs.npy  (NumPy float32 array of shape (283,))
+# • 283 bins by default (honors SM_SUBMISSION_BINS)
+# • Smooth baseline (~1% depth by default) with faint sinusoidal features
+# • Small Gaussian noise, reproducible via RNG seed
+# • Output: .npy (default) or .csv + sidecar JSON for provenance
 #
 # Usage:
 #   python scripts/gen_tiny_airs.py
+#   python scripts/gen_tiny_airs.py --bins 283 --seed 42 --sigma 1e-4 \
+#       --depth 0.01 --features 3 --format npy --out tests/data/tiny/airs.npy
 # =============================================================================
-
 from __future__ import annotations
-import numpy as np
-from pathlib import Path
+
+import argparse
+import json
+import os
 import sys
+from pathlib import Path
+from typing import Tuple
 
-# ----------------------------------------------------------------------------- #
-# Config
-# ----------------------------------------------------------------------------- #
-N_BINS = int(np.environ.get("SM_SUBMISSION_BINS", 283))
-SEED = 42
-OUT_PATH = Path("tests/data/tiny/airs.npy")
+import numpy as np
 
-# ----------------------------------------------------------------------------- #
-# Main
-# ----------------------------------------------------------------------------- #
-def main() -> None:
-    rng = np.random.default_rng(seed=SEED)
 
-    # Normalized wavelength axis (0 → 1 across bins)
-    x = np.linspace(0, 1, N_BINS, dtype=np.float32)
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Generate a small deterministic AIRS test spectrum.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    env_bins = int(os.environ.get("SM_SUBMISSION_BINS", "283"))
+    p.add_argument("--bins", type=int, default=env_bins, help="Number of spectral bins")
+    p.add_argument("--seed", type=int, default=42, help="RNG seed (PCG64)")
+    p.add_argument("--sigma", type=float, default=1e-4, help="Gaussian noise std")
+    p.add_argument("--depth", type=float, default=0.01, help="Baseline transit depth level")
+    p.add_argument("--features", type=int, default=3, help="Sinusoidal cycles across the band")
+    p.add_argument(
+        "--format",
+        choices=("npy", "csv"),
+        default="npy",
+        help="Output file format",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=Path("tests/data/tiny/airs.npy"),
+        help="Output file path (.npy or .csv)",
+    )
+    return p.parse_args()
 
-    # Smooth baseline with faint sinusoidal modulation
-    baseline = 0.01 + 0.001 * np.sin(2 * np.pi * 3 * x)
 
-    # Small Gaussian noise (SNR >> 1)
-    noise = 1e-4 * rng.standard_normal(size=N_BINS).astype(np.float32)
+def _validate(bins: int, sigma: float, depth: float, features: int) -> None:
+    if bins <= 0:
+        raise ValueError("--bins must be > 0")
+    if sigma < 0:
+        raise ValueError("--sigma must be >= 0")
+    if not (0 <= depth <= 1):
+        raise ValueError("--depth must be in [0, 1]")
+    if features < 0:
+        raise ValueError("--features must be >= 0")
+
+
+def _build_spectrum(
+    bins: int, seed: int, sigma: float, depth: float, features: int
+) -> Tuple[np.ndarray, dict]:
+    rng = np.random.default_rng(seed=seed)
+    x = np.linspace(0.0, 1.0, bins, dtype=np.float32)
+
+    # Smooth baseline (depth) with faint sinusoidal modulation
+    # Modulation amplitude is 10% of depth to keep it subtle.
+    amp = 0.1 * depth
+    baseline = depth + (amp * np.sin(2.0 * np.pi * features * x)).astype(np.float32)
+
+    noise = (sigma * rng.standard_normal(size=bins)).astype(np.float32)
 
     spectrum = baseline + noise
-    spectrum = np.clip(spectrum, 0.0, 1.0).astype(np.float32)
+    # Keep in physically plausible range for transit depths
+    spectrum = np.clip(spectrum, 0.0, 1.0).astype(np.float32, copy=False)
 
-    # Ensure deterministic reproducibility
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.save(OUT_PATH, spectrum)
+    meta = {
+        "bins": int(bins),
+        "seed": int(seed),
+        "sigma": float(sigma),
+        "depth": float(depth),
+        "features": int(features),
+        "min": float(spectrum.min(initial=np.inf)),
+        "max": float(spectrum.max(initial=-np.inf)),
+        "mean": float(spectrum.mean()),
+        "std": float(spectrum.std(ddof=0)),
+        "dtype": "float32",
+        "axis": "lambda-index (0..bins-1, normalized 0..1 used for synthesis)",
+        "notes": "Deterministic synthetic AIRS-like spectrum for tests.",
+    }
+    return spectrum, meta
+
+
+def _save(out_path: Path, fmt: str, spectrum: np.ndarray, meta: dict) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "npy":
+        np.save(out_path, spectrum)
+    else:
+        # csv: one value per line
+        np.savetxt(out_path, spectrum, fmt="%.8f", delimiter=",")
+
+    # Sidecar JSON with provenance
+    sidecar = out_path.with_suffix(out_path.suffix + ".json")
+    with sidecar.open("w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def main() -> int:
+    args = _parse_args()
+    _validate(args.bins, args.sigma, args.depth, args.features)
+
+    # If user forgot to align extension with --format, respect --format
+    out = args.out
+    if args.format == "npy" and out.suffix.lower() != ".npy":
+        out = out.with_suffix(".npy")
+    if args.format == "csv" and out.suffix.lower() != ".csv":
+        out = out.with_suffix(".csv")
+
+    spectrum, meta = _build_spectrum(
+        bins=args.bins,
+        seed=args.seed,
+        sigma=args.sigma,
+        depth=args.depth,
+        features=args.features,
+    )
 
     # Minimal validation
-    assert spectrum.shape == (N_BINS,)
-    assert np.all(np.isfinite(spectrum)), "Non-finite values in spectrum"
+    assert spectrum.shape == (args.bins,)
+    if not np.all(np.isfinite(spectrum)):
+        raise RuntimeError("Non-finite values in spectrum")
 
-    print(f"[OK] Saved AIRS tiny test spectrum → {OUT_PATH.resolve()} shape={spectrum.shape}")
+    _save(out, args.format, spectrum, meta)
+    print(f"[OK] Saved AIRS tiny test spectrum → {out.resolve()} shape={spectrum.shape} mean={meta['mean']:.6f}")
+    return 0
+
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except Exception as e:
         sys.stderr.write(f"[ERR] Failed to generate tiny AIRS spectrum: {e}\n")
-        sys.exit(1)
+        raise SystemExit(1)
