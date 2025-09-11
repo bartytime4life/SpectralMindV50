@@ -1,30 +1,83 @@
-# Dataset + dataloaders
+# configs/data/default.yaml
+# ======================================================================
+# Dataset + Dataloaders — SpectraMind V50 (upgraded & debug-ready)
+# ----------------------------------------------------------------------
+# • Resolves split files from ${paths.data_dir}
+# • Exposes FGS1 weighting (bin 0) and submission bin count
+# • Adds DDP/CPU-friendly DataLoader knobs (persistent workers, prefetch)
+# • Includes a small debug block for early sanity checks
+# ======================================================================
+
 dataset:
   name: ariel_challenge
-  splits:
-    train: train.csv
-    valid: valid.csv
-    test:  test.csv
-  n_bins: ${oc.env:SM_SUBMISSION_BINS,283}
-  fgs1_bin_scale: 58.0        # weighting reference for FGS1 (bin 0)
+  # Root data directory (DVC-tracked). See configs/env/*.yaml for paths.
   root: ${paths.data_dir}
 
+  # Split CSV files (resolved from root). Keep filenames Kaggle-compatible.
+  splits:
+    train: ${..root}/train.csv
+    valid: ${..root}/valid.csv
+    test:  ${..root}/test.csv
+
+  # Spectral layout
+  n_bins: ${oc.env:SM_SUBMISSION_BINS,283}     # should match model.num_bins
+  fgs1_bin_idx: 0                               # white-light / FGS1 channel index
+  fgs1_bin_scale: ${oc.env:SM_FGS1_WEIGHT,58.0} # weighting reference for bin 0
+
+  # Optional schema / header checks (used by debug.validate_paths)
+  headers:
+    required: ["sample_id"]                     # minimally required column
+    # You can add: ["sample_id","fgs1_path","airs_path","target_mu_*","target_sigma_*"]
+
+# ----------------------------------------------------------------------
+# DataLoader settings
+#   Notes:
+#     - num_workers comes from env/local: ${num_workers}
+#     - pin_memory true is safe on CUDA; no-op on CPU
+#     - persistent_workers improves throughput for many small samples
+#     - prefetch_factor 2~4 is typically stable on Linux; set 2 on Kaggle
+# ----------------------------------------------------------------------
 loader:
+  # Training loader
   train:
     batch_size: ${oc.env:SM_BATCH,64}
     num_workers: ${num_workers}
     shuffle: true
-    pin_memory: true
+    pin_memory: ${oc.env:SM_PIN_MEMORY,true}
+    persistent_workers: ${oc.env:SM_PERSISTENT_WORKERS,true}
+    prefetch_factor: ${oc.env:SM_PREFETCH,2}
     drop_last: true
+
+    # DDP sampler (auto-activated if trainer.distributed == true)
+    sampler:
+      type: ${oc.env:SM_SAMPLER,none}   # none|distributed
+      seed: ${seed}
+
+  # Validation loader
   valid:
     batch_size: ${oc.env:SM_BATCH_EVAL,128}
     num_workers: ${num_workers}
     shuffle: false
-    pin_memory: true
+    pin_memory: ${oc.env:SM_PIN_MEMORY,true}
+    persistent_workers: ${oc.env:SM_PERSISTENT_WORKERS,true}
+    prefetch_factor: ${oc.env:SM_PREFETCH,2}
     drop_last: false
+
+  # Test / inference loader
   test:
     batch_size: ${oc.env:SM_BATCH_EVAL,128}
     num_workers: ${num_workers}
     shuffle: false
-    pin_memory: true
+    pin_memory: ${oc.env:SM_PIN_MEMORY,true}
+    persistent_workers: ${oc.env:SM_PERSISTENT_WORKERS,true}
+    prefetch_factor: ${oc.env:SM_PREFETCH,2}
     drop_last: false
+
+# ----------------------------------------------------------------------
+# Debug & guardrails (fail fast on common data issues)
+# ----------------------------------------------------------------------
+debug:
+  validate_paths: ${oc.env:SM_DATA_VALIDATE,true}   # check CSV files exist
+  strict_headers: ${oc.env:SM_DATA_STRICT,false}    # enforce required headers
+  print_first_rows: ${oc.env:SM_DATA_HEAD,0}        # >0 prints N rows per split at startup
+  fail_on_missing: ${oc.env:SM_DATA_FAIL,true}      # raise if missing split/file
