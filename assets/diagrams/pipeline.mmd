@@ -27,14 +27,14 @@ flowchart TB
     LOCAL["Local / CI (online DVC remote)"]
     KAGGLE["Kaggle (offline, pre-mounted inputs)"]
   end
-  DVCCTL -. selects .-> LOCAL
-  DVCCTL -. or .-> KAGGLE
+  DVCCTL -.-> LOCAL   |selects|
+  DVCCTL -.-> KAGGLE  |or|
 
   %% ========== External Inputs ==========
   subgraph Inputs[External Inputs]
     direction TB
-    RAW[/"Ariel dataset (Kaggle input mount)\n/kaggle/input/ariel-data-challenge-2025/"/]
-    CFG[/".yaml configs (Hydra)"/]
+    RAW[/Ariel dataset (Kaggle input mount)\n/kaggle/input/ariel-data-challenge-2025/ /]
+    CFG[/.yaml configs (Hydra)/]
   end
   RAW --> Calib
   CFG --> Calib
@@ -75,15 +75,15 @@ flowchart TB
   %% ========== Artifacts & Stores ==========
   subgraph Artifacts[Versioned Artifacts (DVC-tracked unless noted)]
     direction TB
-    RAWSTORE[("(data/raw)")]
-    CALOUT[("calibrated/")]
-    FEAT[("features/")]
-    CKPT[("models/checkpoints/")]
-    PRED[("predictions/")]
-    REP[("diagnostics/reports/")]
-    SBOM[("sbom/ (cyclonedx/spdx)")]
+    RAWSTORE[(data/raw)]
+    CALOUT[(calibrated/)]
+    FEAT[(features/)]
+    CKPT[(models/checkpoints/)]
+    PRED[(predictions/)]
+    REP[(diagnostics/reports/)]
+    SBOM[(sbom/ (cyclonedx/spdx))]
 
-    RAWSTORE -. mirror .- RAW
+    RAWSTORE -.-> RAW |mirror|
   end
 
   %% Wire artifacts to stages
@@ -102,7 +102,7 @@ flowchart TB
   Submit -- writes --> SUBCSV
 
   %% ========== Final Output ==========
-  SUBCSV[/"submission.csv (to Kaggle)"/]
+  SUBCSV[/submission.csv (to Kaggle)/]
 
   %% ========== Environment-Specific Paths ==========
   subgraph KaggleHints[Notes for Kaggle Mode]
@@ -125,7 +125,7 @@ flowchart TB
   CLI --> JSONL
 
   %% ========== Optional SBOM ==========
-  Submit -. package includes .-> SBOM
+  Submit -.-> SBOM |package includes|
 
   %% ========== Styling ==========
   classDef stage fill:#0b74de,stroke:#0a5fb4,stroke-width:1.2,color:#fff;
