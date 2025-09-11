@@ -1,6 +1,5 @@
-# configs/diagnose.yaml
 # ======================================================================
-# SpectraMind V50 — Diagnostics & Reporting Config
+# SpectraMind V50 — Diagnostics & Reporting Config (Hydra 1.x / PL 2.x)
 # ======================================================================
 # Post-training analyses (metrics + signal/feature diagnostics) with an
 # HTML report, JSONL metrics, CSV tables, and a provenance manifest.
@@ -11,35 +10,40 @@
 # Hydra defaults
 # ----------------------------------------------------------------------
 defaults:
-  - env: local                 # override with +env=kaggle in Kaggle/CI
-  - data: kaggle               # used for datamodule paths/splits if needed
+  - env: local                 # override with env=kaggle or env=ci
+  - data: kaggle               # used only if datamodule paths/splits are needed
   - model: v50                 # enables model-aware diagnostics (SHAP, heads)
   - logger: jsonl              # consistent with train/predict
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
 
 # ----------------------------------------------------------------------
-# Experiment meta & canonical paths
+# Experiment metadata
 # ----------------------------------------------------------------------
 experiment:
   name: "spectramind_v50_diagnose"
   tags: ["v50", "diagnostics", "reports", "fft", "umap", "shap"]
+  notes: ""
 
+# ----------------------------------------------------------------------
+# Canonical paths (ENV-driven: portable across local/CI/Kaggle)
+# ----------------------------------------------------------------------
 paths:
-  work_dir: ${hydra:runtime.cwd}
-  artifacts: ${paths.work_dir}/artifacts
-  logs: ${paths.artifacts}/logs
-  reports: ${paths.artifacts}/reports/diagnostics
-  models: ${paths.artifacts}/models
-  schema_dir: ${paths.work_dir}/schemas
-  cache: ${paths.artifacts}/.cache/diagnostics
+  data_root: ${env.data_root}
+  artifacts_root: ${env.artifacts_root}
+  runs: ${paths.artifacts_root}/runs
+  logs: ${hydra:run.dir}/logs
+  reports: ${paths.artifacts_root}/reports/diagnostics
+  checkpoints: ${paths.artifacts_root}/checkpoints
+  schema_dir: ${hydra:runtime.cwd}/schemas
+  cache: ${paths.artifacts_root}/.cache/diagnostics
 
 # ----------------------------------------------------------------------
 # Inputs
 # ----------------------------------------------------------------------
 inputs:
-  # Model checkpoint to evaluate; if null, auto-pick latest in models/
-  model_ckpt: ${oc.env:SM_MODEL_CKPT, ${paths.models}/latest.ckpt}
+  # Model checkpoint to evaluate. Override via CLI or SM_MODEL_CKPT.
+  model_ckpt: ${oc.env:SM_MODEL_CKPT, ${paths.checkpoints}/last.ckpt}
 
   # Evaluation split; either a named split (val|test|custom) consumed by
   # the datamodule, or point eval_file to a CSV/Parquet with ground truth.
@@ -51,8 +55,8 @@ inputs:
   predictions: ${oc.env:SM_PREDICTIONS, null}
 
   # Determinism knobs for any stochastic subsampling
-  seed: ${oc.env:SM_SEED, 1337}
-  torch_deterministic: true
+  seed: ${env.reproducibility.seed}
+  torch_deterministic: ${env.reproducibility.deterministic}
 
   # Expected spectral bin count (competition schema = 283)
   bin_count: ${oc.env:SM_BIN_COUNT, 283}
@@ -64,14 +68,11 @@ metrics:
   # Gaussian log-likelihood (primary competition metric)
   gll:
     enabled: true
-    # Keep the FGS1 relative weight configurable; do NOT hardcode secret metric
-    weight_fgs1: ${oc.env:SM_GLL_W_FGS1, 58.0}
-    clamp_sigma_min: 1e-6       # numeric safety for σ
+    weight_fgs1: ${oc.env:SM_GLL_W_FGS1, 58.0}  # keep configurable
+    clamp_sigma_min: 1e-6
     clamp_sigma_max: 1e2
-    # Gate: fail the job if NaN/inf encountered
     fail_on_nonfinite: true
 
-  # Additional sanity metrics
   mae:
     enabled: true
   rmse:
@@ -81,7 +82,6 @@ metrics:
   sigma_stats:
     enabled: true
     ptiles: [5, 25, 50, 75, 95]
-    # Gate: alert/fail if med(σ) outside plausible range
     median_min: ${oc.env:SM_SIGMA_MED_MIN, 1e-4}
     median_max: ${oc.env:SM_SIGMA_MED_MAX, 1.0}
     hard_fail: false
@@ -98,8 +98,7 @@ analyses:
     window: "hann"
     n_fft: 2048
     save_power_spectra: true
-    # Optional notch list (Hz or bin index depending on implementation)
-    notch: []             # e.g., [50, 60]
+    notch: []             # e.g., [50, 60] for mains if applicable
 
   # Low-dim embedding of latent/features/residuals for cluster/OOD inspection
   umap:
@@ -109,18 +108,16 @@ analyses:
     metric: "euclidean"
     sample_size: 5000         # cap for speed
     random_state: ${inputs.seed}
-    # If features are available from model: choose which space to embed
     source: "residuals"       # residuals|mu|latent
 
   # Model explainability on μ predictions (optionally on σ)
   shap:
     enabled: true
-    method: "kernel"          # kernel|sampling|gradient (choose per model)
+    method: "kernel"          # kernel|sampling|gradient (model-dependent)
     background_size: 256
     sample_size: 512
     max_eval: 5000            # compute budget cap
     explain_sigma: false
-    # Gate: cap per-sample runtime to keep CI within time limits
     per_sample_timeout_s: 2.5
 
   # Physics/symbolic plausibility checks on spectra
@@ -128,7 +125,7 @@ analyses:
     enabled: true
     smoothness:
       enabled: true
-      max_curvature: 0.02    # threshold on |2nd derivative|
+      max_curvature: 0.02    # |2nd derivative| threshold
     nonneg:
       enabled: true
       tol: -1e-6             # allow tiny numerical noise below zero
@@ -136,7 +133,6 @@ analyses:
       enabled: true
       window_bins: 5
       max_zscore: 5.0
-    # Optional hard gate that can fail CI on violation rate
     gating:
       hard_fail: false
       max_violation_rate: 0.05
@@ -157,14 +153,13 @@ report:
     enabled: true
     filename: index.html
     title: "SpectraMind V50 — Diagnostics"
-    # Optional: embed small PNGs as data URIs to produce a single-file report
     inline_small_images: true
     inline_image_threshold_kb: 256
   save_plots: true
   fig:
     dpi: 160
-    style: "default"         # matplotlib style (CI/Kaggle-safe)
-    format: "png"            # png for wide compatibility
+    style: "default"         # CI/Kaggle-safe
+    format: "png"
     tight_layout: true
     grid: true
   jsonl_metrics:
@@ -178,7 +173,6 @@ report:
     raw_predictions_path: ${report.out_dir}/predictions.raw.csv
     save_residuals: true
     residuals_path: ${report.out_dir}/residuals.csv
-  # CI failure gates to enforce data integrity
   integrity_gates:
     enabled: true
     require_bin_count: ${inputs.bin_count}
@@ -189,14 +183,13 @@ report:
 # Provenance & Schema Validation
 # ----------------------------------------------------------------------
 provenance:
-  manifest: ${oc.env:SM_DIAG_MANIFEST, ${paths.artifacts}/manifest_diagnostics.json}
+  manifest: ${oc.env:SM_DIAG_MANIFEST, ${paths.artifacts_root}/manifest_diagnostics.json}
   include_git: true
   include_env: true
   include_config_snapshot: true
   include_checksums: true
 
 validate:
-  # Schema to validate structured events/metrics (optional but recommended)
   events_schema: ${oc.env:SM_EVENTS_SCHEMA, ${paths.schema_dir}/events.schema.json}
   strict: true
   quiet: false
@@ -205,10 +198,10 @@ validate:
 # Runtime & caching
 # ----------------------------------------------------------------------
 runtime:
-  offline: true           # enforce no-internet behavior (Kaggle/CI safe)
-  num_workers: 2          # CPU workers for I/O-bound ops
+  offline: true                    # enforce no-internet behavior (Kaggle/CI safe)
+  num_workers: ${env.num_workers} # reuse env workers
   disable_cuda: ${oc.env:SM_DISABLE_CUDA, false}
-  progress: true          # CLI progress bars unless CI disables TTY
+  progress: true
   cache:
     enabled: true
     dir: ${paths.cache}
@@ -216,11 +209,13 @@ runtime:
     reuse_umap_embedding: true
 
 # ----------------------------------------------------------------------
-# Hydra runtime
+# Hydra runtime (under env.artifacts_root)
 # ----------------------------------------------------------------------
 hydra:
   run:
-    dir: outputs/diagnose/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}_diagnose
   sweep:
-    dir: multirun/diagnose/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${paths.artifacts_root}/sweeps
     subdir: ${hydra.job.num}
+  job:
+    name: ${experiment.name}
