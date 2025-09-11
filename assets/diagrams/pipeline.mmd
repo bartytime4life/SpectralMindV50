@@ -1,11 +1,8 @@
-%% ------------------------------------------------------------------
-%% SpectraMind V50 — End-to-End Pipeline (GitHub-compatible)
-%% File: assets/diagrams/pipeline.mmd
-%% ------------------------------------------------------------------
+%% SpectraMind V50 — End-to-End Pipeline (GitHub-compatible, minimal)
 
 flowchart TB
 
-  %% ========== Entry & Orchestration ==========
+  %% Entry & Orchestration
   subgraph Entry[Entry & Orchestration]
     direction TB
     UCI[User / CI]
@@ -15,23 +12,23 @@ flowchart TB
     UCI --> CLI --> HYDRA --> DVCCTL
   end
 
-  %% ========== Environment ==========
+  %% Environment
   subgraph Env[Runtime Environment]
     direction TB
     LOCAL[Local / CI]
     KAGGLE[Kaggle]
   end
-  DVCCTL -. selects .-> LOCAL
-  DVCCTL -. or .-> KAGGLE
+  DVCCTL --> LOCAL
+  DVCCTL --> KAGGLE
 
-  %% ========== External Inputs ==========
+  %% External Inputs
   subgraph Inputs[External Inputs]
     direction TB
-    RAW["Ariel dataset (/kaggle/input/ariel-data-challenge-2025)"]
-    CFG[".yaml configs (Hydra)"]
+    RAW[Ariel dataset (/kaggle/input/ariel-data-challenge-2025)]
+    CFG[.yaml configs (Hydra)]
   end
 
-  %% ========== DVC Stages ==========
+  %% DVC Stages
   subgraph Pipe[Reproducible Pipeline (DVC stages)]
     direction TB
     Calib[calibrate]
@@ -43,7 +40,7 @@ flowchart TB
     Calib --> Prep --> Train --> Predict --> Diagnose --> Submit
   end
 
-  %% Config flows into stages
+  %% Config into stages
   CFG --> Calib
   CFG --> Prep
   CFG --> Train
@@ -54,7 +51,7 @@ flowchart TB
   %% Raw data into calibration
   RAW --> Calib
 
-  %% ========== Artifacts ==========
+  %% Artifacts
   subgraph Artifacts[Versioned Artifacts]
     direction TB
     CALOUT[calibrated/]
@@ -74,14 +71,14 @@ flowchart TB
   Submit --> SUBCSV
 
   %% Stage inputs from prior artifacts
-  CALOUT -.-> Prep
-  FEAT -.-> Train
-  CKPT -.-> Predict
-  FEAT -.-> Predict
-  CKPT -.-> Diagnose
-  FEAT -.-> Diagnose
+  CALOUT --> Prep
+  FEAT --> Train
+  CKPT --> Predict
+  FEAT --> Predict
+  CKPT --> Diagnose
+  FEAT --> Diagnose
 
-  %% ========== Kaggle specifics ==========
+  %% Kaggle notes
   subgraph KaggleHints[Notes for Kaggle Mode]
     direction TB
     KIN[Inputs under /kaggle/input/*]
@@ -90,7 +87,7 @@ flowchart TB
   RAW --> KIN
   SUBCSV --> KOUT
 
-  %% ========== Reproducibility ==========
+  %% Reproducibility
   subgraph Repro[Integrity & Reproducibility]
     direction TB
     SNAP[Config snapshot (JSON + SHA256)]
