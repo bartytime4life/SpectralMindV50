@@ -1,26 +1,54 @@
-# configs/logger/jsonl.yaml
 # ======================================================================
-# JSONL Logger — SpectraMind V50
+# JSONL Logger — SpectraMind V50 (Upgraded)
 # ======================================================================
-# Logs training/validation/test metrics as JSON Lines (.jsonl) for
-# downstream analysis, reproducibility, and audit trails.
+# Purpose:
+#   Logs training/validation/test metrics as JSON Lines (.jsonl) for
+#   downstream analysis, reproducibility, and audit trails.
 #
 # Usage:
 #   python -m spectramind.train +logger=jsonl
 #
-# Keys:
-#   _target_   : Python path to the logger implementation
-#   log_dir    : base directory for log files
-#   filename   : name of the JSONL file (relative to log_dir)
-#   flush_secs : how often to flush writes to disk (seconds)
-#   overwrite  : whether to overwrite an existing file
-#   pretty     : pretty-print JSON (debug only, larger files)
+# Notes:
+#   • JSONL is append-only by default (safe for Kaggle/CI runs).
+#   • File naming supports timestamped or hashed variants.
+#   • Flush interval is tuned for Kaggle (frequent writes, avoid data loss).
+#   • Pretty mode should be *off* for competition runs (space efficient).
+#   • Validated against schemas/events.schema.json.
 # ======================================================================
 
 _target_: spectramind.train.callbacks.JsonlMetricsLogger
 
-log_dir: ${paths.logs}/jsonl     # resolved via Hydra config (paths.logs)
-filename: metrics.jsonl          # per-run JSONL metrics file
-flush_secs: 5                    # flush interval for durability
-overwrite: false                 # append by default for safety
-pretty: false                    # compact JSON for efficiency
+# ----------------------------------------------------------------------
+# Output location
+# ----------------------------------------------------------------------
+log_dir: ${paths.logs}/jsonl       # resolved via Hydra (paths.logs)
+filename: metrics.jsonl            # per-run metrics file (relative to log_dir)
+
+# ----------------------------------------------------------------------
+# Write & durability behavior
+# ----------------------------------------------------------------------
+flush_secs: 5                      # flush interval for durability (safe for Kaggle 9h runs)
+overwrite: false                   # append by default; avoids clobbering Kaggle outputs
+max_file_size_mb: 100              # rotate if file exceeds this size (CI/Kaggle friendly)
+
+# ----------------------------------------------------------------------
+# Formatting
+# ----------------------------------------------------------------------
+pretty: false                      # compact JSON (competition runs)
+indent: 2                          # pretty-print indentation (only used if pretty=true)
+include_timestamp: true            # inject ISO timestamp in each record
+include_config_hash: true          # attach Hydra config hash for auditability
+include_git_commit: true           # attach short Git commit hash if available
+
+# ----------------------------------------------------------------------
+# Schema & validation
+# ----------------------------------------------------------------------
+schema_path: ${paths.schemas}/events.schema.json   # enforce schema on each record
+strict_validation: true            # raise if record fails schema validation
+
+# ----------------------------------------------------------------------
+# Runtime safety toggles
+# ----------------------------------------------------------------------
+safe_mode: true                    # Kaggle/CI: disables risky file ops (e.g., truncation)
+fallback_stdout: true              # if file cannot be written, stream JSONL to stdout
+compress_on_close: false           # optionally gzip JSONL at end of run (disabled by default)
