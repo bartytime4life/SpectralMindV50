@@ -1,36 +1,201 @@
 # configs/loss/composite.yaml
-# SpectraMind V50 — Composite Loss Configuration
-# ------------------------------------------------
-# Combines probabilistic (Gaussian log-likelihood) objective with
-# physics-informed symbolic regularizers. All weights are tunable.
+# ======================================================================
+# SpectraMind V50 — Composite Loss Configuration (ADR 0002)
+# ======================================================================
+# Combines probabilistic (Gaussian Log-Likelihood) objective with
+# physics-informed regularizers. Each component is toggleable, weighted,
+# and may receive its own sub-config. Designed for Hydra composition.
+#
+# Usage:
+#   python -m spectramind.train loss=composite
+#   # override / tune e.g.:
+#   python -m spectramind.train loss=composite \
+#     loss.components.calibration.weight=0.05 \
+#     loss.components.calibration.var_lambda=1e-4 \
+#     loss.components.band_coherence.window=7
+#
+# Notes:
+# - FGS1 bin (index 0) is emphasized by GLL and optionally passed to other priors.
+# - Bin masking/exclusion on priors protects broadband bin from oversmoothing.
+# - Optional warmup/annealing avoids early over-constraint.
+# ======================================================================
 
 _target_: spectramind.losses.composite.CompositeLoss
 
+# ----- Global aggregation & safety -------------------------------------
+reduction: "mean"        # ["mean","sum","none"]
+fail_fast_on_nan: true   # raise if a component returns NaN/Inf
+
+# Optional: global schedule multiplies every component weight by a factor
+schedule:
+  enabled: false
+  kind: "cosine"         # ["linear","cosine"]
+  start_factor: 0.2
+  end_factor: 1.0
+  warmup_epochs: 2
+  total_epochs: 50
+
+# ----- Common bin semantics --------------------------------------------
+bins:
+  n_bins: 283
+  fgs1_index: 0
+
+# ======================================================================
+# Components
+# ======================================================================
 components:
+
+  # --------------------------------------------------------------------
   # Primary likelihood (Kaggle metric: Gaussian log-likelihood)
+  # --------------------------------------------------------------------
   gll:
-    _target_: spectramind.losses.gaussian_loglikelihood.GaussianLogLikelihood
+    enabled: true
     weight: 1.0
+    _target_: spectramind.losses.gaussian_loglikelihood.GaussianLogLikelihood
 
-  # Smoothness prior: penalize large curvature in adjacent bins
+    # Encourage robust NLL; clamp sigma to avoid degenerate values.
+    clamp_sigma_min: 1.0e-6
+    clamp_sigma_max: 1.0e+2
+
+    # FGS1 weighting: challenge emphasizes broadband channel heavily (~58x).
+    use_fgs1_weight: true
+    fgs1_weight: 58.0
+
+    # Numerics
+    eps: 1.0e-8
+    reduction: "mean"
+
+    # Optional per-component schedule (overrides global if enabled)
+    schedule:
+      enabled: false
+      kind: "cosine"
+      start_factor: 1.0
+      end_factor: 1.0
+      warmup_epochs: 0
+      total_epochs: 50
+
+  # --------------------------------------------------------------------
+  # Smoothness prior: penalize curvature across adjacent bins
+  # --------------------------------------------------------------------
   smoothness:
+    enabled: true
+    weight: 0.05
     _target_: spectramind.losses.smoothness.SmoothnessLoss
-    weight: 0.05
 
-  # Non-negativity: soft barrier on μ and σ < 0
+    # Penalize 2nd derivative (curvature) of μ; exclude FGS1 bin.
+    order: 2                    # 1=first deriv, 2=second deriv
+    apply_to: ["mu"]            # could include "sigma" if desired
+    exclude_bins: [${loss.bins.fgs1_index}]
+    lambda_max: 0.2
+    epsilon: 1.0e-8
+    reduction: "mean"
+
+    schedule:
+      enabled: false
+      kind: "cosine"
+      start_factor: 0.0
+      end_factor: 1.0
+      warmup_epochs: 2
+      total_epochs: 50
+
+  # --------------------------------------------------------------------
+  # Non-negativity: soft barrier on μ; bounds on σ via clamping
+  # --------------------------------------------------------------------
   nonneg:
-    _target_: spectramind.losses.nonneg.NonNegLoss
+    enabled: true
     weight: 0.02
+    _target_: spectramind.losses.nonneg.NonNegLoss
 
-  # Calibration: penalize miscalibration between predicted σ and empirical error
+    # Separate controls for μ & σ:
+    mu:
+      margin: 0.0               # allow tiny negative wiggles
+      penalty: "l2"             # ["l2","hinge"]
+      exclude_bins: []          # keep μ≥0 for all bins by default
+    sigma:
+      enforce: false            # σ already clamped in GLL; set true to add penalty
+      margin: 0.0
+      penalty: "l2"
+
+    reduction: "mean"
+    epsilon: 1.0e-8
+
+  # --------------------------------------------------------------------
+  # Calibration: miscalibration penalty between σ and empirical error
+  # --------------------------------------------------------------------
   calibration:
+    enabled: true
+    weight: 0.05
     _target_: spectramind.losses.calibration.CalibrationLoss
-    weight: 0.05
 
-  # Band coherence: enforce consistency across correlated wavelength bands
+    # Sub-terms (set to 0 to disable)
+    var_lambda: 1.0e-4          # σ² vs residual² (or log-space)
+    cover_lambda: 0.0           # CI coverage vs target (1-α)
+    ece_lambda: 0.0             # ECE-style quantile calibration
+
+    # Variance fidelity options
+    var_mode: "log_mse"         # ["mse","log_mse","l1"]
+    residual_type: "raw"        # ["raw","standardized"]
+    var_normalization: "per_batch"  # ["none","per_bin","per_batch","global"]
+
+    # Coverage settings
+    alpha: 0.10                 # nominal CI (e.g., 0.90 if alpha=0.1)
+    ci_tail: "two_sided"        # ["two_sided","upper","lower"]
+
+    # ECE binning
+    ece_bins: 20
+    ece_min_bins: 5
+    ece_max_bins: 50
+    ece_min_per_bin: 32
+    ece_smoothing: 1.0
+    ece_bootstrap: 0
+
+    # FGS1 consistency
+    use_fgs1_weight: true
+    fgs1_weight: ${loss.components.gll.fgs1_weight}
+
+    # Numerics & aggregation
+    eps: 1.0e-8
+    sigma_min: ${loss.components.gll.clamp_sigma_min}
+    sigma_max: ${loss.components.gll.clamp_sigma_max}
+    reduction: "mean"
+    mask_invalid: true
+
+    # Optional annealing
+    schedule:
+      enabled: false
+      kind: "cosine"
+      start_factor: 0.0
+      end_factor: 1.0
+      warmup_epochs: 2
+      total_epochs: 50
+
+  # --------------------------------------------------------------------
+  # Band coherence: local consistency across wavelength neighborhoods
+  # --------------------------------------------------------------------
   band_coherence:
-    _target_: spectramind.losses.band_coherence.BandCoherenceLoss
+    enabled: true
     weight: 0.05
+    _target_: spectramind.losses.band_coherence.BandCoherenceLoss
 
-# Global reduction across components
-reduction: mean   # options: mean | sum | none
+    # Metric & window
+    mode: "l2"                  # ["l2","cosine","corr"]
+    window: 7                   # odd int; half-width = (w-1)/2
+    center_weighting: "hann"    # ["uniform","hann","tri"]
+
+    # Apply set & exclusions
+    apply_to: ["mu"]            # optionally include "sigma"
+    exclude_bins: [${loss.bins.fgs1_index}]
+
+    # Scale-invariance & numerics
+    normalize: true
+    epsilon: 1.0e-8
+
+    reduction: "mean"
+
+    schedule:
+      enabled: false
+      kind: "cosine"
+      start_factor: 0.0
+      end_factor: 1.0
+      warmup_epochs: 2
+      total_epochs: 50
