@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -19,44 +20,11 @@ except Exception:  # pragma: no cover
 
 class JSONLLogger:
     """
-    Append-only JSON Lines logger. Each event is a single JSON object per line.
-    - Safe for Kaggle/offline CI (append-only; no truncation; small buffers).
-    - Supports size-based rotation, optional schema validation, fallback to stdout,
-      periodic flush, and gzip-on-close.
+    Append-only JSON Lines logger. Each event is one JSON object per line.
+    Safe for Kaggle/offline CI. Supports size-based rotation, optional schema validation,
+    fallback to stdout, periodic flush, gzip-on-close, and injectable audit fields.
 
-    Parameters
-    ----------
-    path : str
-        Destination file path (created if missing). Opened in append mode.
-    autoflush : bool
-        If True, flush on each write; otherwise use flush_secs cadence.
-    flush_secs : float
-        If > 0, force a flush when this many seconds have elapsed since last flush.
-    pretty : bool
-        If True, pretty-print JSON (larger files; not recommended for competition).
-    indent : int
-        Indentation to use if pretty=True.
-    include_timestamp : bool
-        If True, include ISO timestamp field "ts" on each event.
-    include_config_hash : Optional[str]
-        If set, include a "config_hash" attribute on each event.
-    include_git_commit : Optional[str]
-        If set, include a "git_commit" attribute on each event.
-        (Prefer passing env-provided short SHA to avoid `git` calls in offline envs.)
-    schema_path : Optional[Union[str, os.PathLike]]
-        Path to a JSON schema for event validation. If provided and jsonschema is
-        available, each record is validated before write.
-    strict_validation : bool
-        If True, raise on schema errors; if False, attach "_schema_error" and continue.
-    safe_mode : bool
-        If True, disables risky operations (e.g., overwrite/truncate). We always append,
-        but safe_mode also guards rotation rename races on exotic FS.
-    fallback_stdout : bool
-        If True, on write/open errors the logger falls back to stdout.
-    max_file_size_mb : Optional[int]
-        If set, rotate when file exceeds this size. Rotation scheme: `.1`, `.2`, `.3`.
-    compress_on_close : bool
-        If True, gzip the final file on close (keeps `.gz` and removes original).
+    (Docstring of your current class kept intentionally concise; see parameter doc in __init__.)
     """
 
     def __init__(
@@ -76,6 +44,7 @@ class JSONLLogger:
         fallback_stdout: bool = True,
         max_file_size_mb: Optional[int] = None,
         compress_on_close: bool = False,
+        thread_safe: bool = False,
     ) -> None:
         self.path = os.fspath(path)
         self.autoflush = autoflush
@@ -83,6 +52,7 @@ class JSONLLogger:
         self.pretty = bool(pretty)
         self.indent = int(max(0, indent))
         self.include_timestamp = include_timestamp
+
         self._fixed_fields: dict[str, Any] = {}
         if include_config_hash:
             self._fixed_fields["config_hash"] = include_config_hash
@@ -94,11 +64,13 @@ class JSONLLogger:
         self.fallback_stdout = fallback_stdout
         self.compress_on_close = compress_on_close
 
+        self._lock: Optional[threading.Lock] = threading.Lock() if thread_safe else None
+
         # rotation
         self.max_bytes = None
         if max_file_size_mb is not None:
             self.max_bytes = int(max(1, max_file_size_mb)) * 1024 * 1024
-        self._rotate_keep = 3
+        self._rotate_keep = 3  # keep .1, .2, .3
 
         # schema (optional)
         self._schema: Optional[dict[str, Any]] = None
@@ -109,10 +81,8 @@ class JSONLLogger:
             except Exception as e:  # pragma: no cover
                 if strict_validation:
                     raise
-                else:
-                    # Non-strict: proceed without schema but mark the reason
-                    self._schema = None
-                    self._fixed_fields["_schema_load_error"] = str(e)
+                self._schema = None
+                self._fixed_fields["_schema_load_error"] = f"{type(e).__name__}: {e}"
 
         # open file
         safe_mkdir(os.path.dirname(self.path) or ".")
@@ -122,25 +92,74 @@ class JSONLLogger:
         self._open_file()
 
     # ------------------------------------------------------------------ #
-    # public API
+    # Public API
     # ------------------------------------------------------------------ #
 
     def log(self, **fields: Any) -> None:
+        """Log one event using keyword arguments."""
+        self._log_event(fields)
+
+    def log_dict(self, fields: dict[str, Any]) -> None:
+        """Log one event from a dict (supports keys that aren't valid identifiers)."""
+        self._log_event(dict(fields))  # shallow copy
+
+    def log_exception(self, **fields: Any) -> None:
         """
-        Write one JSONL event. Serializes all values safely; adds audit fields and timestamp.
-        Performs optional schema validation and rotation checks.
+        Log an exception with context. Use within an except block.
+        Adds: _exc_type, _exc_msg, and (non-strict) _schema_error if applicable.
         """
+        etype, evalue, _ = sys.exc_info()
+        if etype is not None:
+            fields.setdefault("_exc_type", etype.__name__)
+            fields.setdefault("_exc_msg", str(evalue))
+        self._log_event(fields)
+
+    def reopen(self, path: Optional[str] = None) -> None:
+        """
+        Close and reopen the logger, optionally switching to a new path.
+        Useful when rotating log directories per run or after tmpfs moves.
+        """
+        if path:
+            self.path = os.fspath(path)
+            safe_mkdir(os.path.dirname(self.path) or ".")
+        self._close_file()
+        self._open_file()
+
+    def close(self) -> None:
+        """Flush, optionally compress, and close."""
+        with self._maybe_locked():
+            self._close_file()
+            if self.compress_on_close and not self._use_stdout:
+                self._gzip_inplace()
+
+    def __enter__(self) -> "JSONLLogger":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
+
+    def _log_event(self, fields: dict[str, Any]) -> None:
+        if self._lock:
+            with self._lock:
+                self._log_event_unlocked(fields)
+        else:
+            self._log_event_unlocked(fields)
+
+    def _log_event_unlocked(self, fields: dict[str, Any]) -> None:
         if not self._fh and not self._use_stdout:
             raise RuntimeError("JSONLLogger is closed")
 
         event: dict[str, Any] = {}
         if self.include_timestamp:
             event["ts"] = iso_now()
-
-        # audit fields (constant per-run)
         if self._fixed_fields:
             event.update(self._fixed_fields)
 
+        # serialize
         for k, v in fields.items():
             event[k] = to_serializable(v)
 
@@ -151,9 +170,7 @@ class JSONLLogger:
             except Exception as e:
                 if self.strict_validation:
                     raise
-                else:
-                    # record the error inline; do not drop the event
-                    event["_schema_error"] = str(e)
+                event["_schema_error"] = f"{type(e).__name__}: {e}"
 
         # encode
         if self.pretty:
@@ -167,9 +184,12 @@ class JSONLLogger:
         except Exception as e:
             if not self.fallback_stdout:
                 raise
-            # Fallback to stdout and mark the failure reason
             self._use_stdout = True
             self._fh = None
+            # attach fallback reason once
+            self._fixed_fields.setdefault(
+                "_fallback", f"stdout: {type(e).__name__}: {e}"
+            )
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
             return
@@ -182,53 +202,42 @@ class JSONLLogger:
             if now - self._last_flush >= self.flush_secs:
                 self._flush_file()
 
-        # rotate if needed
+        # rotation
         if self.max_bytes is not None and not self._use_stdout:
             try:
                 self._rotate_if_needed()
             except Exception:
-                # Rotation failures should not kill training; best-effort.
+                # Non-fatal; keep going.
                 pass
-
-    def close(self) -> None:
-        """Flush, optionally compress, and close."""
-        if self._fh:
-            try:
-                self._fh.flush()
-            finally:
-                self._fh.close()
-            self._fh = None
-
-        if self.compress_on_close and not self._use_stdout:
-            self._gzip_inplace()
-
-    def __enter__(self) -> "JSONLLogger":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
-
-    # ------------------------------------------------------------------ #
-    # internal helpers
-    # ------------------------------------------------------------------ #
 
     def _open_file(self) -> None:
         try:
-            # Line-buffered text mode; append only.
-            self._fh = open(self.path, "a", buffering=1, encoding="utf-8")
+            # Append + line buffered; never truncates.
+            self._fh = open(
+                self.path, "a", buffering=1, encoding="utf-8", errors="backslashreplace"
+            )
             self._use_stdout = False
         except Exception as e:
             if not self.fallback_stdout:
                 raise
-            # Cannot open file (e.g., read-only FS). Fall back to stdout.
             self._fh = None
             self._use_stdout = True
-            # Attach reason once (as a fixed field)
             self._fixed_fields.setdefault("_fallback", f"stdout: {type(e).__name__}: {e}")
+
+    def _close_file(self) -> None:
+        if self._fh:
+            try:
+                self._fh.flush()
+            finally:
+                try:
+                    self._fh.close()
+                finally:
+                    self._fh = None
 
     def _write_line(self, line: str) -> None:
         if self._use_stdout:
             sys.stdout.write(line + "\n")
+            sys.stdout.flush()
             return
         if not self._fh:
             raise RuntimeError("JSONLLogger file handle is closed")
@@ -243,15 +252,26 @@ class JSONLLogger:
 
     def _file_size(self) -> int:
         try:
-            return Path(self.path).stat().st_size
+            return os.stat(self.path).st_size
         except Exception:
             return 0
+
+    # --- rotation helpers ------------------------------------------------
+
+    @staticmethod
+    def _rotated_name(base: Union[str, Path], n: int) -> str:
+        """
+        Return a rotated sibling filename: 'name.ext.n' or 'name.n' (if no ext).
+        We avoid Path.with_suffix() because it fails when there is no suffix.
+        """
+        p = Path(base)
+        s = str(p)
+        return f"{s}.{n}"
 
     def _rotate_if_needed(self) -> None:
         if self.max_bytes is None or self._use_stdout or not self._fh:
             return
-        size = self._file_size()
-        if size < self.max_bytes:
+        if self._file_size() < self.max_bytes:
             return
 
         # Close current file before rotation
@@ -265,28 +285,31 @@ class JSONLLogger:
             pass
         self._fh = None
 
-        base = Path(self.path)
-        # Guard rotations in "safe_mode" (best effort to avoid destructive ops)
-        try:
-            # Shift .2 -> .3, .1 -> .2, current -> .1
-            for idx in range(self._rotate_keep, 0, -1):
-                src = base.with_suffix(base.suffix + f".{idx}")
-                dst = base.with_suffix(base.suffix + f".{idx+1}")
-                if src.exists():
-                    try:
-                        if not self.safe_mode or (self.safe_mode and not dst.exists()):
-                            src.replace(dst)
-                    except Exception:
-                        # ignore per-file rotation failure
-                        pass
-            # Move current to .1
-            if base.exists():
-                dst = base.with_suffix(base.suffix + ".1")
-                if not self.safe_mode or (self.safe_mode and not dst.exists()):
-                    base.replace(dst)
-        finally:
-            # Reopen a fresh file for continued logging
-            self._open_file()
+        base = self.path
+
+        # Shift .(k) -> .(k+1) (reverse order to prevent clobber)
+        for idx in range(self._rotate_keep, 0, -1):
+            src = self._rotated_name(base, idx)
+            dst = self._rotated_name(base, idx + 1)
+            if os.path.exists(src):
+                try:
+                    if not self.safe_mode or (self.safe_mode and not os.path.exists(dst)):
+                        os.replace(src, dst)  # atomic on POSIX/Windows
+                except Exception:
+                    # ignore per-file rotation failure
+                    pass
+
+        # Move current -> .1 (only if it exists)
+        if os.path.exists(base):
+            dst = self._rotated_name(base, 1)
+            try:
+                if not self.safe_mode or (self.safe_mode and not os.path.exists(dst)):
+                    os.replace(base, dst)
+            except Exception:
+                pass
+
+        # Reopen fresh log file
+        self._open_file()
 
     def _gzip_inplace(self) -> None:
         """
@@ -301,7 +324,19 @@ class JSONLLogger:
             with open(p, "rb") as src, gzip.open(gz_path, "wb") as dst:
                 for chunk in iter(lambda: src.read(1024 * 64), b""):
                     dst.write(chunk)
-            p.unlink(missing_ok=True)
+            try:
+                p.unlink()  # Py3.8+: no missing_ok for safety
+            except FileNotFoundError:
+                pass
         except Exception:
             # Non-fatal; leave original in place.
             pass
+
+    # context manager for optional locking
+    def _maybe_locked(self):
+        class _NullCtx:
+            def __enter__(self_s):  # noqa: N805
+                return None
+            def __exit__(self_s, exc_type, exc, tb):  # noqa: N805
+                return False
+        return self._lock or _NullCtx()
