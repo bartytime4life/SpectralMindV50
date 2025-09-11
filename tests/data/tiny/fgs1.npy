@@ -1,65 +1,110 @@
 #!/usr/bin/env python3
 # =============================================================================
-# SpectraMind V50 — Tiny FGS1 Test Spectrum Generator
+# SpectraMind V50 — Tiny FGS1 Test Value Generator (Upgraded)
 # -----------------------------------------------------------------------------
-# Generates a deterministic synthetic FGS1 "white-light" transit depth for use
-# alongside the tiny AIRS test spectrum. FGS1 is the broadband photometric
-# channel (1 value) that carries ~58× metric weight in the Ariel Challenge.
-#
-# Characteristics:
-#   • Scalar value (stored as shape (1,))
-#   • Mean depth ≈ 0.01 (1% transit depth)
-#   • Small Gaussian noise for realism
-#   • Clipped to [0, 1] for physical plausibility
-#
-# Output:
-#   tests/data/tiny/fgs1.npy  (NumPy float32 array of shape (1,))
+# • Scalar broadband transit depth with tiny noise (default ~1% ± 1e-4)
+# • Deterministic via seed; emits .npy (default) or .csv
+# • Sidecar JSON captures parameters & quick stats for provenance
 #
 # Usage:
 #   python scripts/gen_tiny_fgs1.py
+#   python scripts/gen_tiny_fgs1.py --depth 0.01 --sigma 1e-4 --seed 42 \
+#       --format npy --out tests/data/tiny/fgs1.npy
 # =============================================================================
-
 from __future__ import annotations
-import numpy as np
-from pathlib import Path
+
+import argparse
+import json
 import sys
+from pathlib import Path
 
-# ----------------------------------------------------------------------------- #
-# Config
-# ----------------------------------------------------------------------------- #
-SEED = 42
-OUT_PATH = Path("tests/data/tiny/fgs1.npy")
+import numpy as np
 
-# ----------------------------------------------------------------------------- #
-# Main
-# ----------------------------------------------------------------------------- #
-def main() -> None:
-    rng = np.random.default_rng(seed=SEED)
 
-    # Baseline ~1% depth
-    baseline = 0.01
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Generate a deterministic tiny FGS1 (white-light) transit depth.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--depth", type=float, default=0.01, help="Baseline transit depth")
+    p.add_argument("--sigma", type=float, default=1e-4, help="Gaussian noise std")
+    p.add_argument("--seed", type=int, default=42, help="RNG seed (PCG64)")
+    p.add_argument(
+        "--format",
+        choices=("npy", "csv"),
+        default="npy",
+        help="Output file format",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=Path("tests/data/tiny/fgs1.npy"),
+        help="Output file path (.npy or .csv)",
+    )
+    return p.parse_args()
 
-    # Add small Gaussian noise
-    noise = 1e-4 * rng.standard_normal(size=1).astype(np.float32)
 
-    value = np.array([baseline + noise[0]], dtype=np.float32)
+def _validate(depth: float, sigma: float) -> None:
+    if not (0.0 <= depth <= 1.0):
+        raise ValueError("--depth must be in [0, 1]")
+    if sigma < 0.0:
+        raise ValueError("--sigma must be >= 0")
 
-    # Clip to [0, 1]
+
+def _build(depth: float, sigma: float, seed: int) -> tuple[np.ndarray, dict]:
+    rng = np.random.default_rng(seed)
+    noise = (sigma * rng.standard_normal(size=1)).astype(np.float32)
+    value = np.array([depth], dtype=np.float32) + noise
     value = np.clip(value, 0.0, 1.0)
 
-    # Save
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.save(OUT_PATH, value)
+    meta = {
+        "depth": float(depth),
+        "sigma": float(sigma),
+        "seed": int(seed),
+        "value": float(value[0]),
+        "dtype": "float32",
+        "notes": "Deterministic synthetic FGS1 white-light depth for tests.",
+    }
+    return value, meta
 
-    # Validate
+
+def _save(path: Path, fmt: str, value: np.ndarray, meta: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "npy":
+        np.save(path, value)
+    else:
+        # single value CSV
+        np.savetxt(path, value, fmt="%.8f", delimiter=",")
+    # Sidecar JSON
+    sidecar = path.with_suffix(path.suffix + ".json")
+    sidecar.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main() -> int:
+    args = _parse_args()
+    _validate(args.depth, args.sigma)
+
+    out = args.out
+    if args.format == "npy" and out.suffix.lower() != ".npy":
+        out = out.with_suffix(".npy")
+    if args.format == "csv" and out.suffix.lower() != ".csv":
+        out = out.with_suffix(".csv")
+
+    value, meta = _build(args.depth, args.sigma, args.seed)
+
+    # Basic validation
     assert value.shape == (1,)
-    assert np.all(np.isfinite(value)), "Non-finite values in FGS1"
+    if not np.isfinite(value[0]):
+        raise RuntimeError("Generated non-finite FGS1 value")
 
-    print(f"[OK] Saved FGS1 tiny test value → {OUT_PATH.resolve()} value={value[0]:.6f}")
+    _save(out, args.format, value, meta)
+    print(f"[OK] Saved FGS1 tiny test value → {out.resolve()} value={value[0]:.6f}")
+    return 0
+
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except Exception as e:
         sys.stderr.write(f"[ERR] Failed to generate tiny FGS1 value: {e}\n")
-        sys.exit(1)
+        raise SystemExit(1)
