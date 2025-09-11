@@ -1,15 +1,18 @@
+# tests/integration/test_calib_chain.py
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Tuple, List
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
 # Keep per-call timeouts strict for CI; anything long-running should be opt-in via E2E_CLI_SMOKE
-TIMEOUT = 30  # seconds
+TIMEOUT = int(os.environ.get("E2E_CLI_TIMEOUT", "30"))
 SUBCOMMANDS = ("calibrate", "train", "predict", "diagnose", "submit")
 
 # Mark all tests as integration for selective runs
@@ -19,39 +22,56 @@ pytestmark = pytest.mark.integration
 # ----------------------------------------------------------------------------- #
 # CLI discovery helpers
 # ----------------------------------------------------------------------------- #
+def _python_candidates() -> List[str]:
+    cands: List[str] = []
+    if sys.executable:
+        cands.append(sys.executable)
+    for name in ("python", "python3", "py -3", "py"):
+        exe = shutil.which(name.split()[0])
+        if exe:
+            cands.append(name)
+    # de-dup in order
+    seen: set[str] = set()
+    uniq: List[str] = []
+    for p in cands:
+        if p not in seen:
+            uniq.append(p)
+            seen.add(p)
+    return uniq
+
+
 def _cli_candidates() -> List[List[str]]:
     """
     Return candidate invocations for the SpectraMind CLI:
       1) `spectramind` if installed on PATH
-      2) the current python exec -m spectramind
-      3) the current python exec -m spectramind.cli (fallback for module layout)
+      2) current python exec -m spectramind
+      3) current python exec -m spectramind.cli (fallback)
     """
     cands: List[List[str]] = []
-
     exe = shutil.which("spectramind")
     if exe:
         cands.append([exe])
-
-    py = shutil.which("python") or shutil.which("python3") or "python"
-    cands.append([py, "-m", "spectramind"])
-    cands.append([py, "-m", "spectramind.cli"])
+    for py in _python_candidates():
+        cands.append([*shlex.split(py), "-m", "spectramind"])
+        cands.append([*shlex.split(py), "-m", "spectramind.cli"])
     return cands
 
 
-def _cap_env(base: Optional[dict] = None) -> dict:
+def _cap_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """
-    Return a copy of env with conservative thread caps and safe toggles
-    suitable for shared CI or offline environments (e.g., Kaggle).
+    Conservative caps for shared CI/Kaggle; avoid noisy or netty behavior.
     """
     env = dict(base or os.environ)
-    # Respect existing, but cap if missing
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("MKL_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
     env.setdefault("NUMEXPR_NUM_THREADS", "1")
-    # Disable any accidental net access in tests (calibration / pulls must be local)
+    env.setdefault("CUDA_VISIBLE_DEVICES", "")  # optional/off by default
+    env.setdefault("MPLBACKEND", "Agg")
     env.setdefault("SPECTRAMIND_ALLOW_NET", "0")
-    # Make logs quieter unless debugging
+    # Predictable help/version output across locales
+    env.setdefault("LC_ALL", env.get("LC_ALL", "C"))
+    env.setdefault("LANG", env.get("LANG", "C"))
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
@@ -59,7 +79,7 @@ def _cap_env(base: Optional[dict] = None) -> dict:
 def _run_cmd(
     cmd: Sequence[str],
     cwd: Optional[Path] = None,
-    env: Optional[dict] = None,
+    env: Optional[Dict[str, str]] = None,
     timeout: int = TIMEOUT,
 ) -> Tuple[int, str, str]:
     proc = subprocess.Popen(
@@ -76,13 +96,12 @@ def _run_cmd(
     except subprocess.TimeoutExpired:
         proc.kill()
         out, err = proc.communicate()
-        # Conventionally use 124 for timeout to make triage easy
-        return 124, out, err
+        return 124, out, err  # conventional timeout code for easy triage
 
 
 def _first_working_cli() -> Optional[List[str]]:
     """
-    Return the first CLI command that responds to `--help` with exit code 0.
+    Return first CLI command that responds to `--help` with exit code 0.
     """
     for base in _cli_candidates():
         code, _, _ = _run_cmd([*base, "--help"], env=_cap_env())
@@ -103,7 +122,6 @@ def test_cli_top_level_help() -> None:
         pytest.skip("SpectraMind CLI not found on PATH nor as `python -m spectramind`/`.cli`.")
     code, out, err = _run_cmd([*base, "--help"], env=_cap_env())
     assert code == 0, f"Top-level --help failed: code={code}\nstdout:\n{out}\nstderr:\n{err}"
-    # Basic sanity: help text should mention usage or common verbs
     lower = out.lower()
     assert any(k in lower for k in ("usage", "help", "calibrate", "train", "predict")), f"Unexpected help text:\n{out}"
 
@@ -116,7 +134,6 @@ def test_cli_top_level_version() -> None:
     base = _first_working_cli()
     if not base:
         pytest.skip("SpectraMind CLI not found.")
-
     code, out, err = _run_cmd([*base, "--version"], env=_cap_env())
     if code != 0 and not out and not err:
         pytest.skip("--version not exposed yet.")
@@ -133,11 +150,9 @@ def test_cli_subcommands_help(subcmd: str) -> None:
     base = _first_working_cli()
     if not base:
         pytest.skip("SpectraMind CLI not found")
-
     code, out, err = _run_cmd([*base, subcmd, "--help"], env=_cap_env())
     if code != 0:
         pytest.skip(f"`{subcmd} --help` not available (code={code}). stderr:\n{err or out}")
-    # Minimal sanity checks
     assert any(k in out.lower() for k in ("help", "usage")), f"Unexpected subcommand help for {subcmd}:\n{out}"
 
 
@@ -146,30 +161,26 @@ def test_cli_subcommands_help(subcmd: str) -> None:
 # ----------------------------------------------------------------------------- #
 def _try_smoke_run(base: List[str], tmpdir: Path) -> Optional[str]:
     """
-    Attempt a very short, non-destructive pipeline smoke. We try to detect
+    Attempt a very short, non-destructive pipeline smoke. Try to detect
     common flags for dry-run/limit/batch-size to avoid heavy work and data deps.
-
-    Return a human-readable summary string on success, otherwise None.
     """
     attempts: list[tuple[list[str], str]] = [
-        # Predict is typically the lightest – try to find a do-nothing mode
+        # Predict is typically the lightest – try a do-nothing/dry mode
         ([*base, "predict", "--help"], "predict --help"),
         ([*base, "predict", "--dry-run"], "predict --dry-run"),
         ([*base, "predict", "--dry"], "predict --dry"),
         ([*base, "predict", "--smoke"], "predict --smoke"),
         ([*base, "predict", "--limit", "1"], "predict --limit 1"),
         ([*base, "predict", "--num-samples", "1"], "predict --num-samples 1"),
-        # Diagnose is often a safe no-op too
+        # Diagnose is often safe too
         ([*base, "diagnose", "--dry-run"], "diagnose --dry-run"),
         ([*base, "diagnose", "--help"], "diagnose --help"),
-        # As a last resort, try `train --help` / `submit --help` for cheap responses
+        # As a last resort, help on heavier commands
         ([*base, "train", "--help"], "train --help"),
         ([*base, "submit", "--help"], "submit --help"),
     ]
 
     env = _cap_env()
-    # Let users direct test data explicitly if the CLI supports it (common via HYDRA or custom flag)
-    # These env vars won't hurt if unused.
     env.setdefault("SPECTRAMIND_TEST_DATA", str(tmpdir))
     env.setdefault("SPECTRAMIND_TEST_WORK", str(tmpdir))
 
@@ -177,10 +188,12 @@ def _try_smoke_run(base: List[str], tmpdir: Path) -> Optional[str]:
         code, out, err = _run_cmd(cmd, cwd=tmpdir, env=env)
         if code == 0:
             return f"OK: {label}"
-        # If the subcommand exists but the flag isn’t recognized, keep trying
-        if any(tok in (err or "").lower() for tok in ("unknown option", "unrecognized", "no such option")):
+        # Unrecognized-option errors → try next attempt
+        if any(tok in (err or "").lower() for tok in ("unknown option", "unrecognized", "no such option", "got unexpected")):
             continue
-        # If we failed for missing data or similar, just try the next attempt; smoke is best-effort
+        # Missing-data/config errors → try next; smoke is best-effort
+        if any(tok in (err or out or "").lower() for tok in ("missing", "not found", "no such file", "required")):
+            continue
     return None
 
 
@@ -199,6 +212,5 @@ def test_cli_smoke_pipeline(tmp_path: Path) -> None:
 
     summary = _try_smoke_run(base, workdir)
     if summary is None:
-        pytest.skip("No lightweight smoke mode detected (dry-run/limit/help across predict/diagnose/train/submit).")
-    # If a smoke mode succeeded, we assert it returned code 0 via _try_smoke_run’s check
+        pytest.skip("No lightweight smoke mode detected across predict/diagnose/train/submit.")
     assert summary.startswith("OK:"), f"Expected OK summary, got: {summary}"
