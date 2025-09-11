@@ -15,21 +15,26 @@
 #     loss.components.band_coherence.window=7
 #
 # Notes:
-# - FGS1 bin (index 0) is emphasized by GLL and optionally passed to other priors.
-# - Bin masking/exclusion on priors protects broadband bin from oversmoothing.
+# - FGS1 bin (index 0) is emphasized by GLL and optionally bypassed by priors.
+# - Global bin masking/exclusions protect the broadband bin from oversmoothing.
 # - Optional warmup/annealing avoids early over-constraint.
+# - If your config is not mounted under `loss`, switch ${loss...} to a relative
+#   path (e.g., ${..bins.fgs1_index}) to avoid interpolation errors.
 # ======================================================================
 
 _target_: spectramind.losses.composite.CompositeLoss
 
 # ----- Global aggregation & safety -------------------------------------
-reduction: "mean"        # ["mean","sum","none"]
-fail_fast_on_nan: true   # raise if a component returns NaN/Inf
+reduction: "mean"         # ["mean","sum","none"]
+fail_fast_on_nan: true    # raise if a component returns NaN/Inf
 
-# Optional: global schedule multiplies every component weight by a factor
+# Optional: normalize component weights (post 'enabled' filtering)
+weights_norm: "none"      # ["none","sum1"]  # sum1 rescales weights to sum to 1
+
+# Optional: global schedule multiplies every component weight by this factor
 schedule:
   enabled: false
-  kind: "cosine"         # ["linear","cosine"]
+  kind: "cosine"          # ["linear","cosine"]
   start_factor: 0.2
   end_factor: 1.0
   warmup_epochs: 2
@@ -39,6 +44,16 @@ schedule:
 bins:
   n_bins: 283
   fgs1_index: 0
+
+# Global bin mask applied to all *priors* (not to GLL) unless a component
+# provides its own 'exclude_bins' or 'mask'.
+#   mask: null                # apply to all bins
+#   mask: {"exclude": [0, 1]} # exclude indices from priors
+prior_mask: {"exclude": [${loss.bins.fgs1_index}]}
+
+# ----- Logging ----------------------------------------------------------
+log_components: true       # log each component's scalar contribution per epoch
+log_interval: 1            # epochs between composite loss logs
 
 # ======================================================================
 # Components
@@ -57,9 +72,10 @@ components:
     clamp_sigma_min: 1.0e-6
     clamp_sigma_max: 1.0e+2
 
-    # FGS1 weighting: challenge emphasizes broadband channel heavily (~58x).
+    # FGS1 weighting: challenge emphasizes broadband channel heavily (~58x)
     use_fgs1_weight: true
     fgs1_weight: 58.0
+    white_channel_index: ${loss.bins.fgs1_index}
 
     # Numerics
     eps: 1.0e-8
@@ -83,8 +99,8 @@ components:
     _target_: spectramind.losses.smoothness.SmoothnessLoss
 
     # Penalize 2nd derivative (curvature) of μ; exclude FGS1 bin.
-    order: 2                    # 1=first deriv, 2=second deriv
-    apply_to: ["mu"]            # could include "sigma" if desired
+    order: 2                      # 1=first deriv, 2=second deriv
+    apply_to: ["mu"]              # could include "sigma" if desired
     exclude_bins: [${loss.bins.fgs1_index}]
     lambda_max: 0.2
     epsilon: 1.0e-8
@@ -108,11 +124,11 @@ components:
 
     # Separate controls for μ & σ:
     mu:
-      margin: 0.0               # allow tiny negative wiggles
-      penalty: "l2"             # ["l2","hinge"]
-      exclude_bins: []          # keep μ≥0 for all bins by default
+      margin: 0.0                # allow tiny negative wiggles
+      penalty: "l2"              # ["l2","hinge"]
+      exclude_bins: []           # keep μ≥0 for all bins by default
     sigma:
-      enforce: false            # σ already clamped in GLL; set true to add penalty
+      enforce: false             # σ already clamped in GLL; set true to add penalty
       margin: 0.0
       penalty: "l2"
 
@@ -128,18 +144,18 @@ components:
     _target_: spectramind.losses.calibration.CalibrationLoss
 
     # Sub-terms (set to 0 to disable)
-    var_lambda: 1.0e-4          # σ² vs residual² (or log-space)
-    cover_lambda: 0.0           # CI coverage vs target (1-α)
-    ece_lambda: 0.0             # ECE-style quantile calibration
+    var_lambda: 1.0e-4           # σ² vs residual² (or log-space)
+    cover_lambda: 0.0            # CI coverage vs target (1-α)
+    ece_lambda: 0.0              # ECE-style quantile calibration
 
     # Variance fidelity options
-    var_mode: "log_mse"         # ["mse","log_mse","l1"]
-    residual_type: "raw"        # ["raw","standardized"]
+    var_mode: "log_mse"          # ["mse","log_mse","l1"]
+    residual_type: "raw"         # ["raw","standardized"]
     var_normalization: "per_batch"  # ["none","per_bin","per_batch","global"]
 
     # Coverage settings
-    alpha: 0.10                 # nominal CI (e.g., 0.90 if alpha=0.1)
-    ci_tail: "two_sided"        # ["two_sided","upper","lower"]
+    alpha: 0.10                  # nominal CI (e.g., 0.90 if alpha=0.1)
+    ci_tail: "two_sided"         # ["two_sided","upper","lower"]
 
     # ECE binning
     ece_bins: 20
@@ -178,12 +194,12 @@ components:
     _target_: spectramind.losses.band_coherence.BandCoherenceLoss
 
     # Metric & window
-    mode: "l2"                  # ["l2","cosine","corr"]
-    window: 7                   # odd int; half-width = (w-1)/2
-    center_weighting: "hann"    # ["uniform","hann","tri"]
+    mode: "l2"                   # ["l2","cosine","corr"]
+    window: 7                    # odd int; half-width = (w-1)/2
+    center_weighting: "hann"     # ["uniform","hann","tri"]
 
     # Apply set & exclusions
-    apply_to: ["mu"]            # optionally include "sigma"
+    apply_to: ["mu"]             # optionally include "sigma"
     exclude_bins: [${loss.bins.fgs1_index}]
 
     # Scale-invariance & numerics
