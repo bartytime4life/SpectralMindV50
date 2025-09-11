@@ -1,37 +1,44 @@
 # ==============================================================================
 # .cz.toml — Commitizen configuration for SpectraMind V50
 # ------------------------------------------------------------------------------
-# Enforces Conventional Commits across the repo with clean tags & changelogs.
-# Compatible with cz-conventional-commits; conservative options only.
+# Enforces Conventional Commits and automates version/tag/changelog bumps.
+# Compatible with cz-conventional-commits (conservative, non-interactive safe).
 # ==============================================================================
 
 [tool.commitizen]
 name = "cz_conventional_commits"
 
-# --- Versioning & tagging -----------------------------------------------------
+# --- Where to read/write the version -----------------------------------------
+# Prefer explicit version field; if you switch to PEP 621-only later, set:
+#   version_provider = "pep621"
 version = "0.1.0"
 version_scheme = "pep440"              # normalized Python semantics
-major_version_zero = true              # keep semver rules for 0.x (feat -> MINOR)
-tag_format = "v$version"               # e.g., v0.1.0
-annotated_tag = true                   # create annotated git tags
-tag_message = "release: v$version"     # tag annotation text
+major_version_zero = true              # semver semantics under 1.0.0 (feat -> MINOR)
+
+# --- Tagging ------------------------------------------------------------------
+tag_format = "v$version"               # e.g. v0.1.0
+annotated_tag = true                   # create annotated tags
+tag_message = "release: v$version"     # git tag -a message
+
+# --- Bump commit message ------------------------------------------------------
 bump_message = "chore(release): v$current_version → v$new_version"
 
-# --- Files to bump in lockstep -----------------------------------------------
+# --- Files to bump in lockstep ------------------------------------------------
+# Order matters; first hit often becomes the source-of-truth in mixed setups.
 version_files = [
   "VERSION",
-  "pyproject.toml:version",
-  "src/spectramind/__init__.py:__version__",
+  "pyproject.toml:^version\\s*=\\s*\"(?P<version>.*)\"",
+  "src/spectramind/__init__.py:^__version__\\s*=\\s*\"(?P<version>.*)\"",
 ]
 
-# --- Changelog ----------------------------------------------------------------
+# --- Changelog generation -----------------------------------------------------
 update_changelog_on_bump = true
 changelog_file = "CHANGELOG.md"
-changelog_incremental = true           # append-only during bumps
-# If you want to start from a specific tag/revision, uncomment:
+changelog_incremental = true           # append-only entries during bumps
+# If first release should start from a specific tag/revision, uncomment:
 # changelog_start_rev = "v0.1.0"
 
-# --- Presentation order in CHANGELOG (nice-to-read grouping) -----------------
+# --- Presentation order in CHANGELOG -----------------------------------------
 change_type_order = [
   "feat",
   "fix",
@@ -46,29 +53,27 @@ change_type_order = [
   "revert",
 ]
 
-# --- (Optional) filters; keep defaults if unsure ------------------------------
+# --- Optional: prerelease & devrelease knobs (safe defaults are commented) ----
+# Allow prerelease bumps like 0.2.0a1, 0.2.0b1, 0.2.0rc1:
+# prerelease = true
+# prerelease_tag = "rc"                 # or "a", "b"
+# devrelease = false                    # enable for .devN suffixes
+
+# --- Optional: read version only from pyproject (PEP 621) ---------------------
+# version_provider = "pep621"
+
+# --- Optional: commit message parsing customization ---------------------------
+# Keep default regex unless you truly need custom scopes/types.
 # commit_parser = "^(?P<change_type>feat|fix|perf|refactor|build|ci|test|docs|style|chore|revert)(?:\\((?P<scope>[^)]+)\\))?(?P<breaking>!)?: (?P<message>.+)$"
 # changelog_pattern = "^(feat|fix|perf|refactor|build|ci|test|docs|style|chore|revert)(\\(.+\\))?(!)?:"
 
-# ==============================================================================
-# Notes:
-# - We stick with `cz_conventional_commits` to avoid breaking prompts & defaults.
-# - `major_version_zero=true` keeps semver semantics sensible while <1.0.0.
-# - `annotated_tag=true` gives nicer release notes & signed metadata on tags.
-# - The optional parser/pattern above mirrors Conventional Commits with "!".
-# - If you later want fully custom prompts/templates, switch to `cz_customize`.
-# ==============================================================================
-
-
-# ------------------------------------------------------------------------------
-# (Optional) Lightweight message guidance for contributors
+# ------------------------------------------------------------------------------ 
+# (Advisory) lightweight guidance for contributors. This is informational only
+# when using `cz_conventional_commits` (it won’t override the default parser).
 # ------------------------------------------------------------------------------
 [tool.commitizen.customize]
-# NOTE: This section is *advisory* when using cz_conventional_commits; it won’t
-# override the default parser but serves as reference for commit crafting.
 message_template = "{{type}}({{scope}}): {{message}}"
 
-# Conventional commit types (reference ordering mirrors change_type_order)
 types = [
   { type = "feat",     description = "A new feature" },
   { type = "fix",      description = "A bug fix" },
@@ -83,7 +88,6 @@ types = [
   { type = "revert",   description = "Revert a previous commit" },
 ]
 
-# Scopes (guide only; not enforced by cz_conventional_commits)
 scopes = [
   "cli",
   "pipeline",
