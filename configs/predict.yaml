@@ -1,4 +1,3 @@
-# configs/predict.yaml
 # ──────────────────────────────────────────────────────────────────────────────
 # SpectraMind V50 — Inference / Prediction Config (Hydra 1.x / PL 2.x)
 # Batch prediction & submission formatting.
@@ -10,7 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 defaults:
-  - env: local              # or kaggle / debug
+  - env: local              # or kaggle / ci / debug
   - data: kaggle            # dataset profile for test-set loading
   - calib: nominal          # if inference needs calibrated tensors
   - model: v50              # model architecture used at train time
@@ -24,25 +23,25 @@ experiment:
   tags: ["v50", "predict", "submission"]
   notes: ""
 
-# Canonical paths
+# Canonical paths (ENV-driven: portable across local/CI/Kaggle)
 paths:
-  project_root: ${hydra:runtime.cwd}
-  artifacts_root: ${paths.project_root}/artifacts
+  data_root: ${env.data_root}
+  artifacts_root: ${env.artifacts_root}
   runs: ${paths.artifacts_root}/runs
   logs: ${hydra:run.dir}/logs
   outputs: ${paths.artifacts_root}/predictions
   checkpoints: ${paths.artifacts_root}/checkpoints
-  schema_dir: ${paths.project_root}/schemas
+  schema_dir: ${hydra:runtime.cwd}/schemas
 
-# Runtime controls
+# Runtime controls (deterministic by default)
 runtime:
-  seed: 42
-  deterministic: true           # torch.use_deterministic_algorithms when possible
-  allow_tf32: false             # set true only after numeric validation
-  device: "auto"                # "auto" | "cuda:0" | "cpu" | "mps"
-  precision: "32-true"          # "32-true" | "16-mixed" | "bf16-mixed"
-  inference_mode: true          # torch.inference_mode() wrapper
-  cudnn_benchmark: false        # for throughput, set true if determinism retained
+  seed: ${env.reproducibility.seed}
+  deterministic: ${env.reproducibility.deterministic}
+  allow_tf32: false                 # enable only after validating numerics on your GPU
+  device: ${env.device}             # "cuda" | "cpu" (from env)
+  precision: "32-true"              # "32-true" | "16-mixed" | "bf16-mixed"
+  inference_mode: true
+  cudnn_benchmark: false
 
 # DataLoader (uses env defaults)
 dataloader:
@@ -55,11 +54,9 @@ dataloader:
 
 # Checkpoint selection & loading
 checkpoint:
-  # Primary checkpoint (override via CLI: +checkpoint.path=/path/to.ckpt)
   path: ${paths.checkpoints}/last.ckpt
-  strict: true                  # require exact key match unless migrating
-  fail_if_missing: true         # hard fail when path doesn't exist
-  # Optional fallback search if `path` missing; picks newest by mtime
+  strict: true
+  fail_if_missing: true
   fallback_glob:
     enabled: true
     pattern: "${paths.checkpoints}/**/*.ckpt"
@@ -68,49 +65,45 @@ checkpoint:
 # Test-time augmentation (TTA)
 tta:
   enabled: false
-  n: 4                          # number of stochastic draws
-  flips: false                  # dataset-defined temporal/spectral flips
+  n: 4
+  flips: false
   jitter:
     enabled: false
     sigma: 0.005
-  seed_offset: 1000             # ensures distinct RNG streams per draw
-  # Aggregation across TTA draws
+  seed_offset: 1000
   aggregate:
-    mu: "mean"                  # "mean" | "median"
-    sigma: "var_mean_law"       # combines per-draw (mu, sigma) by variance-mean law
+    mu: "mean"                      # "mean" | "median"
+    sigma: "var_mean_law"           # variance–mean law combiner
 
 # Ensemble across multiple checkpoints
 ensemble:
   enabled: false
-  checkpoints: []               # e.g. ["${paths.checkpoints}/fold1.ckpt", "..."]
-  # Aggregation across members
+  checkpoints: []                   # ["${paths.checkpoints}/fold1.ckpt", ...]
   aggregate:
-    mu: "mean"                  # "mean" | "median"
+    mu: "mean"
     sigma: "var_mean_law"
 
 # Post-processing safety & priors
 postprocess:
-  clamp_nonneg_sigma: true      # enforce σ >= 0
-  epsilon_sigma: 1.0e-9         # σ lower bound to avoid degenerate GLL
-  enforce_nonneg_mu: false      # set true if strictly positive targets
+  clamp_nonneg_sigma: true
+  epsilon_sigma: 1.0e-9
+  enforce_nonneg_mu: false
   smooth_mu:
     enabled: false
-    method: "laplacian"         # "laplacian" | "savitzky_golay"
+    method: "laplacian"             # "laplacian" | "savitzky_golay"
     weight: 0.05
-    window: 7                   # used for Savitzky–Golay
+    window: 7
     polyorder: 2
 
 # Submission formatting & validation
 submission:
   validate_schema: true
-  schema_path: ${paths.schema_dir}/submission.schema.json   # (id, mu[283], sigma[283])
-  # Supported exporters: "jsonl" (long) | "wide_csv" (wide)
-  format: "jsonl"
+  schema_path: ${paths.schema_dir}/submission.schema.json
+  format: "jsonl"                   # "jsonl" | "wide_csv"
 
   jsonl:
     filename: "submission.jsonl"
-    indent: 0                  # pretty=2 for debugging; 0 for speed/size
-    # JSONL record keys
+    indent: 0
     keys:
       id: "id"
       mu: "mu"
@@ -122,7 +115,6 @@ submission:
     sigma_prefix: "sigma_"
     digits: 6
     include_header: true
-    # Column order guard for reproducibility
     enforce_column_order: true
 
 # Optional offline metrics (when holdout labels exist)
@@ -159,7 +151,7 @@ logger:
     tags: ${experiment.tags}
     notes: ${experiment.notes}
 
-# Hydra runtime
+# Hydra runtime (under env.artifacts_root)
 hydra:
   run:
     dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}_predict
