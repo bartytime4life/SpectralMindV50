@@ -1,15 +1,49 @@
+# configs/train.yaml (or the top-level composed config)
+# Hydra-compliant: groups live at root; Hydra settings stay in hydra: block.
+
+# Compose from config groups
+defaults:
+  - env: local
+  - data: default
+  - calib: default
+  - preprocess: default
+  - model: v50
+  - training: default
+  - loss: composite
+  - logger: jsonl
+  - _self_
+
+# Optional: expose “active” selections for easy logging / diagnostics
+env: local
+data: default
+calib: default
+preprocess: default
+model: v50
+training: default
+loss: composite
+logger: jsonl
+
+# If you want canonical names for CLI subcommands, keep them as regular keys
+# (your app can read these; they are NOT Hydra settings).
+config_name_calibrate: calibrate
+config_name_preprocess: preprocess
+config_name_train: train
+config_name_predict: predict
+config_name_diagnose: diagnose
+config_name_submit: submit
+
+# Hydra's own settings live here
 hydra:
-  env: local
-  data: default
-  calib: default
-  preprocess: default
-  model: v50
-  training: default
-  loss: composite
-  logger: jsonl
-  config_name_calibrate: calibrate
-  config_name_preprocess: preprocess
-  config_name_train: train
-  config_name_predict: predict
-  config_name_diagnose: diagnose
-  config_name_submit: submit
+  # Reproducible, tidy run directories
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${oc.env:HYDRA_JOB_NAME,${job.name}}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}_${oc.env:HYDRA_JOB_NAME,${job.name}}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true
+    name: spectramind
+  # Stronger safety in prod
+  strict: true
+  # Optional: colorized log, fewer ANSI issues in CI
+  output_subdir: .hydra
