@@ -20,15 +20,28 @@ FloatArray = Union[Sequence[float], "np.ndarray"]  # noqa: F821
 
 
 def _len(x: FloatArray) -> int:
+    # np arrays (including 0-d) are handled: fall back to len for sequences
     if np is not None and hasattr(x, "shape"):
-        return int(x.shape[0])
+        # 1-D vectors expected; try to coerce if 0-D
+        shape = getattr(x, "shape")
+        if shape is not None and len(shape) == 0:
+            return 1
+        return int(shape[0])  # type: ignore[index]
     return len(x)  # type: ignore[no-any-return]
 
 
 def _as_list(x: FloatArray) -> List[float]:
+    """
+    Coerce an incoming vector to a python list[float].
+    Supports: list/tuple, numpy ndarray, numpy masked arrays.
+    """
     if np is not None and isinstance(x, np.ndarray):
-        return x.astype(float).tolist()
-    # Convert any sequence; also ensure numeric cast
+        # Handle masked arrays by filling masked values with NaN (we will reject later)
+        if np.ma.isMaskedArray(x):  # type: ignore[attr-defined]
+            filled = x.filled(np.nan)
+            return [float(v) for v in np.asarray(filled, dtype=float).tolist()]
+        return np.asarray(x, dtype=float).astype(float).tolist()
+    # Convert any sequence; ensure numeric cast
     return [float(v) for v in x]
 
 
@@ -57,11 +70,15 @@ def submission_columns(n_bins: int = N_BINS_DEFAULT) -> List[str]:
 def _round_if(v: float, ndigits: Optional[int]) -> float:
     if ndigits is None:
         return float(v)
-    # Fast path: avoid making "-0.0"
     r = round(float(v), ndigits)
+    # Avoid "-0.0" which can creep in with negatives near zero
     if r == 0.0:
         return 0.0
     return r
+
+
+def _is_finite_vec(vec: Sequence[float]) -> bool:
+    return all(math.isfinite(float(v)) for v in vec)
 
 
 @dataclass(frozen=True)
@@ -85,6 +102,16 @@ class SubmissionRow:
         for i, v in enumerate(self.sigma):
             row[f"sigma_{i:03d}"] = float(v)
         return row
+
+
+def validate_values(name: str, values: Sequence[float]) -> None:
+    """
+    Raise ValueError if any element is non-finite.
+    """
+    if not _is_finite_vec(values):
+        bad = [i for i, v in enumerate(values) if not math.isfinite(float(v))]
+        preview = bad[:5]
+        raise ValueError(f"{name} contains non-finite values at indices {preview}")
 
 
 def format_row(
@@ -123,10 +150,8 @@ def format_row(
     out_mu = [_round_if(float(v), round_ndigits) for v in mu_list]
 
     # sanity checks: finite values only
-    if any((not math.isfinite(v)) for v in out_mu):
-        raise ValueError("mu contains non-finite values")
-    if any((not math.isfinite(v)) for v in out_sigma):
-        raise ValueError("sigma contains non-finite values")
+    validate_values("mu", out_mu)
+    validate_values("sigma", out_sigma)
 
     return SubmissionRow(sample_id=sample_id, mu=out_mu, sigma=out_sigma)
 
@@ -158,26 +183,44 @@ def write_csv(
     *,
     n_bins: int = N_BINS_DEFAULT,
     newline: str = "",
+    atomic: bool = True,
 ) -> None:
     """
     Write submission.csv without requiring pandas.
     Column order:
         sample_id, mu_000..mu_(n_bins-1), sigma_000..sigma_(n_bins-1)
+
+    If atomic=True (default), write to a temp sibling, then os.replace() to avoid partial files.
     """
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     cols = submission_columns(n_bins)
-    with open(out_path, "w", encoding="utf-8", newline=newline) as fh:
+
+    target = out_path
+    tmp = f"{out_path}.tmp" if atomic else out_path
+
+    with open(tmp, "w", encoding="utf-8", newline=newline) as fh:
         writer = csv.DictWriter(fh, fieldnames=cols, extrasaction="raise")
         writer.writeheader()
+        wrote_any = False
         for row in rows:
             writer.writerow(row.to_dict(n_bins=n_bins))
+            wrote_any = True
+
+    if atomic:
+        # Replace target atomically, only if the write succeeded
+        os.replace(tmp, target)
+    elif not wrote_any:
+        # Non-atomic path but empty: still ensure file exists with header written above
+        pass
 
 
 # Optional pandas helpers (only if pandas is installed)
 try:
     import pandas as pd  # type: ignore
 
-    def to_dataframe(rows: Iterable[SubmissionRow], n_bins: int = N_BINS_DEFAULT) -> "pd.DataFrame":  # noqa: F821
+    def to_dataframe(
+        rows: Iterable[SubmissionRow], n_bins: int = N_BINS_DEFAULT
+    ) -> "pd.DataFrame":  # noqa: F821
         data = [r.to_dict(n_bins=n_bins) for r in rows]
         cols = submission_columns(n_bins)
         return pd.DataFrame(data, columns=cols)
