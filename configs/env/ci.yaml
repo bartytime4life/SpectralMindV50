@@ -1,0 +1,27 @@
+# CI environment (GitHub Actions, local CI)
+# - CPU by default
+# - Deterministic & reproducible settings
+# - Paths remain relative to repo workspace
+
+env:
+  name: ci
+
+  data_root: ${oc.env:SM_DATA_ROOT, ./data}
+  artifacts_root: ${oc.env:SM_ARTIFACTS_ROOT, ./outputs}
+
+  device: cpu
+  num_workers: ${oc.env:SM_NUM_WORKERS, 2}
+  precision: 32
+
+  reproducibility:
+    seed: 42
+    deterministic: true
+
+  logging:
+    level: INFO
+    wandb_enabled: false
+    jsonl_enabled: true
+    csv_enabled: true
+
+  # CI sanity runs should be fast and fail early
+  debug: false
