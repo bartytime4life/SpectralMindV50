@@ -1,32 +1,74 @@
 # configs/loss/smoothness.yaml
+# ======================================================================
 # SpectraMind V50 — Smoothness Regularization Loss
-# -------------------------------------------------
-# Encourages local smoothness across adjacent spectral bins,
-# penalizing sharp fluctuations in predicted μ(λ) sequences.
+# ======================================================================
+# Encourages local smoothness across adjacent spectral bins, penalizing
+# sharp fluctuations in predicted sequences. Physically, transmission
+# spectra are continuous; strong bin-to-bin oscillations are unlikely to
+# be astrophysical and typically indicate noise or calibration issues.
 #
-# Notes:
-# - Implemented in `spectramind.losses.smoothness.SmoothnessLoss`.
-# - Physics-informed: real exoplanet spectra are continuous and
-#   differentiable; strong bin-to-bin oscillations are unlikely
-#   to be astrophysical in origin.
-# - This is a *symbolic constraint loss* — it can be linearly
-#   combined with other loss terms in `composite.yaml`.
+# Implementation:
+#   spectramind.losses.smoothness.SmoothnessLoss
+#
+# Usage:
+#   # stand-alone (ablations)
+#   python -m spectramind.train +loss=smoothness
+#
+#   # via composite (recommended; see ADR 0002)
+#   python -m spectramind.train loss=composite \
+#     loss.components.smoothness.weight=0.05 \
+#     loss.components.smoothness.order=2
+# ======================================================================
 
 _target_: spectramind.losses.smoothness.SmoothnessLoss
 
-# Weight applied to this regularizer in composite loss
-weight: 0.1
+# ----- Weight in composite ------------------------------------------------
+weight: 0.05                 # tune in composite; 0.02–0.10 typical
 
-# Order of finite difference used for smoothness penalty:
-# 1 = first derivative (Δμ), 2 = second derivative (Δ²μ).
+# ----- What to regularize -------------------------------------------------
+apply_to: ["mu"]             # optionally include "sigma" if you want σ smoothness too
+# Exclude the broadband FGS1 bin by default so it isn't “pulled” by spectral priors.
+exclude_bins: [0]            # [] to apply to all bins
+
+# ----- Finite-difference operator ----------------------------------------
+# Smoothness is applied to a finite-difference derivative along bins.
+# order: 1 -> first derivative (Δx), 2 -> second derivative (Δ²x)
 order: 2
 
-# Reduction mode for loss aggregation
-#   - "mean": average across batch and bins
-#   - "sum": sum across batch and bins
-#   - "none": return per-sample loss values
-reduction: "mean"
+# Stencil/window & boundary handling:
+#   stencil: "central" | "forward" | "backward"
+#   window : odd integer for central stencil width (>=3); ignored for forward/backward
+#   boundary: "reflect" | "replicate" | "valid" | "circular"
+stencil: "central"
+window: 3
+boundary: "reflect"
 
-# Optional spectral mask: indices of bins to exclude from smoothness
-# checks (e.g., detector edges, strong tellurics).
+# ----- Penalty shape & robustness ----------------------------------------
+# penalty: "l2" (default), "l1", or "huber"
+penalty: "l2"
+huber_delta: 1.0e-3          # only used if penalty == "huber"
+
+# Normalize the derivative to be scale-invariant:
+#   "none" | "per_bin" | "per_batch" | "global"
+normalize: true
+norm_mode: "per_bin"
+
+# ----- Numerics & aggregation --------------------------------------------
+epsilon: 1.0e-8              # jitter for norms / divides
+reduction: "mean"            # ["mean","sum","none"]
+
+# Optional global mask (boolean tensor or index list); leave null to apply to all
 mask: null
+
+# ----- Optional annealing (avoid early over-constraint) -------------------
+schedule:
+  enabled: false
+  kind: "cosine"             # ["linear","cosine"]
+  start_factor: 0.0
+  end_factor: 1.0
+  warmup_epochs: 2
+  total_epochs: 50
+
+# ----- Diagnostics --------------------------------------------------------
+log_scalars: true            # log scalar loss per-epoch
+log_histograms: false        # log histograms of Δx / Δ²x (if your logger supports it)
