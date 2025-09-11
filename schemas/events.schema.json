@@ -6,18 +6,148 @@
   "type": "object",
   "additionalProperties": false,
 
+  "$defs": {
+    "uuidV4": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+      "description": "UUID v4"
+    },
+    "ulid": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Crockford Base32 ULID (26 chars, no I/L/O/U)"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$",
+      "description": "SHA-256 hex digest"
+    },
+    "uriRef": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "level": {
+      "type": "string",
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"]
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["calibrate", "train", "predict", "diagnose", "submit"]
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+
+    "payload.cli_invoked": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "cwd":  { "type": "string" },
+        "env":  { "type": "object", "additionalProperties": { "type": "string" } },
+        "version": { "type": "string" }
+      },
+      "required": ["argv"]
+    },
+
+    "payload.stage_start": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "$ref": "#/$defs/stage" },
+        "config": { "type": "string" },  
+        "attempt": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["stage"]
+    },
+
+    "payload.stage_end": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stage": { "$ref": "#/$defs/stage" },
+        "status": { "type": "string", "enum": ["ok", "failed", "skipped", "resumed-skip"] },
+        "duration_sec": { "type": "number", "minimum": 0 },
+        "rc": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "message": { "type": "string" }
+      },
+      "required": ["stage", "status"]
+    },
+
+    "payload.metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "value": { "type": "number" },
+        "step": { "type": "integer", "minimum": 0 },
+        "split": { "type": "string", "enum": ["train", "val", "test"] }
+      },
+      "required": ["name", "value"]
+    },
+
+    "payload.error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "$ref": "#/$defs/nonEmptyString" },
+        "traceback": { "type": "string" },
+        "stage": { "$ref": "#/$defs/stage" }
+      },
+      "required": ["message"]
+    },
+
+    "payload.warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "message": { "$ref": "#/$defs/nonEmptyString" },
+        "stage": { "$ref": "#/$defs/stage" }
+      },
+      "required": ["message"]
+    },
+
+    "payload.artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "content_type": { "type": "string" },
+        "role": { "type": "string", "enum": ["input", "output", "log", "report", "model", "other"] }
+      },
+      "required": ["path"]
+    },
+
+    "payload.lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputs":  { "type": "array", "items": { "$ref": "#/$defs/uriRef" } },
+        "outputs": { "type": "array", "items": { "$ref": "#/$defs/uriRef" } },
+        "note":    { "type": "string" }
+      }
+    }
+  },
+
   "properties": {
     "id": {
-      "type": "string",
-      "description": "Unique identifier for this event (UUID or ULID)."
+      "description": "Unique identifier for this event (UUID or ULID).",
+      "oneOf": [{ "$ref": "#/$defs/uuidV4" }, { "$ref": "#/$defs/ulid" }]
     },
+
     "ts": {
       "type": "number",
+      "minimum": 0,
       "description": "Unix timestamp (float seconds since epoch). Required for ordering and replay."
     },
+
     "kind": {
       "type": "string",
-      "description": "Categorical event type.",
       "enum": [
         "cli_invoked",
         "stage_start",
@@ -29,44 +159,145 @@
         "lineage"
       ]
     },
+
     "payload": {
       "type": "object",
-      "description": "Event-specific payload. Shape depends on 'kind'.",
-      "additionalProperties": true
+      "description": "Event-specific payload. Shape depends on 'kind'."
     },
 
     "run_id": {
       "type": "string",
-      "description": "UUID or hash linking this event to a specific run/session."
+      "description": "UUID or hash linking this event to a specific run/session.",
+      "minLength": 6,
+      "maxLength": 128
     },
+
     "config_hash": {
-      "type": "string",
-      "description": "SHA256 or short hash of Hydra/DVC config snapshot for reproducibility."
+      "description": "SHA256 or short hash of Hydra/DVC config snapshot for reproducibility.",
+      "oneOf": [
+        { "$ref": "#/$defs/sha256" },
+        { "type": "string", "pattern": "^[A-Fa-f0-9]{7,40}$" }
+      ]
     },
+
     "level": {
-      "type": "string",
-      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
-      "description": "Logging severity level."
+      "$ref": "#/$defs/level",
+      "default": "INFO"
     },
+
     "msg": {
       "type": "string",
       "description": "Optional human-readable message for quick inspection."
     },
+
     "lineage": {
       "type": "object",
       "description": "Optional lineage block linking inputs/outputs for audit trails.",
+      "additionalProperties": false,
       "properties": {
-        "inputs": { "type": "array", "items": { "type": "string", "format": "uri-reference" } },
-        "outputs": { "type": "array", "items": { "type": "string", "format": "uri-reference" } }
-      },
-      "additionalProperties": false
+        "inputs":  { "type": "array", "items": { "$ref": "#/$defs/uriRef" } },
+        "outputs": { "type": "array", "items": { "$ref": "#/$defs/uriRef" } }
+      }
     },
+
     "tags": {
       "type": "array",
       "description": "Optional freeform tags for filtering/search (e.g., stage=calibrate).",
-      "items": { "type": "string" }
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "uniqueItems": true,
+      "maxItems": 32
     }
   },
 
-  "required": ["id", "ts", "kind", "payload"]
+  "required": ["id", "ts", "kind", "payload"],
+
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "cli_invoked" } }, "required": ["kind"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/payload.cli_invoked" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "stage_start" } }, "required": ["kind"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/payload.stage_start" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "stage_end" } }, "required": ["kind"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/payload.stage_end" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "metric" } }, "required": ["kind"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/payload.metric" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "error" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/payload.error" },
+          "level": { "const": "ERROR" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "warning" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "payload": { "$ref": "#/$defs/payload.warning" },
+          "level": { "const": "WARNING" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "artifact" } }, "required": ["kind"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/payload.artifact" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "lineage" } }, "required": ["kind"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/payload.lineage" } } }
+    }
+  ],
+
+  "examples": [
+    {
+      "id": "018F93MB9J5XQ7V6W3QJ2V5K8C",
+      "ts": 1731379200.123,
+      "kind": "cli_invoked",
+      "level": "INFO",
+      "payload": { "argv": ["spectramind", "train", "--config-name", "v50"], "cwd": "/ws/spectramind" },
+      "run_id": "2025-09-11T17-22-03Z_ab12cd",
+      "config_hash": "a3b1f1c7e0c24b0f1a25b6f93f4f09b0e7d3c9d6f4a2b1c0d9e8f7a6b5c4d3e2",
+      "tags": ["env=kaggle", "stage=train"]
+    },
+    {
+      "id": "b3f3c2a0-6c33-44b9-b5ad-8d3b3a1f9a44",
+      "ts": 1731379205.002,
+      "kind": "stage_start",
+      "payload": { "stage": "train", "config": "v50", "attempt": 1 },
+      "run_id": "2025-09-11T17-22-03Z_ab12cd"
+    },
+    {
+      "id": "f8f2a6f4-8d35-4e3f-9b9f-123456789abc",
+      "ts": 1731382805.777,
+      "kind": "stage_end",
+      "payload": { "stage": "train", "status": "ok", "duration_sec": 3600.7, "attempt": 1 }
+    },
+    {
+      "id": "01HZYF1T7E7RA3T5V9FN5FQG3S",
+      "ts": 1731382810.001,
+      "kind": "metric",
+      "payload": { "name": "val/gll", "value": -1.2345, "step": 12, "split": "val" }
+    },
+    {
+      "id": "01HZYF1T7E7RA3T5V9FN5FQG44",
+      "ts": 1731382812.444,
+      "kind": "artifact",
+      "payload": { "path": "artifacts/reports/diag.html", "sha256": "9f2c3a0b4b2e4e5dde55c2e2f1f8b0f05b95d6f52f0f9b9a0c8d829fbf9f6f83", "bytes": 102400, "content_type": "text/html", "role": "report" }
+    },
+    {
+      "id": "01HZYF1T7E7RA3T5V9FN5FQG55",
+      "ts": 1731382815.000,
+      "kind": "error",
+      "payload": { "message": "CUDA OOM", "stage": "train" },
+      "level": "ERROR"
+    }
+  ]
 }
