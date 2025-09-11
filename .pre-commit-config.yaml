@@ -1,19 +1,9 @@
-# ======================================================================
+# ==============================================================================
 # SpectraMind V50 — mission-grade pre-commit stack (upgraded)
-# - Fast: ruff + black + isort + pyupgrade
-# - Safe: mypy + bandit + detect-secrets + extra core sanity hooks
-# - Repro: DVC guard + large-file protections
-# - Docs: mdformat + codespell
-# - Notebooks: strip outputs (optional nbqa commented)
-# - JSON/YAML/TOML sanity + pretty JSON
-# - CI-friendly: conservative versions, narrow file globs, global excludes
-# - Conventional Commits (commit-msg) via Commitizen
-# ======================================================================
-
+# ==============================================================================
 ci:
   autofix_prs: true
   autoupdate_branch: true
-  # keep monthly autoupdates reasonable
   autoupdate_schedule: monthly
 
 default_stages: [commit, push]
@@ -32,18 +22,19 @@ exclude: >
     ^.*/site/|
     ^assets/|
     ^docs/_build/|
+    ^.*/data/|
     \.svg$
   )
 
 repos:
   # --------------------------------------------------------------------
-  # Core hygiene (generic)
+  # Core hygiene
   # --------------------------------------------------------------------
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: check-added-large-files
-        args: [--maxkb=500]  # keep repo lean; use DVC for artifacts
+        args: [--maxkb=500]     # keep repo lean; use DVC for artifacts
       - id: check-merge-conflict
       - id: check-case-conflict
       - id: check-symlinks
@@ -55,6 +46,7 @@ repos:
       - id: check-ast
       - id: detect-private-key
       - id: check-json
+        exclude: ^(poetry\.lock|package-lock\.json)$
       - id: check-yaml
         args: [--allow-multiple-documents]
       - id: check-toml
@@ -64,7 +56,7 @@ repos:
         files: ^(.*\.json|.*\.ipynb)$
         exclude: ^(poetry\.lock|package-lock\.json)$
 
-  # Upgrade syntax where safe (pre-lint quick win)
+  # Upgrade syntax where safe (quick win before lint)
   - repo: https://github.com/asottile/pyupgrade
     rev: v3.19.1
     hooks:
@@ -94,13 +86,13 @@ repos:
     rev: v0.6.3
     hooks:
       - id: ruff
-        # Fast flake8 replacement; see pyproject.toml/ruff.toml for config
         args: [--fix]
         files: ^(src/|tests/|scripts/|tools/|configs/|spectramind\.py)
-      # - id: ruff-format  # keep Black canonical; enable if you switch later
+      # Keep Black canonical; enable ruff-format if you switch later.
+      # - id: ruff-format
 
   # --------------------------------------------------------------------
-  # Static typing (fast path)
+  # Static typing
   # --------------------------------------------------------------------
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.2
@@ -237,4 +229,4 @@ repos:
         name: commitizen (enforce Conventional Commits)
         stages: [commit-msg]
         additional_dependencies: ["cz-conventional-changelog"]
-        # Requires .cz.toml or pyproject.toml with [tool.commitizen] config
+        # Requires .cz.toml or pyproject with [tool.commitizen]
