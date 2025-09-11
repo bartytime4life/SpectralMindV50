@@ -1,4 +1,3 @@
-# src/spectramind/diagnose/plots.py
 from __future__ import annotations
 
 import math
@@ -12,7 +11,8 @@ import numpy as np
 # Headless rendering — safe for CI/Kaggle/servers
 import matplotlib
 
-matplotlib.use("Agg")
+# Force non-interactive backend deterministically
+matplotlib.use("Agg", force=True)
 
 import matplotlib.pyplot as plt  # noqa: E402
 
@@ -22,6 +22,24 @@ try:  # optional aesthetics
     _HAS_SEABORN = True
 except Exception:  # pragma: no cover
     _HAS_SEABORN = False
+
+__all__ = [
+    "set_style",
+    "style",
+    "savefig",
+    "plot_training_curves",
+    "plot_parity",
+    "plot_residuals",
+    "plot_qq",
+    "plot_spectrum",
+    "plot_spectra_grid",
+    "plot_uncertainty_calibration",
+    "plot_fft_power",
+    "FigureSpec",
+    "save_all",
+    "erf",
+    "erfinv",
+]
 
 # --------------------------------------------------------------------------
 # Palettes & Style
@@ -35,12 +53,13 @@ _PALETTE = dict(
     red="#D55E00",
     purple="#CC79A7",
     brown="#8B4513",
-    pink="#F0E442",
+    yellow="#F0E442",
     gray="#999999",
 )
 
 
 def _rc_defaults(font_scale: float = 1.0) -> dict[str, Any]:
+    # Conservative RCs for reproducible rendering in CI/Kaggle
     return {
         "figure.dpi": 120,
         "savefig.dpi": 144,
@@ -49,7 +68,7 @@ def _rc_defaults(font_scale: float = 1.0) -> dict[str, Any]:
         "axes.grid": True,
         "grid.alpha": 0.2,
         "legend.frameon": False,
-        "font.size": 10 * font_scale,
+        "font.size": max(6, round(10 * font_scale)),
         "axes.prop_cycle": plt.cycler(
             color=[
                 _PALETTE["blue"],
@@ -59,6 +78,7 @@ def _rc_defaults(font_scale: float = 1.0) -> dict[str, Any]:
                 _PALETTE["purple"],
                 _PALETTE["gray"],
                 _PALETTE["brown"],
+                _PALETTE["yellow"],
             ]
         ),
     }
@@ -75,15 +95,20 @@ def set_style(*, use_seaborn: Optional[bool] = None, font_scale: float = 1.0) ->
     if use_seaborn is None:
         use_seaborn = _HAS_SEABORN
 
+    rc = _rc_defaults(font_scale=font_scale)
+
     if use_seaborn:
-        sns.set_theme(context="notebook", style="whitegrid", font_scale=font_scale, rc=_rc_defaults(font_scale))  # type: ignore
+        try:
+            sns.set_theme(context="notebook", style="whitegrid", font_scale=font_scale, rc=rc)  # type: ignore
+        except Exception:
+            plt.rcParams.update(rc)
     else:
-        plt.rcParams.update(_rc_defaults(font_scale))
+        plt.rcParams.update(rc)
 
 
 @contextmanager
 def style(*, use_seaborn: Optional[bool] = None, font_scale: float = 1.0):
-    """Context manager to apply style temporarily."""
+    """Context manager to apply style temporarily (restores previous rc)."""
     with plt.rc_context():
         set_style(use_seaborn=use_seaborn, font_scale=font_scale)
         yield
@@ -93,7 +118,6 @@ def style(*, use_seaborn: Optional[bool] = None, font_scale: float = 1.0):
 # IO
 # --------------------------------------------------------------------------
 
-
 def savefig(
     fig: plt.Figure,
     path: Path | str,
@@ -101,6 +125,7 @@ def savefig(
     tight: bool = True,
     transparent: bool = False,
     also_svg: bool = False,
+    dpi: Optional[int] = None,
 ) -> Path:
     """
     Safe figure save with parent creation and sane defaults.
@@ -110,12 +135,26 @@ def savefig(
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if tight:
-        fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight" if tight else None, transparent=transparent)
-    if also_svg:
-        svg_path = path.with_suffix(".svg")
-        fig.savefig(svg_path, bbox_inches="tight" if tight else None, transparent=transparent)
+    try:
+        if tight:
+            fig.tight_layout()
+        fig.savefig(
+            path,
+            bbox_inches="tight" if tight else None,
+            transparent=transparent,
+            dpi=dpi,
+        )
+        if also_svg:
+            svg_path = path.with_suffix(".svg")
+            fig.savefig(
+                svg_path,
+                bbox_inches="tight" if tight else None,
+                transparent=transparent,
+                dpi=dpi,
+            )
+    finally:
+        # Always close the figure to avoid memory/file descriptor leaks in loops
+        plt.close(fig)
     return path
 
 
@@ -123,18 +162,19 @@ def savefig(
 # Data helpers
 # --------------------------------------------------------------------------
 
-
 def _as_1d(a: Any) -> np.ndarray:
-    x = np.asarray(a)
+    x = np.asarray(a, dtype=float)
     if x.ndim == 0:
         x = x[None]
     return x.reshape(-1)
 
 
 def _finite_mask(first: np.ndarray, *rest: np.ndarray) -> np.ndarray:
-    """Return mask where all arrays are finite and shapes align (len-based)."""
-    xs = [np.asarray(first)] + [np.asarray(r) for r in rest]
-    n = min(x.size for x in xs)
+    """Return mask where all arrays are finite; aligns by shortest length."""
+    xs = [np.asarray(first, dtype=float)] + [np.asarray(r, dtype=float) for r in rest]
+    n = min(x.size for x in xs) if xs else 0
+    if n == 0:
+        return np.zeros(0, dtype=bool)
     xs = [x[:n].reshape(-1) for x in xs]
     mask = np.ones(n, dtype=bool)
     for x in xs:
@@ -145,7 +185,7 @@ def _finite_mask(first: np.ndarray, *rest: np.ndarray) -> np.ndarray:
 def _ema(values: np.ndarray, alpha: float) -> np.ndarray:
     """Exponential moving average (alpha in (0,1], higher = less smoothing)."""
     if not (0 < alpha <= 1):
-        return values
+        return values.astype(float, copy=True)
     out = np.empty_like(values, dtype=float)
     m = 0.0
     for i, v in enumerate(values.astype(float)):
@@ -155,22 +195,22 @@ def _ema(values: np.ndarray, alpha: float) -> np.ndarray:
 
 
 def _auto_bins(x: np.ndarray, max_bins: int = 100) -> int:
-    """Freedman–Diaconis bin count with an upper cap."""
+    """Freedman–Diaconis bin count with an upper cap. Falls back to 10."""
     x = x[np.isfinite(x)]
     n = x.size
     if n < 2:
         return 10
     q75, q25 = np.percentile(x, [75, 25])
-    iqr = max(q75 - q25, np.finfo(float).eps)
-    h = 2 * iqr * n ** (-1 / 3)
-    bins = int(np.clip(np.ceil((x.max() - x.min()) / max(h, 1e-12)), 10, max_bins))
+    iqr = float(max(q75 - q25, np.finfo(float).eps))
+    # Avoid division by zero; bound h away from 0
+    h = max(2 * iqr * n ** (-1 / 3), 1e-12)
+    bins = int(np.clip(np.ceil((x.max() - x.min()) / h), 10, max_bins))
     return bins
 
 
 # --------------------------------------------------------------------------
 # Core diagnostic plots
 # --------------------------------------------------------------------------
-
 
 def plot_training_curves(
     history: Mapping[str, Sequence[float]] | Mapping[str, np.ndarray],
@@ -187,7 +227,7 @@ def plot_training_curves(
         ema_alpha: if provided, smooth each series by EMA with this alpha (0,1].
     """
     # normalize arrays
-    hist = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in history.items()}
+    hist = {k: np.asarray(v, dtype=float).reshape(-1) for k, v in history.items() if v is not None}
 
     # Group into paired (train,val) metrics
     keys = sorted(hist.keys())
@@ -195,18 +235,16 @@ def plot_training_curves(
     for k in keys:
         if k.startswith("val_"):
             base = k[4:]
-            groups.setdefault(base, (None, None))
-            train, _ = groups[base]
-            groups[base] = (train, k)
+            tr, vl = groups.get(base, (None, None))
+            groups[base] = (tr, k)
         else:
             base = k
-            groups.setdefault(base, (None, None))
-            _, val = groups[base]
-            groups[base] = (k, val)
+            tr, vl = groups.get(base, (None, None))
+            groups[base] = (k, vl)
 
     n = len(groups)
     cols = min(max_cols, max(1, n))
-    rows = math.ceil(n / cols)
+    rows = max(1, math.ceil(n / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 3.6 * rows), squeeze=False)
 
     for ax, (name, (train_k, val_k)) in zip(axes.flat, groups.items()):
@@ -223,7 +261,7 @@ def plot_training_curves(
         ax.set_title(name)
         ax.set_xlabel("epoch")
         ax.set_ylabel(name)
-        ax.legend()
+        ax.legend(loc="best")
 
     # hide spare axes
     for j in range(len(groups), rows * cols):
@@ -254,7 +292,13 @@ def plot_parity(
     yt, yp = yt[mask], yp[mask]
 
     fig, ax = plt.subplots(figsize=(5.2, 5.2))
-    lims = [np.nanmin([yt.min(), yp.min()]), np.nanmax([yt.max(), yp.max()])]
+
+    if yt.size == 0:
+        ax.text(0.5, 0.5, "No finite points", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    lims = [float(np.nanmin([yt.min(), yp.min()])), float(np.nanmax([yt.max(), yp.max()]))]
     ax.plot(lims, lims, "k--", lw=1, alpha=0.6, label="identity")
 
     if yt.size >= hexbin_threshold:
@@ -291,6 +335,12 @@ def plot_residuals(
     r = (yp - yt)[mask]
     yp = yp[mask]
 
+    if r.size == 0:
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No finite residuals", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
     if bins is None:
         bins = _auto_bins(r)
 
@@ -319,19 +369,18 @@ def plot_qq(residuals: Sequence[float], *, title: str | None = "Q-Q Plot (Normal
     r = r[np.isfinite(r)]
     r = np.sort(r)
     n = r.size
+    fig, ax = plt.subplots(figsize=(5.2, 5.2))
     if n == 0:
-        fig, ax = plt.subplots()
         ax.text(0.5, 0.5, "No finite residuals", ha="center", va="center")
         ax.axis("off")
         return fig
 
     # Theoretical quantiles from standard normal
     p = (np.arange(1, n + 1) - 0.5) / n
-    q = np.sqrt(2) * erfinv(2 * p - 1)
+    q = np.sqrt(2.0) * erfinv(2 * p - 1)
 
-    fig, ax = plt.subplots(figsize=(5.2, 5.2))
-    ax.scatter(q, r, s=16, alpha=0.7)
     lims = [min(q.min(), r.min()), max(q.max(), r.max())]
+    ax.scatter(q, r, s=16, alpha=0.7)
     ax.plot(lims, lims, "k--", lw=1, alpha=0.7)
     ax.set_xlabel("Theoretical quantiles (N(0,1))")
     ax.set_ylabel("Empirical quantiles (residuals)")
@@ -369,7 +418,6 @@ def erfinv(x: np.ndarray | float) -> np.ndarray:
 # Spectroscopy-focused plots
 # --------------------------------------------------------------------------
 
-
 def plot_spectrum(
     mu: Sequence[float],
     *,
@@ -380,7 +428,7 @@ def plot_spectrum(
     band_labels: Optional[Sequence[str]] = None,
 ) -> plt.Figure:
     """
-    Plot a single 283-bin (or arbitrary length) spectrum with optional uncertainty and truth.
+    Plot a single spectrum with optional uncertainty and truth.
     """
     mu = _as_1d(mu)
     B = mu.size
@@ -402,49 +450,6 @@ def plot_spectrum(
         ax.set_xticks(x)
         ax.set_xticklabels(list(band_labels)[:B], rotation=90, fontsize=7)
     ax.legend(loc="best", ncols=3)
-    fig.tight_layout()
-    return fig
-
-
-def plot_spectra_grid(
-    mu: Sequence[Sequence[float]],
-    *,
-    sigma: Optional[Sequence[Sequence[float]]] = None,
-    truth: Optional[Sequence[Sequence[float]]] = None,
-    wavelength: Optional[Sequence[float]] = None,
-    titles: Optional[Sequence[str]] = None,
-    ncols: int = 3,
-) -> plt.Figure:
-    """
-    Grid of spectra (e.g., first N predictions).
-    """
-    mu = np.asarray(mu, dtype=float)
-    N = int(mu.shape[0])
-    ncols = max(1, ncols)
-    nrows = math.ceil(N / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(9 * (ncols / 3), 3.1 * nrows), squeeze=False)
-
-    s_arr = None if sigma is None else np.asarray(sigma, dtype=float)
-    t_arr = None if truth is None else np.asarray(truth, dtype=float)
-
-    for i in range(N):
-        r = i // ncols
-        c = i % ncols
-        ax = axes[r][c]
-        _plot_spectrum_ax(
-            ax,
-            mu[i],
-            sigma=None if s_arr is None else s_arr[i],
-            truth=None if t_arr is None else t_arr[i],
-            wavelength=wavelength,
-            title=titles[i] if titles and i < len(titles) else None,
-        )
-
-    # hide any unused axes
-    for j in range(N, nrows * ncols):
-        rr, cc = j // ncols, j % ncols
-        axes[rr][cc].axis("off")
-
     fig.tight_layout()
     return fig
 
@@ -475,9 +480,69 @@ def _plot_spectrum_ax(
     ax.legend(loc="best", fontsize=8)
 
 
+def plot_spectra_grid(
+    mu: Sequence[Sequence[float]],
+    *,
+    sigma: Optional[Sequence[Sequence[float]]] = None,
+    truth: Optional[Sequence[Sequence[float]]] = None,
+    wavelength: Optional[Sequence[float]] = None,
+    titles: Optional[Sequence[str]] = None,
+    ncols: int = 3,
+) -> plt.Figure:
+    """
+    Grid of spectra (e.g., first N predictions).
+    """
+    mu = np.asarray(mu, dtype=float)
+    N = int(mu.shape[0])
+    ncols = max(1, ncols)
+    nrows = max(1, math.ceil(N / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(9 * (ncols / 3), 3.1 * nrows), squeeze=False)
+
+    s_arr = None if sigma is None else np.asarray(sigma, dtype=float)
+    t_arr = None if truth is None else np.asarray(truth, dtype=float)
+
+    for i in range(N):
+        r = i // ncols
+        c = i % ncols
+        ax = axes[r][c]
+        _plot_spectrum_ax(
+            ax,
+            mu[i],
+            sigma=None if s_arr is None else s_arr[i],
+            truth=None if t_arr is None else t_arr[i],
+            wavelength=wavelength,
+            title=titles[i] if titles and i < len(titles) else None,
+        )
+
+    # hide any unused axes
+    for j in range(N, nrows * ncols):
+        rr, cc = j // ncols, j % ncols
+        axes[rr][cc].axis("off")
+
+    fig.tight_layout()
+    return fig
+
+
 # --------------------------------------------------------------------------
 # Uncertainty diagnostics
 # --------------------------------------------------------------------------
+
+def erf(x: np.ndarray | float) -> np.ndarray:
+    """Vectorized error function with SciPy fallback."""
+    try:  # pragma: no cover
+        from scipy.special import erf as _erf  # type: ignore
+
+        return _erf(x)
+    except Exception:
+        # Abramowitz and Stegun approximation (sufficient for plotting)
+        x = np.asarray(x, dtype=float)
+        a1, a2, a3, a4, a5 = (0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429)
+        p = 0.3275911
+        sgn = np.sign(x)
+        xa = np.abs(x)
+        t = 1.0 / (1.0 + p * xa)
+        y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * np.exp(-(xa * xa))
+        return sgn * y
 
 
 def plot_uncertainty_calibration(
@@ -556,28 +621,33 @@ def plot_uncertainty_calibration(
     return fig
 
 
-def erf(x: np.ndarray | float) -> np.ndarray:
-    """Vectorized error function with SciPy fallback."""
+def erfinv(x: np.ndarray | float) -> np.ndarray:
+    """
+    Vectorized inverse error function via SciPy if available, otherwise
+    Winitzki approximation (accurate for |x| < 1).
+    """
     try:  # pragma: no cover
-        from scipy.special import erf as _erf  # type: ignore
+        from scipy.special import erfinv as _erfinv  # type: ignore
 
-        return _erf(x)
+        return _erfinv(x)
     except Exception:
-        # Abramowitz and Stegun approximation (sufficient for plotting)
-        x = np.asarray(x, dtype=float)
-        a1, a2, a3, a4, a5 = (0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429)
-        p = 0.3275911
-        sgn = np.sign(x)
-        xa = np.abs(x)
-        t = 1.0 / (1.0 + p * xa)
-        y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * np.exp(-(xa * xa))
-        return sgn * y
+        pass
+    x = np.asarray(x, dtype=float)
+    # Clip to open interval to avoid log blow-ups at ±1
+    eps = 1e-12
+    x = np.clip(x, -1 + eps, 1 - eps)
+    a = 0.147
+    sgn = np.sign(x)
+    ln = np.log(1.0 - x * x)
+    first = 2.0 / (np.pi * a) + ln / 2.0
+    second = ln / a
+    inside = np.sqrt(np.maximum(first * first - second, 0.0))
+    return sgn * np.sqrt(np.maximum(inside - first, 0.0))
 
 
 # --------------------------------------------------------------------------
 # Frequency-domain helper (optional)
 # --------------------------------------------------------------------------
-
 
 def plot_fft_power(signal: Sequence[float], *, fs: float = 1.0, title: str | None = "FFT Power") -> plt.Figure:
     """
@@ -586,8 +656,8 @@ def plot_fft_power(signal: Sequence[float], *, fs: float = 1.0, title: str | Non
     x = _as_1d(signal)
     x = x[np.isfinite(x)]
     N = x.size
+    fig, ax = plt.subplots(figsize=(7.0, 3.2))
     if N == 0:
-        fig, ax = plt.subplots()
         ax.text(0.5, 0.5, "Empty signal", ha="center", va="center")
         ax.axis("off")
         return fig
@@ -600,7 +670,6 @@ def plot_fft_power(signal: Sequence[float], *, fs: float = 1.0, title: str | Non
     f = np.fft.rfftfreq(N, d=1.0 / fs)  # Hz
     Pxx = (np.abs(X) ** 2) / max(N, 1)
 
-    fig, ax = plt.subplots(figsize=(7.0, 3.2))
     ax.plot(f, Pxx, lw=1.5, color=_PALETTE["blue"])
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Power")
@@ -614,7 +683,6 @@ def plot_fft_power(signal: Sequence[float], *, fs: float = 1.0, title: str | Non
 # Convenience API for batch saving
 # --------------------------------------------------------------------------
 
-
 @dataclass(slots=True)
 class FigureSpec:
     fig: plt.Figure
@@ -622,6 +690,7 @@ class FigureSpec:
     tight: bool = True
     transparent: bool = False
     also_svg: bool = False
+    dpi: Optional[int] = None
 
 
 def save_all(figs: Iterable[FigureSpec]) -> None:
@@ -633,6 +702,7 @@ def save_all(figs: Iterable[FigureSpec]) -> None:
             tight=spec.tight,
             transparent=spec.transparent,
             also_svg=spec.also_svg,
+            dpi=spec.dpi,
         )
 
 
