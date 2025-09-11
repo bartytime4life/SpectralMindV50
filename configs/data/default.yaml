@@ -1,0 +1,30 @@
+# Dataset + dataloaders
+dataset:
+  name: ariel_challenge
+  splits:
+    train: train.csv
+    valid: valid.csv
+    test:  test.csv
+  n_bins: ${oc.env:SM_SUBMISSION_BINS,283}
+  fgs1_bin_scale: 58.0        # weighting reference for FGS1 (bin 0)
+  root: ${paths.data_dir}
+
+loader:
+  train:
+    batch_size: ${oc.env:SM_BATCH,64}
+    num_workers: ${num_workers}
+    shuffle: true
+    pin_memory: true
+    drop_last: true
+  valid:
+    batch_size: ${oc.env:SM_BATCH_EVAL,128}
+    num_workers: ${num_workers}
+    shuffle: false
+    pin_memory: true
+    drop_last: false
+  test:
+    batch_size: ${oc.env:SM_BATCH_EVAL,128}
+    num_workers: ${num_workers}
+    shuffle: false
+    pin_memory: true
+    drop_last: false
