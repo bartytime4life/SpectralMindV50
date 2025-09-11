@@ -1,0 +1,53 @@
+%% SpectraMind V50 — Modules Map (GitHub-compatible Mermaid)
+flowchart TB
+
+  %% ========== Entry & Orchestration ==========
+  subgraph Orchestration["Entry & Orchestration"]
+    UCI["User / CI"]
+    CLI["spectramind CLI<br/>(calibrate · preprocess · train · predict · diagnose · submit)"]
+    HYDRA["Hydra configs<br/>(configs/**/*.yaml + overrides)"]
+    DVCCTL["DVC pipeline<br/>(dvc.yaml)"]
+    UCI --> CLI --> HYDRA --> DVCCTL
+  end
+
+  %% ========== Data & Calibration ==========
+  subgraph Data["Data & Calibration"]
+    RAW["Raw data<br/>(FGS1 + AIRS)"]
+    CAL["Calibration<br/>(ADC · dark · flat · trace · photometry · phase)"]
+    PRE["Preprocessing<br/>(normalization · binning · jitter detrend)"]
+    RAW --> CAL --> PRE
+  end
+
+  %% ========== Modeling ==========
+  subgraph Modeling["Modeling"]
+    ENCF["FGS1 encoder<br/>(Mamba SSM)"]
+    ENCA["AIRS encoder<br/>(CNN/GNN)"]
+    FUS["Fusion<br/>(cross-attention)"]
+    DEC["Decoders<br/>(μ & σ · heteroscedastic GLL)"]
+    PRE --> ENCF
+    PRE --> ENCA
+    ENCF --> FUS
+    ENCA --> FUS
+    FUS --> DEC
+  end
+
+  %% ========== Diagnostics ==========
+  subgraph Diagnostics["Diagnostics"]
+    DIA["GLL metric · FFT · UMAP/t-SNE · SHAP · symbolic checks"]
+    DEC --> DIA
+  end
+
+  %% ========== Submission ==========
+  subgraph Submission["Submission"]
+    SUB["Submission bundle<br/>(CSV · manifest · zip)"]
+    LB["Kaggle leaderboard"]
+    DIA --> SUB --> LB
+  end
+
+  %% ========== Artifacts & Outputs ==========
+  ART["Artifacts & outputs<br/>(DVC-tracked: data, checkpoints, metrics, logs, reports, submissions)"]
+  CAL -.-> ART
+  FUS -.-> ART
+  DEC -.-> ART
+  DIA -.-> ART
+  SUB -.-> ART
