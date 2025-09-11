@@ -17,30 +17,12 @@
       "format": "date-time",
       "description": "UTC timestamp in RFC 3339 format."
     },
-    "nonEmptyString": {
-      "type": "string",
-      "minLength": 1
-    },
-    "name": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
-    },
-    "stage": {
-      "type": "string",
-      "enum": ["train", "predict", "diagnose", "submit"]
-    },
-    "labelsArray": {
-      "type": "array",
-      "items": { "type": ["number", "string", "boolean"] }
-    },
-    "nonNegInt": {
-      "type": "integer",
-      "minimum": 0
-    },
-    "nonNegNumber": {
-      "type": "number",
-      "minimum": 0
-    }
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "name":         { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$" },
+    "stage":        { "type": "string", "enum": ["train", "predict", "diagnose", "submit"] },
+    "labelsArray":  { "type": "array", "items": { "type": ["number", "string", "boolean"] } },
+    "nonNegInt":    { "type": "integer", "minimum": 0 },
+    "nonNegNumber": { "type": "number",  "minimum": 0 }
   },
 
   "required": ["run_id", "model", "datasets", "checks"],
@@ -62,12 +44,12 @@
       "description": "Code/data lineage for reproducibility.",
       "additionalProperties": false,
       "properties": {
-        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+        "git_commit": { "type": "string", "pattern": "^[A-Fa-f0-9]{7,40}$" },
         "git_branch": { "type": "string" },
         "git_remote": { "type": "string" },
-        "dvc_hash": { "type": "string" },
+        "dvc_hash":   { "type": "string" },
         "dataset_id": { "type": "string" },
-        "config_hash": { "type": "string", "description": "Hash of the Hydra/DVC merged config snapshot." }
+        "config_hash":{ "type": "string", "description": "Hash of the Hydra/DVC merged config snapshot." }
       }
     },
 
@@ -81,9 +63,9 @@
       "required": ["arch", "checkpoint"],
       "additionalProperties": false,
       "properties": {
-        "arch": { "$ref": "#/$defs/nonEmptyString" },
+        "arch":       { "$ref": "#/$defs/nonEmptyString" },
         "checkpoint": { "$ref": "#/$defs/nonEmptyString" },
-        "params": { "type": "object", "additionalProperties": true }
+        "params":     { "type": "object", "additionalProperties": true }
       }
     },
 
@@ -95,10 +77,10 @@
         "required": ["name", "n_samples"],
         "additionalProperties": false,
         "properties": {
-          "name": { "$ref": "#/$defs/name" },
-          "split": { "type": "string", "enum": ["train", "val", "test", "holdout"] },
+          "name":      { "$ref": "#/$defs/name" },
+          "split":     { "type": "string", "enum": ["train", "val", "test", "holdout"] },
           "n_samples": { "$ref": "#/$defs/nonNegInt" },
-          "filters": { "type": "object", "additionalProperties": true }
+          "filters":   { "type": "object", "additionalProperties": true }
         }
       }
     },
@@ -108,8 +90,8 @@
       "description": "Key metrics captured during diagnostics.",
       "additionalProperties": { "type": "number" },
       "properties": {
-        "gll": { "type": "number", "description": "Gaussian Log-Likelihood (competition metric)." },
-        "loss": { "type": "number" },
+        "gll":      { "type": "number", "description": "Gaussian Log-Likelihood (competition metric)." },
+        "loss":     { "type": "number" },
         "val_loss": { "type": "number" }
       }
     },
@@ -119,10 +101,10 @@
       "description": "Runtime and resource footprint for traceability.",
       "additionalProperties": false,
       "properties": {
-        "wall_ms": { "$ref": "#/$defs/nonNegInt" },
-        "cpu_ms": { "$ref": "#/$defs/nonNegInt" },
-        "gpu_ms": { "$ref": "#/$defs/nonNegInt" },
-        "max_rss_mb": { "$ref": "#/$defs/nonNegNumber" }
+        "wall_ms":   { "$ref": "#/$defs/nonNegInt" },
+        "cpu_ms":    { "$ref": "#/$defs/nonNegInt" },
+        "gpu_ms":    { "$ref": "#/$defs/nonNegInt" },
+        "max_rss_mb":{ "$ref": "#/$defs/nonNegNumber" }
       }
     },
 
@@ -131,22 +113,22 @@
       "description": "Optional hardware/runtime details to aid reproducibility (pairs with ADR-0003).",
       "additionalProperties": false,
       "properties": {
-        "python": { "type": "string" },
-        "torch": { "type": "string" },
-        "torch_cuda": { "type": "string" },
-        "cudnn": { "type": ["string", "integer"] },
-        "nvidia_smi": { "type": "string" },
-        "cuda_version_txt": { "type": "string" },
-        "device_count": { "$ref": "#/$defs/nonNegInt" },
+        "python":          { "type": "string" },
+        "torch":           { "type": "string" },
+        "torch_cuda":      { "type": "string" },
+        "cudnn":           { "type": ["string", "integer"] },
+        "nvidia_smi":      { "type": "string" },
+        "cuda_version_txt":{ "type": "string" },
+        "device_count":    { "$ref": "#/$defs/nonNegInt" },
         "devices": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "index": { "$ref": "#/$defs/nonNegInt" },
-              "name": { "type": "string" },
-              "capability": { "type": "string" },
+              "index":              { "$ref": "#/$defs/nonNegInt" },
+              "name":               { "type": "string" },
+              "capability":         { "type": "string" },
               "total_memory_bytes": { "$ref": "#/$defs/nonNegInt" }
             }
           }
@@ -176,6 +158,7 @@
           "window": { "type": "string" }
         }
       }
+      /* $comment: JSON Schema cannot enforce freqs.length == power.length without custom keywords */
     },
 
     "umap": {
@@ -204,13 +187,14 @@
           "additionalProperties": false,
           "properties": {
             "n_components": { "type": "integer", "enum": [2, 3] },
-            "n_neighbors": { "type": "integer", "minimum": 2 },
-            "min_dist": { "type": "number", "minimum": 0, "maximum": 1 },
-            "metric": { "type": "string" },
+            "n_neighbors":  { "type": "integer", "minimum": 2 },
+            "min_dist":     { "type": "number", "minimum": 0, "maximum": 1 },
+            "metric":       { "type": "string" },
             "random_state": { "type": "integer" }
           }
         }
       }
+      /* $comment: JSON Schema cannot assert labels.length == points.length without custom keywords */
     },
 
     "shap": {
@@ -238,12 +222,9 @@
       "required": ["nonnegativity", "smoothness", "fgs1_weighting"],
       "properties": {
         "nonnegativity": { "type": "boolean" },
-        "smoothness": { "$ref": "#/$defs/nonNegNumber" },
-        "fgs1_weighting": { "$ref": "#/$defs/nonNegNumber" },
-        "range_ok": {
-          "type": "boolean",
-          "description": "All predicted depths within [0,1] (if evaluated)."
-        }
+        "smoothness":    { "$ref": "#/$defs/nonNegNumber" },
+        "fgs1_weighting":{ "$ref": "#/$defs/nonNegNumber" },
+        "range_ok":      { "type": "boolean", "description": "All predicted depths within [0,1] (if evaluated)." }
       }
     },
 
@@ -267,33 +248,9 @@
         "additionalProperties": false,
         "required": ["path", "sha256"],
         "properties": {
-          "path": { "type": "string" },
-          "sha256": { "$ref": "#/$defs/sha256" },
+          "path":         { "type": "string" },
+          "sha256":       { "$ref": "#/$defs/sha256" },
           "content_type": { "type": "string" }
-        }
-      }
-    }
-  },
-
-  "dependentSchemas": {
-    "scores": {
-      "properties": {
-        "scores": {
-          "type": "object",
-          "properties": {
-            "gll": { "type": "number" }
-          }
-        }
-      }
-    },
-    "checks": {
-      "properties": {
-        "checks": {
-          "type": "object",
-          "properties": {
-            "nonnegativity": { "type": "boolean" },
-            "smoothness": { "type": "number" }
-          }
         }
       }
     }
@@ -335,7 +292,11 @@
         "range_ok": true
       },
       "artifacts": [
-        { "path": "artifacts/reports/diagnostics_dashboard.html", "sha256": "9f2c3a0b4b2e4e5dde55c2e2f1f8b0f05b95d6f52f0f9b9a0c8d829fbf9f6f83" }
+        {
+          "path": "artifacts/reports/diagnostics_dashboard.html",
+          "sha256": "9f2c3a0b4b2e4e5dde55c2e2f1f8b0f05b95d6f52f0f9b9a0c8d829fbf9f6f83",
+          "content_type": "text/html"
+        }
       ]
     }
   ]
