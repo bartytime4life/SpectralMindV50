@@ -21,8 +21,8 @@ flowchart TB
     LOCAL[Local / CI]
     KAGGLE[Kaggle]
   end
-  DVCCTL -.-> LOCAL
-  DVCCTL -.-> KAGGLE
+  DVCCTL -. selects .-> LOCAL
+  DVCCTL -. or .-> KAGGLE
 
   %% ========== External Inputs ==========
   subgraph Inputs[External Inputs]
