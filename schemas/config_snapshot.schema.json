@@ -1,8 +1,64 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spectramind.dev/schemas/hydra_config_snapshot.schema.json",
   "title": "Hydra Config Snapshot",
   "description": "Immutable snapshot of a composed Hydra configuration (env, data, calib, model, training, loss, logger, submission, etc.) used for reproducible SpectraMind V50 runs.",
   "type": "object",
+  "additionalProperties": false,
+
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$",
+      "examples": ["2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"],
+      "title": "SHA-256 hex"
+    },
+    "semver": {
+      "type": "string",
+      "description": "SemVer (optionally prefixed with 'v'), with optional prerelease/build",
+      "pattern": "^(?:v)?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "examples": ["v1.2.3", "1.2.3-rc.1", "v0.1.0+build.5"]
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hydraDefaultItem": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": true,
+          "description": "Hydra defaults mapping entry (e.g., {\"env\": \"kaggle\"}, {\"override hydra/launcher\": \"basic\"})"
+        }
+      ]
+    },
+    "runMeta": {
+      "type": "object",
+      "description": "Run metadata (timestamp, seed, working dir, job name, etc.).",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString", "pattern": "^[A-Za-z0-9_.-]+$" },
+        "dir": { "$ref": "#/$defs/nonEmptyString" },
+        "seed": { "type": "integer", "minimum": 0 },
+        "time": { "type": "string", "format": "date-time" },
+        "user": { "type": "string" },
+        "job_name": { "type": "string" }
+      },
+      "required": ["id", "dir"]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional provenance info (git commit, DVC hash, dataset ID).",
+      "properties": {
+        "git_commit": { "type": "string", "pattern": "^[A-Fa-f0-9]{7,40}$" },
+        "dvc_hash": { "type": "string" },
+        "dataset_id": { "type": "string" }
+      }
+    }
+  },
 
   "properties": {
     "_target_": {
@@ -12,33 +68,23 @@
 
     "defaults": {
       "type": "array",
-      "items": { "type": ["string", "object"] },
-      "description": "Hydra defaults list capturing config composition order."
+      "description": "Hydra defaults list capturing config composition order.",
+      "items": { "$ref": "#/$defs/hydraDefaultItem" }
     },
 
-    "run": {
-      "type": "object",
-      "description": "Run metadata (timestamp, seed, working dir, job name, etc.).",
-      "properties": {
-        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_.-]+$" },
-        "dir": { "type": "string" },
-        "seed": { "type": "integer", "minimum": 0 },
-        "time": { "type": "string", "format": "date-time" },
-        "user": { "type": "string" }
-      },
-      "required": ["id", "dir"]
-    },
+    "run": { "$ref": "#/$defs/runMeta" },
 
     "env": {
       "type": "object",
       "description": "Environment profile (local, kaggle, ci, debug).",
+      "additionalProperties": true,
       "properties": {
         "name": { "type": "string" },
-        "device": { "enum": ["cpu", "cuda"] },
+        "device": { "enum": ["cpu", "cuda", "mps"] },
         "num_workers": { "type": "integer", "minimum": 0 },
-        "seed": { "type": "integer", "minimum": 0 }
-      },
-      "additionalProperties": true
+        "seed": { "type": "integer", "minimum": 0 },
+        "precision": { "type": "string", "enum": ["32", "16-mixed", "bf16-mixed", "64"] }
+      }
     },
 
     "data": {
@@ -91,34 +137,37 @@
 
     "overrides": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Command-line overrides applied at runtime."
+      "description": "Command-line overrides applied at runtime.",
+      "items": { "$ref": "#/$defs/nonEmptyString" }
     },
 
     "hash": {
-      "type": "string",
-      "pattern": "^[a-fA-F0-9]{64}$",
-      "description": "SHA256 hash of the snapshot for lineage tracking."
+      "$ref": "#/$defs/sha256",
+      "description": "SHA-256 hash of the snapshot for lineage tracking."
     },
 
     "version": {
-      "type": "string",
-      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9]+)?$",
-      "description": "Semantic version of the repo/config snapshot."
+      "$ref": "#/$defs/semver",
+      "description": "Semantic version of the repo/config snapshot (accepts with or without leading 'v')."
     },
 
-    "provenance": {
-      "type": "object",
-      "description": "Optional provenance info (git commit, DVC hash, dataset ID).",
-      "properties": {
-        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
-        "dvc_hash": { "type": "string" },
-        "dataset_id": { "type": "string" }
-      },
-      "additionalProperties": false
-    }
+    "provenance": { "$ref": "#/$defs/provenance" }
   },
 
   "required": ["defaults", "run", "data", "model", "training"],
-  "additionalProperties": false
+
+  "examples": [
+    {
+      "defaults": ["env@env: kaggle", "data: kaggle", {"override hydra/job_logging": "disabled"}],
+      "run": {"id": "2025-09-11T17-22-03Z", "dir": "artifacts/runs/20250911_172203", "seed": 42, "time": "2025-09-11T17:22:03Z"},
+      "env": {"name": "kaggle", "device": "cuda", "num_workers": 2},
+      "data": {"root": "/kaggle/input/ariel-data-challenge-2025"},
+      "model": {"name": "spectramind_v50"},
+      "training": {"epochs": 5, "batch_size": 64},
+      "overrides": ["+env=kaggle", "training.batch_size=64"],
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "version": "v0.3.1",
+      "provenance": {"git_commit": "1a2b3c4", "dataset_id": "neurips-2025-ariel"}
+    }
+  ]
 }
