@@ -1,0 +1,90 @@
+from graphviz import Digraph
+import os
+
+# Ensure directory exists
+out_dir = "/mnt/data/assets/diagrams"
+os.makedirs(out_dir, exist_ok=True)
+
+g = Digraph("provenance", format="svg")
+g.attr(rankdir="LR", fontsize="12", fontname="Helvetica")
+
+# Legend
+with g.subgraph(name="cluster_legend") as c:
+    c.attr(label="Legend", style="rounded", color="lightgrey", fontsize="11")
+    c.node("L_IMPL", "Solid edge = Implemented in code", shape="plaintext")
+    c.node("L_REF", "Dashed edge = Referenced / influenced", shape="plaintext")
+    c.node("L_INTRO", "Bold edge = Introduced in release", shape="plaintext")
+
+# ADRs cluster
+with g.subgraph(name="cluster_adrs") as c:
+    c.attr(label="Architecture Decision Records (ADRs)", style="rounded", color="lightgrey")
+    c.node("ADR0000", "ADR 0000\nTemplate")
+    c.node("ADR0001", "ADR 0001\nChoose Hydra + DVC")
+    c.node("ADR0002", "ADR 0002\nComposite Physics-Informed Loss")
+    c.node("ADR0004", "ADR 0004\nDual Encoder Fusion\n(FGS1 + AIRS)")
+
+# Changelog cluster
+with g.subgraph(name="cluster_changelog") as c:
+    c.attr(label="Changelog Releases", style="rounded", color="lightgrey")
+    c.node("C0001", "v0.0.1\n(2025-09-01)")
+    c.node("C0002", "v0.0.2\n(2025-09-02)")
+    c.node("C0003", "v0.0.3\n(2025-09-03)")
+    c.node("C0100", "v0.1.0\n(2025-09-05)")
+    c.node("C0110", "v0.1.1\n(2025-09-06)")
+
+# Code cluster
+with g.subgraph(name="cluster_code") as c:
+    c.attr(label="Code Modules", style="rounded", color="lightgrey")
+    c.node("CLI", "src/spectramind/cli.py")
+    c.node("CFG", "configs/**")
+    c.node("DVC", "dvc.yaml")
+    c.node("ENC_F", "src/spectramind/models/encoders/fgs1_encoder.py")
+    c.node("ENC_A", "src/spectramind/models/encoders/airs_encoder.py")
+    c.node("FUS", "src/spectramind/models/fusion_xattn.py")
+    c.node("DEC", "src/spectramind/models/decoder.py")
+    c.node("LOSS", "src/spectramind/losses/composite.py")
+    c.node("CAL_LOSS", "src/spectramind/losses/calibration.py")
+    c.node("DATA", "src/spectramind/data/datamodule.py")
+
+# Provenance edges (ADRs -> Code)
+g.edge("ADR0001", "CLI", style="dashed")
+g.edge("ADR0001", "CFG", style="solid")
+g.edge("ADR0001", "DVC", style="solid")
+
+g.edge("ADR0004", "ENC_F", style="solid")
+g.edge("ADR0004", "ENC_A", style="solid")
+g.edge("ADR0004", "FUS", style="solid")
+g.edge("ADR0004", "DEC", style="dashed")
+
+g.edge("ADR0002", "LOSS", style="solid")
+g.edge("ADR0002", "CAL_LOSS", style="dashed")
+
+# Changelog edges (Release -> Code introduced/changed)
+g.edge("C0001", "CLI", penwidth="2")       # introduced
+g.edge("C0001", "CFG", penwidth="2")
+g.edge("C0001", "DVC", penwidth="2")
+
+g.edge("C0002", "ENC_F", penwidth="2")
+g.edge("C0002", "ENC_A", penwidth="2")
+
+g.edge("C0003", "FUS", penwidth="2")
+g.edge("C0003", "DEC", penwidth="2")
+
+g.edge("C0100", "LOSS", penwidth="2")
+g.edge("C0100", "CAL_LOSS", penwidth="2")
+
+g.edge("C0110", "DATA", penwidth="2")
+
+# Cross-links: ADRs referenced by releases
+g.edge("ADR0001", "C0001", style="dashed")
+g.edge("ADR0004", "C0003", style="dashed")
+g.edge("ADR0002", "C0100", style="dashed")
+
+# Connect data flow-ish
+g.edge("CLI", "CFG", style="dotted")
+g.edge("CLI", "DVC", style="dotted")
+g.edge("DATA", "ENC_F", style="dotted")
+g.edge("DATA", "ENC_A", style="dotted")
+g.edge("ENC_F", "FUS", style="dotted")
+g.edge("ENC_A", "FUS", style="dotted")
+g.edge("FUS", "DEC
