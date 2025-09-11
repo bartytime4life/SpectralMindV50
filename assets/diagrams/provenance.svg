@@ -87,4 +87,10 @@ g.edge("DATA", "ENC_F", style="dotted")
 g.edge("DATA", "ENC_A", style="dotted")
 g.edge("ENC_F", "FUS", style="dotted")
 g.edge("ENC_A", "FUS", style="dotted")
-g.edge("FUS", "DEC
+g.edge("FUS", "DEC", style="dotted")
+g.edge("DEC", "LOSS", style="dotted")
+
+out_path = os.path.join(out_dir, "provenance")
+g.render(out_path)
+
+print(out_path + ".svg")
