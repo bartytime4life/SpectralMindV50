@@ -23,6 +23,9 @@ CALIB_CANDIDATE_DIRS = (
     "artifacts/calib",
 )
 
+# Mark all tests in this module as integration
+pytestmark = pytest.mark.integration
+
 
 # ----------------------------------------------------------------------------- #
 # CLI discovery & runner utilities
@@ -99,10 +102,6 @@ def _first_working_cli() -> Optional[List[str]]:
         if code == 0:
             return base
     return None
-
-
-# Mark all tests in this module as integration
-pytestmark = pytest.mark.integration
 
 
 # ----------------------------------------------------------------------------- #
