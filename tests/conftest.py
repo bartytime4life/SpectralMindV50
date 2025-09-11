@@ -1,4 +1,3 @@
-# tests/conftest.py
 # =============================================================================
 # SpectraMind V50 — Test Bootstrap (pytest)
 # -----------------------------------------------------------------------------
@@ -51,6 +50,9 @@ os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 os.environ.setdefault("HYDRA_FULL_ERROR", "1")
 os.environ.setdefault("HYDRA_RUN_DIR", ".")
 
+# Make Matplotlib honor the non-interactive backend even if imported earlier
+os.environ.setdefault("DISPLAY", "")
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -69,8 +71,10 @@ def _find_repo_root(start: Optional[Path] = None) -> Path:
 
 def _add_src_to_syspath(repo_root: Path) -> None:
     src = repo_root / "src"
-    if src.exists() and str(src) not in sys.path:
-        sys.path.insert(0, str(src))
+    if src.exists():
+        p = str(src)
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
 
 def _pin_threads() -> None:
@@ -98,16 +102,16 @@ def repo_root() -> Path:
 def _session_env(repo_root: Path) -> None:
     """
     Session-level environment hygiene:
-      • Ensure PYTHONHASHSEED set (deterministic hashing)
+      • Ensure PYTHONHASHSEED set (deterministic hashing for subprocesses)
       • Point XDG-ish caches inside repo/.pytest_cache
       • Default to offline unless explicitly allowed
+      • Stable NumPy printing for readable diffs
     """
     os.environ.setdefault("PYTHONHASHSEED", "0")
     cache_base = (repo_root / ".pytest_cache").resolve()
     cache_base.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("XDG_CACHE_HOME", str(cache_base))
     os.environ.setdefault("SPECTRAMIND_ALLOW_NET", "0")
-    # Nicer numpy printing for debugging failures
     np.set_printoptions(precision=6, suppress=True, linewidth=140)
 
 
@@ -130,14 +134,19 @@ def seeded(rng_seed: int) -> None:
     np.random.seed(rng_seed)
     os.environ["PYTHONHASHSEED"] = str(rng_seed)
     if torch is not None:
-        torch.manual_seed(rng_seed)
-        if torch.cuda.is_available():  # pragma: no cover (gpu not in CI)
-            torch.cuda.manual_seed_all(rng_seed)
         try:
-            torch.use_deterministic_algorithms(True)  # type: ignore[attr-defined]
-            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+            torch.manual_seed(rng_seed)
+            if torch.cuda.is_available():  # pragma: no cover (gpu not in CI)
+                torch.cuda.manual_seed_all(rng_seed)
+            # Prefer deterministic kernels where supported
+            try:
+                torch.use_deterministic_algorithms(True)  # type: ignore[attr-defined]
+                os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+            except Exception:
+                pass
         except Exception:
-            pass  # older torch / CPU-only
+            # Torch not fully available; ignore
+            pass
 
 
 @pytest.fixture
@@ -146,11 +155,11 @@ def tmp_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Per-test isolated working directory:
       • chdir to it (Hydra run dir lives here)
       • standard artifacts subfolders
+      • point Matplotlib cache into test-local folder
     """
     monkeypatch.chdir(tmp_path)
     for d in ["artifacts", "outputs", "logs", "cache"]:
         (tmp_path / d).mkdir(parents=True, exist_ok=True)
-    # Matplotlib cache inside tmp to avoid cross-test contention
     (tmp_path / "cache" / "matplotlib").mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(tmp_path / "cache" / "matplotlib"))
     return tmp_path
@@ -166,19 +175,42 @@ def no_net(monkeypatch: pytest.MonkeyPatch) -> None:
         return
 
     real_socket = socket.socket
+    real_create_connection = socket.create_connection
+    real_getaddrinfo = socket.getaddrinfo
+
+    allow_hosts = {"127.0.0.1", "::1", "localhost"}
 
     class _BlockedSocket(socket.socket):  # type: ignore[misc]
         def connect(self, address):  # type: ignore[override]
-            host, *_ = address if isinstance(address, tuple) else (address,)
-            allow = {"127.0.0.1", "::1", "localhost"}
-            if isinstance(host, str) and (host in allow or host.startswith("/")):
+            host = address[0] if isinstance(address, tuple) else address
+            if isinstance(host, str) and (host in allow_hosts or host.startswith("/")):
                 return real_socket.connect(self, address)
             raise RuntimeError(
                 f"Network access blocked during tests (attempted {address}). "
                 "Set SPECTRAMIND_ALLOW_NET=1 to allow."
             )
 
+    def _blocked_create_connection(address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) else address
+        if isinstance(host, str) and (host in allow_hosts or host.startswith("/")):
+            return real_create_connection(address, *args, **kwargs)
+        raise RuntimeError(
+            f"Network access blocked during tests (attempted {address}). "
+            "Set SPECTRAMIND_ALLOW_NET=1 to allow."
+        )
+
+    def _guarded_getaddrinfo(host, *args, **kwargs):
+        if isinstance(host, str) and (host in allow_hosts):
+            return real_getaddrinfo(host, *args, **kwargs)
+        # Some libraries resolve first; deny early
+        raise RuntimeError(
+            f"DNS resolution blocked during tests for host={host!r}. "
+            "Set SPECTRAMIND_ALLOW_NET=1 to allow."
+        )
+
     monkeypatch.setattr(socket, "socket", _BlockedSocket, raising=True)
+    monkeypatch.setattr(socket, "create_connection", _blocked_create_connection, raising=True)
+    monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo, raising=True)
 
 
 @pytest.fixture
@@ -205,10 +237,13 @@ def torch_device() -> str:
     if override:
         return override
     if torch is not None:
-        if torch.cuda.is_available():  # pragma: no cover
-            return "cuda:0"
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():  # pragma: no cover
-            return "mps"
+        try:
+            if torch.cuda.is_available():  # pragma: no cover
+                return "cuda:0"
+            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():  # pragma: no cover
+                return "mps"
+        except Exception:
+            pass
     return "cpu"
 
 
@@ -248,7 +283,7 @@ def cli_runner(repo_root: Path):
     # Import under repo_root to pick up local package
     with _temporarily_cwd(repo_root):
         try:
-            # Your project exposes the Typer app as `cli_app` (not `app`)
+            # Project exposes the Typer app as `cli_app`
             from spectramind.cli import cli_app  # type: ignore
         except Exception as e:  # pragma: no cover
             pytest.skip(f"CLI not available: {e}")
@@ -257,6 +292,7 @@ def cli_runner(repo_root: Path):
 
     class _Runner:
         def invoke(self, args: list[str] | tuple[str, ...], **kwargs):
+            # Typer runner expects list of strings
             return runner.invoke(cli_app, list(args), **kwargs)
 
     return _Runner()
