@@ -1,0 +1,20 @@
+# Instrument calibration / extraction options
+fgs1:
+  detrend: median
+  window: 301
+  poly_order: 3
+
+airs:
+  background: column_median     # or: poly_k
+  poly_k: 2
+  normalize_profile: true       # Horne-style profile norm
+
+trace:
+  multi_order: false
+  center_model: polynomial
+  width_model: polynomial
+  width_min_px: 1.2
+
+extraction:
+  method: optimal               # optimal|box
+  variance_floor: 1e-10         # numerical stability
