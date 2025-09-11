@@ -1,41 +1,62 @@
 # configs/data/kaggle.yaml
 # ======================================================================
 # Kaggle Data Profile — SpectraMind V50
-# ======================================================================
-# Defines dataset configuration for Kaggle kernels. This profile
-# assumes the competition dataset is mounted at:
-#   /kaggle/input/ariel-data-challenge-2025/
-#
-# Usage:
-#   python -m spectramind.train +data=kaggle +env=kaggle
-#
-# Keys:
-#   _target_        : Python path to the datamodule implementation
-#   root            : base path to Kaggle dataset mount
-#   train_csv       : training labels / metadata
-#   test_csv        : test set metadata
-#   train_star_info : training star/planet info
-#   test_star_info  : test star/planet info
-#   adc_info        : ADC calibration parameters
-#   axis_info       : Wavelength/axis metadata
-#   num_workers     : DataLoader worker count (defaults from env)
+# ----------------------------------------------------------------------
+# Use with:
+#   python -m spectramind.train +env=kaggle +data=kaggle
+# Assumptions:
+#   • Competition data is attached at /kaggle/input/ariel-data-challenge-2025
+#   • Writes go to /kaggle/working/*
 # ======================================================================
 
 _target_: spectramind.data.datamodule.ArielDataModule
 
-root: /kaggle/input/ariel-data-challenge-2025
-train_csv: ${data.root}/train.csv
-test_csv: ${data.root}/test.csv
-train_star_info: ${data.root}/train_star_info.csv
-test_star_info: ${data.root}/test_star_info.csv
-adc_info: ${data.root}/adc_info.csv
-axis_info: ${data.root}/axis_info.parquet
+# ------------------------------
+# Dataset roots & metadata
+# ------------------------------
+root: ${paths.data_dir, /kaggle/input/ariel-data-challenge-2025}
 
-# Kaggle kernels don’t usually ship splits.yaml, so disable by default.
+# Canonical CSV/metadata paths (fail fast if missing)
+train_csv:        ${.root}/train.csv
+test_csv:         ${.root}/test.csv
+train_star_info:  ${.root}/train_star_info.csv
+test_star_info:   ${.root}/test_star_info.csv
+adc_info:         ${.root}/adc_info.csv
+axis_info:        ${.root}/axis_info.parquet
+
+# Optional external split file (most Kaggle runs won’t have this)
 splits: null
 
-# DataLoader settings (resolved from env/kaggle.yaml)
-num_workers: ${env.num_workers}
-batch_size: 32
-pin_memory: true
-persistent_workers: true
+# Spectral layout / metric weighting
+n_bins: ${oc.env:SM_SUBMISSION_BINS,283}
+fgs1_bin_idx: 0
+fgs1_bin_scale: ${oc.env:SM_FGS1_WEIGHT,58.0}
+
+# ------------------------------
+# Dataloaders
+# ------------------------------
+batch_size: ${oc.env:SM_BATCH,32}
+eval_batch_size: ${oc.env:SM_BATCH_EVAL,128}
+
+# Resolved from env/kaggle.yaml; safe defaults for Kaggle containers
+num_workers: ${num_workers,2}
+pin_memory: ${oc.env:SM_PIN_MEMORY,true}
+persistent_workers: ${oc.env:SM_PERSISTENT_WORKERS,false}
+prefetch_factor: ${oc.env:SM_PREFETCH,2}
+drop_last_train: true
+
+# If you enable DDP, the datamodule can auto-switch sampler
+sampler:
+  type: ${oc.env:SM_SAMPLER,none}   # none|distributed
+  seed: ${seed,42}
+
+# ------------------------------
+# Debug / validation guardrails
+# ------------------------------
+debug:
+  validate_paths: ${oc.env:SM_DATA_VALIDATE,true}  # stat() each declared file
+  strict_headers: ${oc.env:SM_DATA_STRICT,false}   # enforce presence of minimal headers
+  print_first_rows: ${oc.env:SM_DATA_HEAD,0}       # >0 prints N preview rows per split
+  fail_on_missing: ${oc.env:SM_DATA_FAIL,true}     # raise if any file is missing
+  headers:
+    required: ["sample_id"]
