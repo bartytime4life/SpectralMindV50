@@ -2,29 +2,65 @@
 # ======================================================================
 # Band Coherence Loss — SpectraMind V50
 # ======================================================================
-# Penalizes incoherent jumps across adjacent wavelength bins in μ/σ
-# predictions, enforcing physically plausible spectral structure.
+# Penalizes incoherent local jumps across adjacent wavelength bins in the
+# predicted spectrum (μ) and/or uncertainty (σ). Encourages smooth, locally
+# consistent structure while allowing real spectral features to remain.
 #
 # Usage:
+#   # stand-alone
 #   python -m spectramind.train +loss=band_coherence
 #
+#   # composite (recommended; see ADR 0002 Composite Loss)
+#   python -m spectramind.train loss=composite \
+#     loss.params.band_coherence.window=7 \
+#     loss.params.band_coherence.mode=l2
+#
 # Keys:
-#   _target_     : Python path to the loss implementation
-#   weight       : scalar multiplier for this regularizer
-#   mode         : coherence metric ("l2", "cosine", "corr")
-#   window       : sliding window size (in bins)
-#   normalize    : normalize penalty by variance magnitude
-#   reduction    : aggregation across batch ("mean", "sum", "none")
-#   log_histograms: whether to log coherence statistics per epoch
+#   _target_        : Python path to implementation
+#   weight          : scalar weight for this regularizer (λ_band)
+#   mode            : "l2" | "cosine" | "corr" (local coherence metric)
+#   window          : odd integer (#bins in sliding window, incl. center)
+#   apply_to        : ["mu"] or ["mu","sigma"] — which tensors to penalize
+#   exclude_bins    : indices to exclude from coherence (e.g., FGS1=0)
+#   normalize       : scale-invariant penalty (normalize by local variance)
+#   center_weighting: "uniform" | "hann" | "tri" (neighbor weights)
+#   epsilon         : numerical stability for norms/variance
+#   reduction       : "mean" | "sum" | "none"
+#   log_histograms  : log per-epoch coherence stats (for diagnostics)
+#   schedule        : optional weight annealing over epochs
 # ======================================================================
 
+# NOTE: if your codebase locates this in `spectramind.losses.priors`,
+# update the target accordingly. Keep one canonical path project-wide.
 _target_: spectramind.losses.band_coherence.BandCoherenceLoss
 
-weight: 0.05           # relative contribution to total composite loss
-mode: "l2"             # ["l2", "cosine", "corr"]
-window: 7              # number of neighboring bins for local coherence
-normalize: true        # enforce scale-invariance
-reduction: "mean"      # ["mean", "sum", "none"]
+# ----- Core weighting -----
+weight: 0.10               # stronger by default; tune in composite via loss.weights.band_coherence
 
-# Debug/diagnostics
-log_histograms: false  # set true to log per-epoch coherence histograms
+# ----- Coherence metric & windowing -----
+mode: "l2"                 # ["l2", "cosine", "corr"]
+window: 7                  # odd int (>=3). Effective half-width = (window-1)/2
+
+# ----- What to regularize -----
+apply_to: ["mu"]           # add "sigma" to additionally regularize per-bin uncertainty
+exclude_bins: [0]          # exclude FGS1 broadband bin from spectral coherence
+
+# ----- Normalization & numerics -----
+normalize: true            # normalize penalties by local variance (scale-invariant)
+center_weighting: "hann"   # ["uniform","hann","tri"] (Hann reduces edge artifacts & over-penalization)
+epsilon: 1.0e-8            # numerical stability for norms/cov/var
+
+# ----- Aggregation -----
+reduction: "mean"          # ["mean","sum","none"]
+
+# ----- Logging / debug -----
+log_histograms: false      # set true to log per-epoch local coherence histograms
+
+# ----- Optional annealing (enable to avoid over-constraining early training) -----
+schedule:
+  enabled: false
+  kind: "cosine"           # ["linear","cosine"]
+  start_weight: 0.0
+  end_weight: ${loss.weight}   # resolves to `weight` defined above
+  warmup_epochs: 2
+  total_epochs: 50
