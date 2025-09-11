@@ -64,12 +64,13 @@ Adopt a **multi-layer reproducibility standard**:
 
 ```mermaid
 flowchart TD
-  A[Spectramind CLI] --> B[Hydra Config Snapshot\n(YAML + SHA256)]
-  A --> C[Run Manifest (JSONL)]
-  A --> D[DVC Stages (dvc.yaml)]
-  D --> E[Artifacts\n(calib, ckpt, preds, submissions)]
-  C --> F[Audit Trail\n(JSONL + hashes)]
-  G[CI/CD] --> H[SBOM (SPDX + CycloneDX)]
+  A["spectramind CLI"] --> B["Hydra Config Snapshot (YAML + SHA256)"]
+  A --> C["Run Manifest (JSONL)"]
+  A --> D["DVC Stages (dvc.yaml)"]
+  D --> E["Artifacts (calib, ckpt, preds, submissions)"]
+  C --> F["Audit Trail (JSONL + hashes)"]
+  G["CI/CD"] --> H["SBOM (SPDX + CycloneDX)"]
+
 
 
 
