@@ -1,34 +1,84 @@
 # configs/loss/nonneg.yaml
 # ---------------------------------------------------------------------
-# SpectraMind V50 — Non-Negativity Loss
+# SpectraMind V50 — Non-Negativity Loss (Physics-Informed Prior)
 # ---------------------------------------------------------------------
-# Enforces physical plausibility of exoplanet spectra by penalizing
-# negative transit depths (μ predictions). All predicted bins must be
-# ≥ 0, since absorption cannot be negative.
+# Enforces physical plausibility by penalizing negative transit depths μ.
+# Optionally enforces bounds on σ as a soft constraint (μ is the priority).
 #
-# References:
-# - NeurIPS 2025 Ariel Data Challenge docs:contentReference[oaicite:2]{index=2}
-# - SpectraMind V50 design philosophy (physics-informed loss terms):contentReference[oaicite:3]{index=3}
+# Usage:
+#   # standalone
+#   python -m spectramind.train +loss=nonneg
+#   # via composite (recommended)
+#   python -m spectramind.train loss=composite \
+#     loss.components.nonneg.weight=0.05 \
+#     loss.components.nonneg.mu.penalty=l2
 # ---------------------------------------------------------------------
 
-_target_: spectramind.losses.nonneg.NonNegativityLoss
+_target_: spectramind.losses.nonneg.NonNegLoss
 
-# Loss weighting factor (relative to other symbolic loss terms).
-# Typical range: 0.01 – 1.0
-weight: 0.1
+# Scalar weight for this prior within the composite loss
+weight: 0.10
 
-# Penalty mode: "relu" (default) applies ReLU(x<0) penalty,
-# "square" penalizes squared negative depth, "absolute" penalizes |x|.
-mode: "relu"
+# ---------------------------------------------------------------------
+# μ (mean spectrum) non-negativity settings
+# ---------------------------------------------------------------------
+mu:
+  enabled: true
+  # Margin allows a tiny tolerance (e.g. from rounding) before penalizing.
+  # Effective constraint: μ >= -margin
+  margin: 0.0
 
-# Bin mask (optional): allow selective enforcement (e.g. ignore masked bins).
-# Default: null → enforce across all 283 bins.
+  # Penalty: "relu", "l2", "l1", "hinge"
+  #   relu  : sum(ReLU(-(μ + margin)))             [simple, fast]
+  #   l2    : sum((ReLU(-(μ + margin)))^2)         [smooth, stronger]
+  #   l1    : sum(|ReLU(-(μ + margin))|)           [sparse]
+  #   hinge : sum(max(0, -(μ + margin) - hinge_delta))
+  penalty: "l2"
+  hinge_delta: 0.0
+
+  # Optional per-bin exclusions (e.g., none for μ)
+  exclude_bins: []
+
+# ---------------------------------------------------------------------
+# σ (uncertainty) soft bounds (optional)
+# ---------------------------------------------------------------------
+sigma:
+  enabled: false          # leave false if σ is already clamped in GLL
+  lower_margin: 0.0       # enforce σ >= -lower_margin (≈ nonnegative σ)
+  upper_margin: null      # set to a float to softly upper-bound σ (e.g. 1e2)
+  penalty: "l2"           # shape for violations
+  hinge_delta: 0.0
+  exclude_bins: []
+
+# ---------------------------------------------------------------------
+# Bin-level masking and semantics
+# ---------------------------------------------------------------------
+# Global mask (boolean or index list); leave null to apply to all bins.
 mask: null
+# FGS1 considerations: non-negativity is physical for all spectral bins
+# (including broadband). If you need to exempt FGS1, do it explicitly:
+# mask: {"exclude": [0]}   # or set mu.exclude_bins: [0]
 
-# Reduction strategy: "mean" (default), "sum", or "none".
-# "mean" keeps loss scale invariant to batch size.
-reduction: "mean"
+# ---------------------------------------------------------------------
+# Numerics & aggregation
+# ---------------------------------------------------------------------
+epsilon: 1.0e-8           # numeric jitter for stable ReLU/hinge evaluation
+reduction: "mean"         # ["mean","sum","none"]
 
-# Debugging options
-log_violations: true   # log if any spectrum has negative values
-violation_threshold: -1e-8  # tolerance for floating point rounding
+# ---------------------------------------------------------------------
+# Optional annealing (avoid over-constraint early in training)
+# ---------------------------------------------------------------------
+schedule:
+  enabled: false
+  kind: "cosine"          # ["linear","cosine"]
+  start_factor: 0.0
+  end_factor: 1.0
+  warmup_epochs: 2
+  total_epochs: 50
+
+# ---------------------------------------------------------------------
+# Debug / logging
+# ---------------------------------------------------------------------
+log_violations: true      # summarize negative-μ (and σ if enabled) per epoch
+violation_threshold: -1.0e-8  # tolerance for floating-point round-off
+log_histograms: false     # log histograms of violations (if your logger supports it)
