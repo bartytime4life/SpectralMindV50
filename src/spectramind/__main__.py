@@ -40,12 +40,10 @@ _enable_rich_tracebacks()
 # ---- Unicode/stdio hygiene (Windows cmd / Kaggle consoles) ------------------
 def _force_utf8_stdio() -> None:
     try:
-        # Python 3.7+ on Windows: prefer UTF-8 console if possible
-        if os.name == "nt":
-            import msvcrt  # type: ignore  # noqa: F401
-            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        # Python 3.7+ has .reconfigure() on TextIOBase
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")   # type: ignore[attr-defined]
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:
         # Best-effort only
         pass
@@ -76,22 +74,25 @@ def _run_cli() -> int:
         from spectramind import cli  # type: ignore
     except Exception as e:
         # Keep the message crisp and single-line for CI logs
-        sys.stderr.write(f"error: failed to import spectramind.cli: {e}\n")
+        sys.stderr.write(
+            "error: failed to import spectramind.cli: "
+            f"{e}. Is SpectraMind installed? e.g. `pip install spectramind` or your local editable install.\n"
+        )
         return 1
 
-    # Helper to call a callable and normalize exit codes
     def _invoke(fn: Callable[[], object]) -> int:
+        """Call a (possibly Typer) callable and normalize exit codes."""
         try:
             rv = fn()
             # Typer/Click usually raises SystemExit; if not, coerce to 0
             return 0 if rv is None else 0
         except SystemExit as se:
-            # Click/Typer normal path
+            # Respect explicit SystemExit codes
+            code = getattr(se, "code", 0)
             try:
-                code = int(getattr(se, "code", 0) or 0)
+                return int(code) if code is not None else 0
             except Exception:
-                code = 1
-            return code
+                return 1
         except KeyboardInterrupt:
             sys.stderr.write("interrupted: keyboard interrupt\n")
             return 130  # standard SIGINT exit
@@ -114,7 +115,6 @@ def _run_cli() -> int:
     # Fallback: Typer app() (callable)
     app_obj = getattr(cli, "app", None)  # type: ignore[attr-defined]
     if callable(app_obj):
-        # Typer app is itself a callable that consumes argv and may raise SystemExit
         return _invoke(app_obj)  # type: ignore[call-arg]
 
     sys.stderr.write("error: spectramind.cli has neither 'main' nor 'app'\n")
