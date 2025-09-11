@@ -1,0 +1,136 @@
+%% ------------------------------------------------------------------
+%% SpectraMind V50 — End-to-End Pipeline
+%% File: assets/diagrams/pipeline.mmd
+%% ------------------------------------------------------------------
+%% Legend:
+%%  • Rectangles  = executable stages (CLI + DVC)
+%%  • Cylinders   = data/artifact stores (DVC-tracked where noted)
+%%  • Parallelogr = external inputs/outputs
+%%  • Subgraphs   = logical groupings (Env, Pipeline, Artifacts)
+%%  • Notes       = cache/repro hints
+%% ------------------------------------------------------------------
+
+flowchart TB
+  %% ========== Entry & Orchestration ==========
+  subgraph Entry[Entry & Orchestration]
+    direction TB
+    UCI[[User / CI]]
+    CLI["spectramind CLI (Typer)<br/>calibrate | preprocess | train | predict | diagnose | submit"]
+    HYDRA["Hydra configs (configs/**/*.yaml)<br/>+ overrides (e.g., +env=kaggle)"]
+    DVCCTL["DVC pipeline (dvc.yaml)<br/>orchestration & caching"]
+    UCI --> CLI --> HYDRA --> DVCCTL
+  end
+
+  %% ========== Environment ==========
+  subgraph Env[Runtime Environment]
+    direction TB
+    LOCAL["Local / CI (online DVC remote)"]
+    KAGGLE["Kaggle (offline, pre-mounted inputs)"]
+  end
+  DVCCTL -. selects .-> LOCAL
+  DVCCTL -. or .-> KAGGLE
+
+  %% ========== External Inputs ==========
+  subgraph Inputs[External Inputs]
+    direction TB
+    RAW[/"Ariel dataset (Kaggle input mount)\n/kaggle/input/ariel-data-challenge-2025/"/]
+    CFG[/".yaml configs (Hydra)"/]
+  end
+  RAW --> Calib
+  CFG --> Calib
+  CFG --> Prep
+  CFG --> Train
+  CFG --> Predict
+  CFG --> Diagnose
+  CFG --> Submit
+
+  %% ========== DVC Stages ==========
+  subgraph Pipe[Reproducible Pipeline (DVC stages)]
+    direction TB
+
+    Calib["calibrate<br/>(FGS1 & AIRS detector calibration,<br/>ADC gain/offset, dark/flat, CDS, trace/phase)"]
+    Prep["preprocess<br/>(align, bin, detrend/jitter removal,<br/>feature extraction → model-ready tensors)"]
+    Train["train<br/>(dual encoders: FGS1 + AIRS; fusion; μ/σ heads;<br/>composite physics-informed loss)"]
+    Predict["predict<br/>(inference on test; produce μ/σ over 283 bins)"]
+    Diagnose["diagnose<br/>(metrics, FFT/UMAP, SHAP, symbolic checks;<br/>HTML/Markdown report)"]
+    Submit["submit<br/>(package submission.csv + manifest)"]
+
+    Calib --> Prep --> Train --> Predict --> Diagnose --> Submit
+
+    %% Notes on caching & granularity
+    note right of Calib
+      DVC cache: reuses calibrated outputs
+      unless raw inputs or algorithm config change
+    end
+    note right of Prep
+      Separate stage to avoid re-running
+      full calibration when only features change
+    end
+    note right of Train
+      Checkpoints & metrics are versioned
+      by code+config+data hash
+    end
+  end
+
+  %% ========== Artifacts & Stores ==========
+  subgraph Artifacts[Versioned Artifacts (DVC-tracked unless noted)]
+    direction TB
+    RAWSTORE[("(data/raw)")]
+    CALOUT[("calibrated/")]
+    FEAT[("features/")]
+    CKPT[("models/checkpoints/")]
+    PRED[("predictions/")]
+    REP[("diagnostics/reports/")]
+    SBOM[("sbom/ (cyclonedx/spdx)")]
+
+    RAWSTORE -. mirror .- RAW
+  end
+
+  %% Wire artifacts to stages
+  Calib -- writes --> CALOUT
+  Prep -- reads --> CALOUT
+  Prep -- writes --> FEAT
+  Train -- reads --> FEAT
+  Train -- writes --> CKPT
+  Predict -- reads --> CKPT
+  Predict -- reads --> FEAT
+  Predict -- writes --> PRED
+  Diagnose -- reads --> CKPT
+  Diagnose -- reads --> FEAT
+  Diagnose -- writes --> REP
+  Submit -- reads --> PRED
+  Submit -- writes --> SUBCSV
+
+  %% ========== Final Output ==========
+  SUBCSV[/"submission.csv (to Kaggle)"/]
+
+  %% ========== Environment-Specific Paths ==========
+  subgraph KaggleHints[Notes for Kaggle Mode]
+    direction TB
+    KIN["Inputs mounted under /kaggle/input/*"]
+    KOUT["Outputs under /kaggle/working/*"]
+  end
+  RAW --> KIN
+  SUBCSV --> KOUT
+
+  %% ========== Integrity & Reproducibility ==========
+  subgraph Repro[Integrity & Reproducibility]
+    direction TB
+    SNAP["Config snapshot (JSON) + SHA256"]
+    JSONL["Run manifest (events.jsonl)"]
+    DVCLOCK["dvc.lock (frozen inputs/outputs)"]
+  end
+  HYDRA --> SNAP
+  DVCCTL --> DVCLOCK
+  CLI --> JSONL
+
+  %% ========== Optional SBOM ==========
+  Submit -. package includes .-> SBOM
+
+  %% ========== Styling ==========
+  classDef stage fill:#0b74de,stroke:#0a5fb4,stroke-width:1.2,color:#fff;
+  classDef store fill:#f5f8ff,stroke:#9bb7f0,stroke-width:1.0,color:#0a2e6b;
+  classDef ctrl fill:#f2faf5,stroke:#6bbf84,stroke-width:1.0,color:#1c5e33;
+  class Calib,Prep,Train,Predict,Diagnose,Submit,CLI,DVCCTL stage;
+  class CALOUT,FEAT,CKPT,PRED,REP,SBOM,RAWSTORE store;
+  class HYDRA,SNAP,JSONL,DVCLOCK ctrl;
