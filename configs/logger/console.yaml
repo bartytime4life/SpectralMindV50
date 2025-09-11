@@ -1,0 +1,8 @@
+# configs/logger/console.yaml
+_target_: spectramind.logging.console.RichConsoleLogger
+enabled: true
+level: "INFO"
+timefmt: "%H:%M:%S"
+format: "[%(asctime)s] %(levelname)s %(message)s"
+truncate_long_tensors: true
+max_tensor_elems: 32
