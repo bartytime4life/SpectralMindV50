@@ -1,6 +1,5 @@
-# configs/train.yaml
 # ──────────────────────────────────────────────────────────────────────────────
-# SpectraMind V50 — Training Config (Hydra 1.x / PL 2.x)
+# SpectraMind V50 — Training Config (Hydra 1.x / PyTorch Lightning 2.x)
 # Top-level composed configuration for model training.
 #
 # Usage (examples):
@@ -12,7 +11,7 @@
 
 # Composition: swap any group at CLI
 defaults:
-  - env: local                        # or: kaggle / debug
+  - env: local                        # or: kaggle / ci / debug
   - data: nominal                     # dataset profile (nominal/kaggle/splits)
   - calib: nominal                    # calibration pipeline settings
   - model: v50                        # model architecture (dual encoders + decoder)
@@ -29,92 +28,85 @@ experiment:
   tags: ["v50", "train", "fgs1", "airs"]
   notes: ""                           # free-form; can be overridden from CLI
 
-# Canonical paths (all run-scoped under hydra.run.dir)
+# Canonical paths (ENV-DRIVEN for portability: local/CI/Kaggle)
 paths:
-  project_root: ${hydra:runtime.cwd}
-  artifacts_root: ${paths.project_root}/artifacts
+  data_root: ${env.data_root}
+  artifacts_root: ${env.artifacts_root}
   runs: ${paths.artifacts_root}/runs
   logs: ${hydra:run.dir}/logs
   checkpoints: ${hydra:run.dir}/checkpoints
   reports: ${hydra:run.dir}/reports
-  # (Optional) cache, manifests, etc.
   cache: ${paths.artifacts_root}/cache
   manifests: ${paths.artifacts_root}/manifests
 
 # Reproducibility & backend knobs
-seed: 42
+seed: ${env.reproducibility.seed}
 reproducibility:
-  torch_deterministic_algorithms: true   # torch.use_deterministic_algorithms
-  cudnn_benchmark: false                  # prefer determinism over throughput
-  cudnn_deterministic: true               # for older cudnn branches
-  allow_tf32: false                       # set true after validating numerics
-  numpy_print_threshold: 1000             # stable logs
-  python_hash_seed: ${seed}               # PYTHONHASHSEED alignment
+  torch_deterministic_algorithms: ${env.reproducibility.deterministic}  # torch.use_deterministic_algorithms
+  cudnn_benchmark: false                     # keep deterministic throughput stable
+  cudnn_deterministic: ${env.reproducibility.deterministic}
+  allow_tf32: false                          # set true only after validating numerics on your GPU
+  python_hash_seed: ${seed}                  # PYTHONHASHSEED alignment
 
-# Precision (override in env configs if needed, e.g., bf16 on A100)
-precision: "16-mixed"   # options: "32-true" | "16-mixed" | "bf16-mixed"
+# Precision (override via CLI or env overrides; bf16 preferred on A100)
+precision: "16-mixed"   # "32-true" | "16-mixed" | "bf16-mixed"
 
-# Optional PyTorch 2.x compiler (safe default: disabled)
+# Optional PyTorch 2.x compiler (TorchDynamo); default off
 compile:
   enabled: false
   mode: "default"        # "default" | "reduce-overhead" | "max-autotune"
   fullgraph: false
   dynamic: false
 
-# Data pipeline (override in data group; these are cross-cutting defaults)
+# Data pipeline (defaults; dataset group may override)
 data:
   batch_size:
     train: 64
     val: 64
     test: 64
-  num_workers: ${env.num_workers}         # from env group (e.g., Kaggle=2)
-  pin_memory: true
+  num_workers: ${env.num_workers}
+  pin_memory: true        # safe default; harmless on CPU
   persistent_workers: true
   prefetch_factor: 2
   drop_last: true
-  # Optional dataset-level switches exposed for quick sweeps
   augment:
     enabled: true
     jitter: 0.01
     dropout: 0.0
   normalization:
     enabled: true
-    method: "zscore"       # or "minmax", "none"
+    method: "zscore"       # "minmax" | "none"
 
 # PyTorch Lightning Trainer (PL 2.x)
 trainer:
   max_epochs: 50
   min_epochs: 1
-  accelerator: auto               # auto: cpu/cuda/mps
-  devices: 1                      # "auto" or list for multi-GPU
-  strategy: auto                  # "auto" | "ddp" | "ddp_find_unused_parameters_false" etc.
+  accelerator: ${env.device}       # "cuda" | "cpu" (env-driven)
+  devices: 1
+  strategy: auto                   # "auto" | "ddp" | "ddp_find_unused_parameters_false" etc.
   precision: ${precision}
   accumulate_grad_batches: 2
   gradient_clip_val: 1.0
   gradient_clip_algorithm: "norm"
   log_every_n_steps: 50
-  val_check_interval: 0.25        # validate 4× per epoch; keep <= 1.0
+  val_check_interval: 0.25         # validate 4× per epoch; keep <= 1.0
   check_val_every_n_epoch: null
-  deterministic: true
+  deterministic: ${env.reproducibility.deterministic}
   enable_checkpointing: true
   enable_model_summary: true
   detect_anomaly: false
   benchmark: false
   inference_mode: true
-  # Profiler: "simple" | "advanced" | "pytorch" | "xla" | null
   profiler: null
-  # Callbacks are supplied by the callbacks bundle below:
   callbacks: ${training.callbacks.callbacks}
 
-# AMP / GradScaler controls (used by training loop if wired)
+# AMP / GradScaler controls
 amp:
   enabled: true
-  # When precision is "*-mixed", PL handles GradScaler internally. Keep here if
-  # you also support a manual scaler in custom loops.
   init_scale: 65536
   growth_interval: 2000
 
-# Optimizer / Scheduler (instantiated in code; names kept for clarity & logging)
+# Optimizer / Scheduler
 optimizer:
   name: "AdamW"
   _target_: torch.optim.AdamW
@@ -155,7 +147,6 @@ loss:
       nonneg: 0.5
       band_coherence: 0.3
       calibration: 0.5
-    # Optional per-term hyperparams (kept flat for clarity; override as needed)
     params:
       smoothness:
         order: 2
@@ -170,14 +161,12 @@ loss:
         align_bins: true
         lambda_max: 0.5
 
-# Checkpointing / Early Stopping are defined inside the callbacks bundle
-# (this keeps Trainer clean and lets you swap policies via defaults).
+# Callback bundle (swappable via defaults)
 training:
   callbacks:
-    # the referenced group injects the concrete callbacks list here
     callbacks: []
 
-# Evaluation / reporting passes (used by diagnostics & post-epoch hooks)
+# Evaluation / reporting passes
 evaluation:
   enable_test_after_fit: true
   save_report: true
@@ -187,19 +176,18 @@ evaluation:
     scatter_mu_sigma: true
     per_bin_stats: true
 
-# Runtime environment reflection (fed by env group; safely re-exposed here for code)
+# Runtime environment reflection (fed by env group)
 env_reflection:
   device: ${env.device}
   num_workers: ${env.num_workers}
   seed: ${seed}
 
-# Hydra runtime (each run gets its own timestamped directory)
+# Hydra runtime (each run lands under env.artifacts_root)
 hydra:
   run:
     dir: ${paths.runs}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
     dir: ${paths.artifacts_root}/sweeps
     subdir: ${hydra.job.num}
-  # Pass some key fields to the job name for nicer run directories (optional)
   job:
     name: ${experiment.name}
