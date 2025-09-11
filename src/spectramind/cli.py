@@ -48,12 +48,30 @@ try:
 except Exception:
     pass
 
-# Public logger from package (matches upgraded __init__.py)
-from spectramind import get_logger
+# ------------------------------------------------------------------------------
+# Logging (fallback if spectramind.get_logger is unavailable)
+# ------------------------------------------------------------------------------
+try:
+    from spectramind import get_logger  # type: ignore
+    logger = get_logger(__name__)
+except Exception:
+    import logging as _logging
+
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logger = _logging.getLogger(__name__)
+
+# Local utils
 from spectramind.utils.io import p, read_yaml, read_json, ensure_dir
 from spectramind.train.trainer import train_from_config
-from spectramind.submit.validate import validate_csv as _validate_submission_csv
+from spectramind.submit.validate import validate_csv as _validate_submission_csv, N_BINS_DEFAULT
 from spectramind.utils.manifest import write_run_manifest
+
+# Deterministic packager (canonical arcname, stable perms/timestamps)
+from spectramind.utils.pack import pack as _pack_zip, ExtraFile as _ExtraFile
 
 __all__ = ["app", "main"]
 
@@ -85,8 +103,6 @@ app.add_typer(predict_app, name="predict")
 app.add_typer(diagnose_app, name="diagnose")
 app.add_typer(submit_app, name="submit")
 app.add_typer(sys_app, name="sys")
-
-logger = get_logger(__name__)
 
 # ======================================================================================
 # Typed errors / feedback
@@ -780,55 +796,43 @@ def _sha256_file(path: Path) -> str:
 def submit_package(
     preds: Path = typer.Argument(..., exists=True, help="Predictions CSV to package"),
     out_zip: Path = typer.Option(Path("dist/submission.zip"), help="Output ZIP path"),
-    schema: Optional[Path] = typer.Option(None, help="Optional submission schema to validate"),
-    name: str = typer.Option("SpectraMind V50 Submission", help="Package name / label"),
-    extra_file: List[Path] = typer.Option([], help="Additional files to include in the archive"),
+    name: str = typer.Option("SpectraMind V50 Submission", help="Package label"),
+    extra_file: List[Path] = typer.Option([], help="Additional files to include in the archive (assets/)"),
+    strict_validate: bool = typer.Option(True, "--strict/--no-strict", help="Run strict CSV validator before packaging"),
+    seed: Optional[int] = typer.Option(None, "--seed", help="Fix timestamps for deterministic artifacts"),
 ) -> None:
     """
-    Package predictions (and extras) into a submission ZIP, with optional schema validation.
+    Package predictions (and extras) into a submission ZIP (canonical arcname 'submission.csv').
     """
     try:
         _ensure_exists(preds, "preds")
         _ensure_file_parent(out_zip)
 
-        # Always run our validator first
-        res = _validate_submission_csv(csv_path=preds, n_bins=283, strict_ids=True, chunksize=None)
-        if not res.ok:
-            _warn(f"Validation failed: {len(res.errors)} errors (showing first 10):")
-            for e in res.errors[:10]:
-                typer.echo(f"- {e}")
-            _fail("Submission CSV is invalid.")
+        # Validate via our CSV validator (schema/physics)
+        if strict_validate:
+            res = _validate_submission_csv(
+                csv_path=preds,
+                n_bins=N_BINS_DEFAULT,
+                strict_ids=True,
+                chunksize=None,
+            )
+            if not res.ok:
+                _warn(f"Validation failed: {len(res.errors)} errors (showing first 10):")
+                for e in res.errors[:10]:
+                    typer.echo(f"- {e}")
+                _fail("Submission CSV is invalid.")
 
-        # If a JSON schema is provided and there's a schema validator available, run it too.
-        if schema:
-            try:
-                from spectramind.submit.validate import validate_against_schema as _schema_check  # type: ignore
-                sch_ok, sch_msg = _schema_check(preds, schema)
-                if not sch_ok:
-                    _fail(f"Schema validation failed: {sch_msg}")
-                elif sch_msg:
-                    _warn(sch_msg)
-            except Exception as e:
-                _warn(f"Schema validation skipped: {e}")
+        # Build extra assets list
+        extras = [(_ExtraFile(path=ef, arcname=Path(ef).name)) for ef in extra_file if Path(ef).exists()]
+        for ef in extra_file:
+            if not Path(ef).exists():
+                _warn(f"Extra file not found: {ef}")
 
-        import zipfile
-        with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.write(preds, arcname=preds.name)
-            manifest = {
-                "name": name,
-                "generated_by": "spectramind submit package",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "package_version": _read_version(),
-                "predictions_sha256": _sha256_file(preds),
-            }
-            zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
-            for ef in extra_file:
-                if Path(ef).exists():
-                    zf.write(ef, arcname=Path(ef).name)
-                else:
-                    _warn(f"Extra file not found: {ef}")
+        # Deterministic ZIP with canonical arcname + meta.json
+        meta = {"name": name, "package_version": _read_version(), "predictions_sha256": _sha256_file(preds)}
+        zip_path = _pack_zip(preds, out_zip, meta=meta, seed=seed, extras=extras, strict_validate=False)
 
-        _ok(f"Submission packaged → {out_zip}")
+        _ok(f"Submission packaged → {zip_path}")
     except SpectraMindError as e:
         _fail(str(e))
     except Exception as e:
@@ -838,7 +842,7 @@ def submit_package(
 @submit_app.command("validate")
 def submit_validate(
     csv: Path = typer.Argument(..., exists=True, help="Predictions CSV to validate"),
-    n_bins: int = typer.Option(283, "--n-bins", help="Expected number of spectral bins per id"),
+    n_bins: int = typer.Option(N_BINS_DEFAULT, "--n-bins", help="Expected number of spectral bins per id"),
     strict_ids: bool = typer.Option(True, "--strict-ids/--no-strict-ids", help="Enforce non-empty and unique ids"),
     chunksize: Optional[int] = typer.Option(None, help="Validate in chunks (rows per chunk) to reduce memory"),
     show: int = typer.Option(20, help="Show first N errors"),
