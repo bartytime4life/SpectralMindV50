@@ -1,0 +1,7 @@
+# configs/logger/tensorboard.yaml
+_target_: spectramind.logging.tensorboard.TBLogger
+enabled: false
+log_dir: ${paths.logs}/events/tb
+scalars: true
+histograms: false
+images: false
