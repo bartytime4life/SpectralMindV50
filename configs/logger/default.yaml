@@ -1,0 +1,95 @@
+# configs/logger/default.yaml
+# ======================================================================
+# SpectraMind V50 — Logging (composite)
+# ======================================================================
+
+_target_: spectramind.logging.composite.CompositeLogger
+
+# Global toggles
+enabled: true
+level: "INFO"                 # DEBUG | INFO | WARNING | ERROR
+fail_fast_on_error: true      # raise if any sink fails unrecoverably
+
+# Where to write logs
+dirs:
+  base: ${paths.logs}         # e.g., <artifacts_root>/logs
+  scalars: ${paths.logs}/scalars
+  events: ${paths.logs}/events
+  text: ${paths.logs}/text
+
+# Runtime metadata
+run:
+  run_id: ${oc.env:SM_RUN_ID, ${now:%Y%m%d_%H%M%S}}
+  seed: ${reproducibility.seed}
+  tags: ${experiment.tags}
+  notes: ${experiment.notes}
+  git_hash: ${oc.env:GIT_SHA, null}
+
+# Logging cadence
+intervals:
+  step: 0            # 0=disable per-step logging (Kaggle-safe default)
+  epoch: 1           # log every N epochs
+  flush_every_n: 1   # flush sinks after N epochs
+  checkpoint_every_n: 1
+
+# Loss component logging (aligns with loss/composite.yaml)
+components:
+  log_scalars: true
+  log_histograms: false
+  log_interval: 1
+
+# Sinks: enable/disable here or override from CLI
+sinks:
+  console:
+    enabled: true
+    _target_: spectramind.logging.console.RichConsoleLogger
+    level: ${logger.level}
+    timefmt: "%Y-%m-%d %H:%M:%S"
+    format: "[%(asctime)s] %(levelname)s %(message)s"
+    truncate_long_tensors: true
+    max_tensor_elems: 32
+
+  jsonl:
+    enabled: true
+    _target_: spectramind.logging.jsonl.JSONLLogger
+    path: ${logger.dirs.events}/events.jsonl
+    append: true
+    compact: true
+    flush_every_n: ${logger.intervals.flush_every_n}
+    capture:
+      metrics: true
+      params: true
+      losses: true
+      timing: true
+
+  csv:
+    enabled: true
+    _target_: spectramind.logging.csv.CSVLogger
+    path: ${logger.dirs.scalars}/metrics.csv
+    overwrite: false
+    delimiter: ","
+    flush_every_n: ${logger.intervals.flush_every_n}
+
+  tensorboard:
+    enabled: false
+    _target_: spectramind.logging.tensorboard.TBLogger
+    log_dir: ${logger.dirs.events}/tb
+    scalars: true
+    histograms: false
+    images: false
+
+  wandb:
+    enabled: false          # Kaggle-safe default; enable locally/CI
+    _target_: spectramind.logging.wandb.WandbLogger
+    project: ${logger.wandb.project}
+    entity: ${logger.wandb.entity}
+    mode: "offline"         # "online" | "offline" | "disabled"
+    tags: ${logger.run.tags}
+    notes: ${logger.run.notes}
+    dir: ${logger.dirs.base}
+    resume: "allow"
+
+# W&B settings (merged if sinks.wandb.enabled=true)
+wandb:
+  project: "spectramind-v50"
+  entity: null
