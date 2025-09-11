@@ -1,42 +1,61 @@
 # configs/data/nominal.yaml
 # ======================================================================
-# Nominal Data Profile — SpectraMind V50
-# ======================================================================
-# Defines the canonical dataset configuration for the Ariel 2025
-# challenge. This is the default ("nominal") profile used in most
-# experiments. It assumes full-resolution training/test sets with
-# calibration metadata and star info CSVs.
-#
-# Usage:
-#   python -m spectramind.train +data=nominal
-#
-# Keys:
-#   _target_     : Python path to the datamodule implementation
-#   root         : base path to data (env-specific)
-#   train_csv    : training labels / metadata
-#   test_csv     : test set metadata
-#   star_info    : star/planet info (train/test)
-#   adc_info     : analog-to-digital conversion params
-#   axis_info    : wavelength/axis metadata
-#   splits       : optional split config (Hydra composition)
-#   num_workers  : DataLoader worker count (defaults from env)
+# Nominal Data Profile — SpectraMind V50 (upgraded & debug-ready)
+# ----------------------------------------------------------------------
+# Default profile for local/CI experiments with full-resolution data.
+# Assumes CSV/Parquet metadata are present under ${paths.data_dir}.
+# Use with:
+#   python -m spectramind.train +data=nominal +env=local
 # ======================================================================
 
 _target_: spectramind.data.datamodule.ArielDataModule
 
-root: ${paths.data}                 # resolves via env (local/kaggle)
-train_csv: ${data.root}/train.csv
-test_csv: ${data.root}/test.csv
-train_star_info: ${data.root}/train_star_info.csv
-test_star_info: ${data.root}/test_star_info.csv
-adc_info: ${data.root}/adc_info.csv
-axis_info: ${data.root}/axis_info.parquet
+# ------------------------------
+# Roots & canonical metadata
+# ------------------------------
+root: ${paths.data_dir}                 # resolved by env/local|kaggle
+train_csv:        ${.root}/train.csv
+test_csv:         ${.root}/test.csv
+train_star_info:  ${.root}/train_star_info.csv
+test_star_info:   ${.root}/test_star_info.csv
+adc_info:         ${.root}/adc_info.csv
+axis_info:        ${.root}/axis_info.parquet
 
-# Splits config (optional override)
-splits: ${data.root}/splits.yaml
+# Optional split source (set to null to use default train/valid split logic)
+# You can override at runtime:
+#   +data.nominal.splits=${paths.data_dir}/splits.yaml
+splits: ${oc.env:SM_SPLITS_FILE,null}
 
-# DataLoader defaults (can be overridden by env.num_workers)
-num_workers: ${env.num_workers}
-batch_size: 32
-pin_memory: true
-persistent_workers: true
+# ------------------------------
+# Spectral layout / metric tie-in
+# ------------------------------
+n_bins: ${oc.env:SM_SUBMISSION_BINS,283}  # must match model.num_bins
+fgs1_bin_idx: 0
+fgs1_bin_scale: ${oc.env:SM_FGS1_WEIGHT,58.0}
+
+# ------------------------------
+# Dataloaders (safe defaults for local/CI)
+# ------------------------------
+batch_size:       ${oc.env:SM_BATCH,32}
+eval_batch_size:  ${oc.env:SM_BATCH_EVAL,128}
+num_workers:      ${num_workers}                   # from env profile
+pin_memory:       ${oc.env:SM_PIN_MEMORY,true}
+persistent_workers: ${oc.env:SM_PERSISTENT_WORKERS,true}
+prefetch_factor:  ${oc.env:SM_PREFETCH,2}
+drop_last_train:  true
+
+# Auto-switch to DistributedSampler if trainer uses DDP
+sampler:
+  type: ${oc.env:SM_SAMPLER,none}        # none|distributed
+  seed: ${seed,42}
+
+# ------------------------------
+# Debug / validation guardrails
+# ------------------------------
+debug:
+  validate_paths:  ${oc.env:SM_DATA_VALIDATE,true}   # stat() each path above
+  strict_headers:  ${oc.env:SM_DATA_STRICT,false}    # enforce minimal headers if true
+  print_first_rows:${oc.env:SM_DATA_HEAD,0}          # >0 prints N preview rows
+  fail_on_missing: ${oc.env:SM_DATA_FAIL,true}
+  headers:
+    required: ["sample_id"]                          # extend as your DM expects
