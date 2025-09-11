@@ -27,7 +27,7 @@ Extras in this upgrade
 Notes
 -----
 - Deterministic behavior; no network access.
-- Requires `pandas` and `jsonschema`.
+- `pandas` required; `jsonschema` optional.
 """
 
 from __future__ import annotations
@@ -41,9 +41,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
-from jsonschema import ValidationError, validate
 
-from .utils import write_json_pretty  # atomic writer
+try:
+    # jsonschema is optional; if absent, schema validation becomes a no-op
+    from jsonschema import ValidationError, validate as _js_validate  # type: ignore
+except Exception:  # pragma: no cover
+    ValidationError = Exception  # type: ignore
+    _js_validate = None  # type: ignore
 
 # ==============================================================================
 # Constants / schema loader
@@ -53,14 +57,27 @@ N_BINS_DEFAULT = int(os.environ.get("SM_SUBMISSION_BINS", 283))
 _SUB_SCHEMA_CACHE: Optional[Dict] = None
 
 
+def _write_json_pretty(out_path: Union[str, Path], obj: Any) -> None:
+    """
+    Atomic, pretty JSON writer: <path>.tmp then os.replace().
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, out_path)
+
+
 def _find_schema_file(explicit: Optional[Union[str, Path]] = None) -> Path:
     """
     Resolve the submission schema path robustly.
 
     Precedence:
       0) explicit (if provided)
-      1) ./schemas/submission.schema.json
-      2) walk upwards from this file for <repo_root>/schemas/submission.schema.json
+      1) ./schemas/submission.schema.json (from CWD)
+      2) walk upwards from CWD to find a 'schemas/submission.schema.json'
+      3) walk upwards from this file to find the same
     """
     if explicit:
         p = Path(explicit)
@@ -68,28 +85,41 @@ def _find_schema_file(explicit: Optional[Union[str, Path]] = None) -> Path:
             raise FileNotFoundError(f"Schema file not found: {p}")
         return p
 
+    # try current working dir first
     local = Path("schemas/submission.schema.json")
     if local.exists():
         return local
 
-    here = Path(__file__).resolve()
-    for parent in [here] + list(here.parents):
-        candidate = parent.parent.parent / "schemas" / "submission.schema.json"
+    # walk upward from CWD
+    cwd = Path.cwd().resolve()
+    for parent in [cwd] + list(cwd.parents):
+        candidate = parent / "schemas" / "submission.schema.json"
         if candidate.exists():
             return candidate
 
-    # Fallback (will error on open)
+    # walk upward from this file's location
+    here = Path(__file__).resolve()
+    for parent in [here] + list(here.parents):
+        candidate = parent / "schemas" / "submission.schema.json"
+        if candidate.exists():
+            return candidate
+
+    # fallback (will error when opened)
     return local
 
 
 def _load_schema(explicit: Optional[Union[str, Path]] = None) -> Dict:
+    """
+    Load and cache the schema JSON; no-op if jsonschema not available.
+    """
     global _SUB_SCHEMA_CACHE
     if explicit is None and _SUB_SCHEMA_CACHE is not None:
         return _SUB_SCHEMA_CACHE
 
     schema_path = _find_schema_file(explicit)
     try:
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        text = schema_path.read_text(encoding="utf-8")
+        schema = json.loads(text)
     except FileNotFoundError as e:
         raise FileNotFoundError(f"Submission schema not found. Looked for: {schema_path}") from e
     except json.JSONDecodeError as e:
@@ -191,10 +221,12 @@ def _validate_record(rec: Dict, schema: Dict, n_bins: int) -> Optional[str]:
     Validate a single record dict against JSON schema and additional semantic checks.
     Returns error string if any, else None.
     """
-    try:
-        validate(rec, schema)
-    except ValidationError as e:
-        return f"jsonschema validation error: {e.message}"
+    # Schema may be loaded even if jsonschema isn't installed; short-circuit
+    if _js_validate is not None:
+        try:
+            _js_validate(rec, schema)  # type: ignore
+        except ValidationError as e:  # type: ignore
+            return f"jsonschema validation error: {e.message}"
 
     mu = rec.get("mu") or []
     sigma = rec.get("sigma") or []
@@ -465,8 +497,7 @@ def validate_csv(
             "csv": str(path),
             "schema": str(_find_schema_file(schema_path)),
         }
-        Path(write_report).parent.mkdir(parents=True, exist_ok=True)
-        write_json_pretty(write_report, report)
+        _write_json_pretty(write_report, report)
 
     return result
 
