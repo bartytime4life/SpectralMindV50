@@ -1,0 +1,11 @@
+# Gaussian Log-Likelihood Loss
+# Used as baseline and competition metric
+# FGS1 bin (0) is upweighted (~58x) per challenge spec
+# ---------------------------------------------------------------------
+
+_target_: spectramind.losses.gll.GaussianLogLikelihood
+
+fgs1_weight: 58.0
+clamp_sigma_min: 1e-6
+clamp_sigma_max: 1e2
+fail_on_nonfinite: true
