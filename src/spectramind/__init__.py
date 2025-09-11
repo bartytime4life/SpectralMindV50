@@ -1,4 +1,3 @@
-# src/spectramind/__init__.py
 """
 SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge pipeline.
 
@@ -9,9 +8,11 @@ Public API
 ----------
 - __version__: str         → package version from installed metadata (or fallback)
 - get_version(): str       → safe accessor for the version
-- get_logger(name): Logger → project-scoped logger (Rich if available)
+- get_logger(name): Logger → project-scoped logger (Rich if available; idempotent)
 - open_resource(relpath):  → context manager returning a binary file handle
 - read_text(relpath): str  → read small, text resources packaged with the module
+- read_binary(relpath): bytes → load small binary resources packaged with the module
+- resource_exists(relpath): bool → check for presence of a packaged resource
 - package_root(): Path     → path to installed package root
 - repo_root(): Path        → best-effort path to repository root (source checkouts)
 """
@@ -33,16 +34,18 @@ __all__ = [
     "get_logger",
     "open_resource",
     "read_text",
+    "read_binary",
+    "resource_exists",
     "package_root",
     "repo_root",
-    "PKG_NAME",
+    "PKG_DIST_NAME",
 ]
 
 # --------------------------------------------------------------------------------------
 # Package & version resolution
 # --------------------------------------------------------------------------------------
-# Keep this aligned with pyproject.toml [project].name
-PKG_NAME = "spectramind-v50"
+# Keep this aligned with pyproject.toml [project].name (distribution name, not module name)
+PKG_DIST_NAME = "spectramind-v50"  # e.g., pip show spectramind-v50 → Version: x.y.z
 
 
 def package_root() -> Path:
@@ -50,25 +53,31 @@ def package_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def repo_root() -> Path:
+def _is_repo_root(p: Path) -> bool:
+    return (p / ".git").exists() or (p / "pyproject.toml").exists() or (p / ".hg").exists()
+
+
+def repo_root(max_up: int = 6) -> Path:
     """
     Best-effort location of the repository root. In editable installs / source checkouts
-    this is typically 2 levels up from this file (…/repo/src/spectramind/__init__.py).
-    Falls back to package_root() if heuristics fail.
+    this is typically a few levels up from this file. Falls back to package_root()
+    when heuristics fail.
+
+    We climb up to `max_up` levels looking for common VCS and build markers.
     """
     p = package_root()
-    # Common source layout: repo/src/spectramind/__init__.py
-    candidate = p.parent.parent
-    if (candidate / ".git").exists() or (candidate / "pyproject.toml").exists():
-        return candidate
-    return p
+    for _ in range(max_up):
+        if _is_repo_root(p.parent):
+            return p.parent
+        p = p.parent
+    return package_root()
 
 
 def _read_version_file() -> Optional[str]:
     # Search common locations for a VERSION file (repo root or package root)
     candidates = [
-        repo_root() / "VERSION",   # repo root when running from source
-        package_root() / "VERSION" # package directory (rare)
+        repo_root() / "VERSION",    # repo root when running from source
+        package_root() / "VERSION", # package directory (rare)
     ]
     for c in candidates:
         try:
@@ -84,7 +93,7 @@ def _read_version_file() -> Optional[str]:
 def _resolve_version() -> str:
     # 1) Installed metadata (wheel/sdist)
     try:
-        return _pkg_version(PKG_NAME)
+        return _pkg_version(PKG_DIST_NAME)
     except PackageNotFoundError:
         pass
     # 2) VERSION file during local dev
@@ -122,7 +131,8 @@ def _desired_level_from_env(default: str = "INFO") -> int:
         "WARNING": logging.WARNING,
         "INFO": logging.INFO,
         "DEBUG": logging.DEBUG,
-        "TRACE": logging.DEBUG,  # stdlib lacks TRACE; map to DEBUG
+        # stdlib lacks TRACE; treat as DEBUG
+        "TRACE": logging.DEBUG,
     }.get(level_str, logging.INFO)
 
 
@@ -134,6 +144,7 @@ def _configure_logging_once() -> None:
     - If the root logger already has handlers, only set its level (do not add).
     - Prefer RichHandler when available; otherwise use stdlib basicConfig.
     - Honors env SPECTRAMIND_LOGLEVEL.
+    - Add a NullHandler to the package logger to avoid "No handler found" warnings.
     """
     global _LOGGER_CONFIGURED
     if _LOGGER_CONFIGURED:
@@ -142,8 +153,9 @@ def _configure_logging_once() -> None:
     level = _desired_level_from_env()
     root = logging.getLogger()
     if root.handlers:
-        # Respect existing handlers (e.g., notebooks, host apps, pytest)
         root.setLevel(level)
+        # avoid "No handler found" warnings for library importers
+        logging.getLogger("spectramind").addHandler(logging.NullHandler())
         _LOGGER_CONFIGURED = True
         return
 
@@ -162,12 +174,12 @@ def _configure_logging_once() -> None:
             handlers=[handler],
         )
     except Exception:
-        # Fallback to plain logging
         logging.basicConfig(
             level=level,
             format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         )
 
+    logging.getLogger("spectramind").addHandler(logging.NullHandler())
     _LOGGER_CONFIGURED = True
 
 
@@ -196,22 +208,27 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
 def _resource_path(relpath: str) -> Path:
     """
     Resolve a resource path whether running from an installed wheel or from
-    a source checkout. Prefers importlib.resources, then falls back to FS paths.
+    a source checkout. Prefers importlib.resources (as_file), then FS paths.
     """
-    # Attempt importlib.resources (installed packages and editable installs)
+    # Attempt importlib.resources for packages/zip-imports
     try:
-        res = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
+        traversable = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
         try:
-            # As of 3.11, Traversable supports .is_file/.exists; guard anyway
-            if res.is_file() or res.exists():
-                return Path(res)
+            # If the resource is backed by the filesystem, we can probe directly.
+            if traversable.is_file():  # type: ignore[attr-defined]
+                # as_file() returns a context manager; don't materialize here
+                pass
         except Exception:
-            # If we cannot probe, still return the virtual path; callers will use as_file()
-            return Path(res)
+            pass
+        # Fall through: the caller should use open_resource/read_text helpers
     except Exception:
         pass
 
-    # Fallback to filesystem paths relative to package directory
+    # Fallback to filesystem paths relative to source tree
+    # (try repo_root first to support editable installs)
+    repo_candidate = (repo_root() / relpath).resolve()
+    if repo_candidate.exists():
+        return repo_candidate
     return (package_root() / relpath).resolve()
 
 
@@ -258,7 +275,6 @@ def read_text(relpath: str, encoding: str = "utf-8") -> str:
     # Prefer importlib.resources for zip/egg safety
     try:
         traversable = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
-        # Traversable.read_text exists in 3.11+, but use a robust path in case
         try:
             return traversable.read_text(encoding=encoding)  # type: ignore[attr-defined]
         except Exception:
@@ -268,3 +284,25 @@ def read_text(relpath: str, encoding: str = "utf-8") -> str:
         # Fallback to FS
         fs_path = _resource_path(relpath)
         return fs_path.read_text(encoding=encoding)
+
+
+def read_binary(relpath: str) -> bytes:
+    """Read a small binary resource from the installed package (or source tree)."""
+    with open_resource(relpath) as f:
+        return f.read()
+
+
+def resource_exists(relpath: str) -> bool:
+    """Check whether a resource is available (installed or source tree)."""
+    try:
+        traversable = _resources.files(__package__).joinpath(relpath)  # type: ignore[arg-type]
+        try:
+            # If it's a packaged resource, .is_file() or existence checks may be limited;
+            # try materializing as a file in a temp location to probe.
+            with _resources.as_file(traversable) as p:
+                return Path(p).exists()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return _resource_path(relpath).exists()
