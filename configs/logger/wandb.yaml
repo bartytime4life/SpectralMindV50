@@ -2,44 +2,99 @@
 # ----------------------------------------------------------------------
 # Weights & Biases Logger — SpectraMind V50
 # ----------------------------------------------------------------------
-# Hydra config for experiment tracking via Weights & Biases (wandb).
-# Defaults are Kaggle/CI-safe: offline mode unless explicitly enabled.
+# Hydra config for experiment tracking via Weights & Biases.
+# SAFE DEFAULTS:
+#   • disabled unless selected via `logger=wandb` or composite
+#   • offline mode by default (Kaggle/CI-safe)
+#   • logs under ${paths.logs}/wandb
+#
+# Enable online logging only on local/CI with WANDB_API_KEY configured.
 #
 # Usage:
+#   # Use this logger directly
 #   python -m spectramind.train logger=wandb
 #
-# References:
-#   - SpectraMind V50 design docs:contentReference[oaicite:0]{index=0}
-#   - Kaggle notebook guide (no internet; offline mode required):contentReference[oaicite:1]{index=1}
+#   # Or enable as a sink inside a composite logger:
+#   python -m spectramind.train logger=default \
+#     logger.sinks.wandb.enabled=true \
+#     logger.sinks.wandb.mode=offline
+#
+# Notes:
+#   • PyTorch Lightning’s WandbLogger arguments vary slightly by version.
+#     The fields below map to common versions (PL>=1.9 / 2.x).
+#   • Mode precedence (highest → lowest):
+#       WANDB_MODE env > logger.wandb.mode > offline flag
 # ----------------------------------------------------------------------
 
+# Toggle when used standalone (composite loggers typically have their own `enabled`)
+enabled: true
+
+# Choose the implementation you actually use:
+# - pytorch_lightning.loggers.WandbLogger (PL built-in), or
+# - spectramind.logging.wandb.WandbLogger (project wrapper)
 _target_: pytorch_lightning.loggers.WandbLogger
 
-# Core settings
+# ---------------- Core W&B identity ----------------
 project: "spectramind-v50"
-entity: null                  # W&B team/entity (set if needed)
-name: null                    # run name (auto if null)
-group: null                   # group name for sweep/ablation
-tags: []                      # list of tags, e.g. ["v50", "fgs1", "debug"]
+entity: ${oc.env:WANDB_ENTITY, null}     # set if you use a team/org
+name: ${oc.env:WANDB_NAME, null}         # run display name (auto if null)
+group: ${oc.env:WANDB_RUN_GROUP, null}   # sweep/ablation grouping
+tags:
+  - v50
+  - ${experiment.name}
+  - ${oc.env:SM_ENV, "local"}            # e.g., local|ci|kaggle
+job_type: "train"
 
-# Offline vs online (safe default: offline)
-# Kaggle = always offline (internet disabled)
-# Local/CI = set WANDB_MODE=online or override here
-offline: true
+# ---------------- Mode & connectivity ---------------
+# Preferred: use WANDB_MODE env ("offline" | "online" | "disabled")
+# Fallback here (Hydra overrides possible): "offline" by default.
+mode: ${oc.env:WANDB_MODE, "offline"}
+# PL WandbLogger supports `offline: bool`; keep it true by default.
+offline: ${oc.env:WANDB_OFFLINE, true}
 
-# Logging details
-save_dir: "./wandb"           # local storage for offline logs
-log_model: false              # log model checkpoints to W&B
-prefix: ""                    # prepend to metric keys
-job_type: "train"             # e.g. "train", "predict", "diagnose"
+# ---------------- Storage / paths -------------------
+# Base dir for W&B files (offline cache, metadata, etc.)
+save_dir: ${paths.logs}/wandb
 
-# Extra config
-# Respects environment overrides:
-#   WANDB_API_KEY   (required for online mode)
-#   WANDB_MODE      (override offline/online)
-#   WANDB_RUN_GROUP (alternative to group)
-id: null                      # run id (resume if set)
-resume: "allow"               # ["allow", "must", "never"]
+# ---------------- Behavior --------------------------
+log_model: false                 # "all" | True | False (log checkpoints as artifacts)
+prefix: ""                       # prepend to metric keys
+flush_steps: null                # W&B will batch; leave null unless you need lower latency
+commit: true                     # commit after each log (usually True for PL)
 
-# Advanced
-anonymous: "never"            # "allow" to run without login
+# ---------------- Resume / versioning ---------------
+# Use a stable id (aka version) to resume runs (e.g., from ${logger.run.run_id})
+id: ${oc.env:WANDB_RUN_ID, null} # if null, W&B generates one
+resume: ${oc.env:WANDB_RESUME, "allow"}   # "allow" | "must" | "never"
+# Anonymous runs (no login) — "allow" or "never"
+anonymous: ${oc.env:WANDB_ANONYMOUS, "never"}
+
+# ---------------- Safety & verbosity ----------------
+# Fail gracefully if W&B init fails (useful in air-gapped envs)
+fail_silently: true
+# Minimal console noise from W&B (set to "debug" for troubleshooting)
+wandb_init_kwargs:
+  settings:
+    _disable_stats: true
+    console: "off"               # "off" | "wrap" | "redirect" (W&B console capture)
+    start_method: "thread"
+    # heartbeat and sync intervals stay on defaults unless debugging
+
+# ---------------- Auto-populate config --------------
+# Attach SpectraMind config snapshot to W&B (safe for offline)
+# This block is typically merged by the logger implementation; leave as hints.
+config:
+  experiment:
+    name: ${experiment.name}
+    tags: ${experiment.tags}
+    notes: ${experiment.notes}
+  loss:
+    composite: ${loss}
+  model:
+    name: ${model.name}
+  data:
+    root: ${paths.data_root}
+  run:
+    run_id: ${oc.env:SM_RUN_ID, ${now:%Y%m%d_%H%M%S}}
+    seed: ${reproducibility.seed}
+    git_hash: ${oc.env:GIT_SHA, null}
