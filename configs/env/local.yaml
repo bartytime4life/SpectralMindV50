@@ -1,35 +1,46 @@
-# configs/logger/csv.yaml
+# configs/env/local.yaml
 # ----------------------------------------------------------------------
-# CSV Logger — SpectraMind V50
+# Local environment profile — SpectraMind V50
 # ----------------------------------------------------------------------
-# Hydra config for experiment tracking with CSVLogger.
-# Produces per-run CSVs of metrics under logs_dir/version_x/metrics.csv
+# Purpose:
+#   Defines environment-specific settings for running the pipeline
+#   on a developer workstation (Linux/macOS, Python 3.11+).
 #
-# Usage:
-#   python -m spectramind.train logger=csv
-#
-# References:
-#   - PyTorch Lightning CSVLogger
-#   - SpectraMind V50 design: reproducible lightweight logging:contentReference[oaicite:0]{index=0}
-# ----------------------------------------------------------------------
-
-_target_: pytorch_lightning.loggers.CSVLogger
-
-# Root directory where logs will be stored (relative or absolute)
-save_dir: "./logs"
-
-# Experiment name (subfolder under save_dir)
-# Typically set to match Hydra job name for clarity
-name: "spectramind"
-
-# Versioning: integer or "None"
-# - int   → use fixed version (e.g. 0, 1, 2…)
-# - null  → auto-increment (recommended)
-version: null
-
-# Prefix applied to metric keys in the CSV
-prefix: ""
-
 # Notes:
-# - Output path structure: {save_dir}/{name}/version_{version}/metrics.csv
-# - Kaggle/CI safe: no external services, local files only.
+#   - Paths are relative unless explicitly absolute.
+#   - Kaggle/CI have their own env profiles (see kaggle.yaml).
+#   - Keep lightweight, reproducible, and DVC-aware.
+# ----------------------------------------------------------------------
+
+# Dataset root (DVC-tracked). Override if data lives elsewhere.
+data_dir: ${oc.env:SM_DATA_DIR, data}
+
+# Outputs (Hydra will append run dirs under this root).
+outputs_dir: ${oc.env:SM_OUTPUTS_DIR, outputs}
+
+# Cache for intermediate artifacts (calibrated cubes, preprocessed tensors).
+cache_dir: ${oc.env:SM_CACHE_DIR, .cache}
+
+# Checkpoints and trained models
+checkpoints_dir: ${oc.env:SM_CKPT_DIR, checkpoints}
+
+# Logging (CSV, JSONL, etc.)
+logs_dir: ${oc.env:SM_LOGS_DIR, logs}
+
+# Device selection (cpu | cuda | mps). Hydra/Lightning will consume this.
+device: ${oc.env:SM_DEVICE, cuda}
+
+# Reproducibility: default RNG seed (can override in training configs)
+seed: ${oc.env:SM_SEED, 42}
+
+# Parallelism (set to null for auto)
+num_workers: ${oc.env:SM_NUM_WORKERS, 4}
+
+# DVC remote profile (optional; only used if configured)
+dvc_remote: ${oc.env:SM_DVC_REMOTE, null}
+
+# ----------------------------------------------------------------------
+# This file is composed into train.yaml via:
+#   defaults:
+#     - env: local
+# ----------------------------------------------------------------------
