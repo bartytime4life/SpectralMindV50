@@ -2,14 +2,44 @@
   "$id": "https://spectramind-v50.org/schemas/manifest.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Submission Bundle Manifest",
+  "description": "Machine-parseable manifest describing a SpectraMind V50 submission bundle and its contents.",
   "type": "object",
   "additionalProperties": false,
+
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$",
+      "description": "SHA-256 hex digest"
+    },
+    "semver": {
+      "type": "string",
+      "description": "SemVer (optionally prefixed with 'v'), with optional prerelease/build",
+      "pattern": "^(?:v)?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "examples": ["v50.1.3", "50.1.3-rc.1", "v50.1.3+build.7"]
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp in RFC 3339 format"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{6,64}$",
+      "description": "Stable identifier (UUID/ULID/hash/slug)"
+    },
+    "relpath": {
+      "type": "string",
+      "description": "Relative path inside the bundle (no absolute paths or '..')",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\.{2})(?!.*//).+"
+    }
+  },
 
   "required": ["manifest_version", "created_at", "tool", "files"],
 
   "properties": {
     "manifest_version": { "type": "string", "const": "1.0" },
-    "created_at": { "type": "string", "format": "date-time" },
+    "created_at": { "$ref": "#/$defs/dateTime" },
 
     "tool": {
       "type": "object",
@@ -17,18 +47,13 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string", "const": "spectramind-cli" },
-        "version": {
-          "type": "string",
-          "description": "Semantic version of the CLI (e.g. v50.1.3).",
-          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-z0-9]+)?$"
-        }
+        "version": { "$ref": "#/$defs/semver", "description": "CLI version (accepts leading 'v')." }
       }
     },
 
     "run_id": {
-      "type": "string",
-      "description": "Stable identifier for the pipeline run (UUID, ULID, or hash).",
-      "pattern": "^[A-Za-z0-9_.:-]{6,64}$"
+      "$ref": "#/$defs/id",
+      "description": "Identifier for the pipeline run that produced this bundle."
     },
 
     "provenance": {
@@ -36,22 +61,32 @@
       "description": "Optional code/data lineage for reproducibility.",
       "additionalProperties": false,
       "properties": {
-        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{7,40}$" },
+        "git_commit": { "type": "string", "pattern": "^[A-Fa-f0-9]{7,40}$" },
         "git_branch": { "type": "string" },
         "dvc_hash": { "type": "string" },
         "dataset_id": { "type": "string" },
-        "config_hash": {
-          "type": "string",
-          "description": "SHA256 of the composed Hydra config snapshot.",
-          "pattern": "^[A-Fa-f0-9]{64}$"
-        }
+        "config_hash": { "$ref": "#/$defs/sha256", "description": "SHA256 of composed Hydra config snapshot." }
       }
     },
 
     "input_refs": {
       "type": "array",
       "description": "Logical inputs used to produce outputs (DVC paths, dataset versions, URIs).",
-      "items": { "type": "string" }
+      "items": { "type": "string" },
+      "uniqueItems": true,
+      "maxItems": 256
+    },
+
+    "bundle": {
+      "type": "object",
+      "description": "Optional descriptor of the packaged bundle itself (e.g., submission.zip).",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "$ref": "#/$defs/relpath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "content_type": { "type": "string", "description": "MIME type (e.g., application/zip)." }
+      }
     },
 
     "files": {
@@ -62,10 +97,10 @@
         "required": ["path", "sha256", "bytes"],
         "additionalProperties": false,
         "properties": {
-          "path": { "type": "string", "description": "Relative path inside the bundle (e.g. artifacts/submission.csv)." },
-          "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+          "path": { "$ref": "#/$defs/relpath", "description": "Relative path inside the bundle." },
+          "sha256": { "$ref": "#/$defs/sha256" },
           "bytes": { "type": "integer", "minimum": 0 },
-          "content_type": { "type": "string", "description": "MIME type (e.g. text/csv, application/json)." },
+          "content_type": { "type": "string", "description": "MIME type (e.g., text/csv, application/json)." },
           "schema": { "type": "string", "format": "uri", "description": "Schema URI governing this file, if applicable." },
           "role": {
             "type": "string",
@@ -74,6 +109,91 @@
           }
         }
       }
+      /* $comment: JSON Schema cannot enforce unique file paths across objects; enforce in post-check if needed. */
     }
-  }
+  },
+
+  "allOf": [
+    {
+      "$comment": "If any file is marked as the submission CSV, suggest CSV content type.",
+      "if": {
+        "properties": {
+          "files": {
+            "contains": {
+              "type": "object",
+              "properties": { "role": { "const": "submission_csv" } },
+              "required": ["role"]
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "items": {
+              "allOf": [
+                {
+                  "if": { "properties": { "role": { "const": "submission_csv" } }, "required": ["role"] },
+                  "then": {
+                    "properties": {
+                      "content_type": { "type": "string", "pattern": "^(text/csv|application/(x-)?csv)$" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+
+  "examples": [
+    {
+      "manifest_version": "1.0",
+      "created_at": "2025-09-11T18:42:03Z",
+      "tool": { "name": "spectramind-cli", "version": "v50.1.3" },
+      "run_id": "2025-09-11T18-40-00Z_ab12cd",
+      "provenance": {
+        "git_commit": "1a2b3c4d5e6f7a8b9c0d",
+        "git_branch": "main",
+        "config_hash": "9f2c3a0b4b2e4e5dde55c2e2f1f8b0f05b95d6f52f0f9b9a0c8d829fbf9f6f83"
+      },
+      "input_refs": [
+        "dvc://data/raw@a1b2c3",
+        "https://kaggle.com/competitions/neurips-2025-ariel-data-challenge"
+      ],
+      "bundle": {
+        "path": "artifacts/submission.zip",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bytes": 1048576,
+        "content_type": "application/zip"
+      },
+      "files": [
+        {
+          "path": "artifacts/submission.csv",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1234567,
+          "content_type": "text/csv",
+          "role": "submission_csv"
+        },
+        {
+          "path": "artifacts/manifest.json",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "bytes": 2048,
+          "content_type": "application/json",
+          "schema": "https://spectramind-v50.org/schemas/manifest.schema.json",
+          "role": "manifest"
+        },
+        {
+          "path": "artifacts/diagnostics/diagnostics_manifest.json",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "bytes": 8192,
+          "content_type": "application/json",
+          "schema": "https://spectramind-v50.org/schemas/diagnostics.schema.json",
+          "role": "diagnostics"
+        }
+      ]
+    }
+  ]
 }
