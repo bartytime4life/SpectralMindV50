@@ -2,35 +2,74 @@
   "$id": "https://spectramind-v50.org/schemas/metrics.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Experiment Metrics Snapshot",
-  "description": "Structured record of metrics, timings, and config lineage from a pipeline stage (train, predict, diagnose, submit). Ensures reproducibility, comparability, and auditability across runs.",
+  "description": "Structured record of metrics, timings, and config lineage from a pipeline stage (calibrate, preprocess, train, predict, diagnose, submit). Ensures reproducibility, comparability, and auditability across runs.",
   "type": "object",
   "additionalProperties": false,
+
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{6,128}$",
+      "description": "Stable identifier (UUID/ULID/hash/timestamp slug)."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$",
+      "description": "SHA-256 hex digest."
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp in RFC 3339 format."
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["calibrate", "preprocess", "train", "predict", "diagnose", "submit"]
+    },
+    "nonNegInt": { "type": "integer", "minimum": 0 },
+    "nonNegNum": { "type": "number",  "minimum": 0 }
+  },
 
   "required": ["run_id", "stage", "metrics", "timings", "created_at"],
 
   "properties": {
     "run_id": {
-      "type": "string",
-      "description": "Unique identifier for the run/session (UUID, timestamp, or hash)."
+      "$ref": "#/$defs/id",
+      "description": "Unique identifier for the run/session (UUID/ULID/hash/timestamp)."
     },
 
     "stage": {
-      "type": "string",
-      "enum": ["calibrate", "preprocess", "train", "predict", "diagnose", "submit"],
+      "$ref": "#/$defs/stage",
       "description": "Pipeline stage this snapshot corresponds to."
+    },
+
+    "step": {
+      "$ref": "#/$defs/nonNegInt",
+      "description": "Global step counter (e.g., optimizer steps)."
+    },
+
+    "epoch": {
+      "$ref": "#/$defs/nonNegInt",
+      "description": "Epoch index (training)."
+    },
+
+    "split": {
+      "type": "string",
+      "enum": ["train", "val", "test", "holdout"],
+      "description": "Data split the metrics refer to (when applicable)."
     },
 
     "metrics": {
       "type": "object",
       "description": "Key numeric metrics. Includes competition score (GLL), training/validation losses, and physics-informed diagnostics.",
       "properties": {
-        "gll":        { "type": "number", "description": "Gaussian Log-Likelihood (competition metric, with FGS1 weighting)." },
-        "loss":       { "type": "number", "description": "Training loss (composite if physics-informed)." },
-        "val_loss":   { "type": "number", "description": "Validation loss (if applicable)." },
-        "smoothness": { "type": "number", "description": "Smoothness prior penalty (FFT/curvature)." },
-        "nonneg":     { "type": "number", "description": "Non-negativity prior penalty." },
-        "band_coh":   { "type": "number", "description": "Band-coherence prior penalty." },
-        "calib_prior":{ "type": "number", "description": "Calibration prior penalty (FGS1 ↔ AIRS alignment)." }
+        "gll":         { "type": "number", "description": "Gaussian Log-Likelihood (competition metric, with FGS1 weighting)." },
+        "loss":        { "type": "number", "description": "Training loss (composite if physics-informed)." },
+        "val_loss":    { "type": "number", "description": "Validation loss (if applicable)." },
+        "smoothness":  { "type": "number", "description": "Smoothness prior penalty (FFT/curvature)." },
+        "nonneg":      { "type": "number", "description": "Non-negativity prior penalty." },
+        "band_coh":    { "type": "number", "description": "Band-coherence prior penalty." },
+        "calib_prior": { "type": "number", "description": "Calibration prior penalty (FGS1 ↔ AIRS alignment)." }
       },
       "additionalProperties": { "type": "number" }
     },
@@ -40,44 +79,82 @@
       "required": ["wall_ms"],
       "additionalProperties": false,
       "properties": {
-        "wall_ms": { "type": "integer", "minimum": 0, "description": "Elapsed wall-clock time (ms)." },
-        "cpu_ms":  { "type": "integer", "minimum": 0, "description": "CPU time (ms)." },
-        "gpu_ms":  { "type": "integer", "minimum": 0, "description": "GPU time (ms)." }
+        "wall_ms": { "$ref": "#/$defs/nonNegInt", "description": "Elapsed wall-clock time (ms)." },
+        "cpu_ms":  { "$ref": "#/$defs/nonNegInt", "description": "CPU time (ms)." },
+        "gpu_ms":  { "$ref": "#/$defs/nonNegInt", "description": "GPU time (ms)." }
       }
     },
 
     "tags": {
       "type": "array",
       "description": "Optional user-defined labels for experiment management.",
-      "items": { "type": "string" }
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "uniqueItems": true,
+      "maxItems": 64
     },
 
     "config_hash": {
-      "type": "string",
+      "oneOf": [
+        { "$ref": "#/$defs/sha256" },
+        { "type": "string", "pattern": "^[A-Fa-f0-9]{7,40}$", "description": "Short hash allowed for convenience." }
+      ],
       "description": "Stable hash of Hydra/DVC config snapshot used for this run."
     },
 
     "git_rev": {
       "type": "string",
-      "description": "Git commit SHA (or tag) at which the run was executed."
+      "pattern": "^[A-Fa-f0-9]{7,40}$",
+      "description": "Git commit SHA (or abbreviated)."
     },
 
     "env": {
       "type": "object",
       "description": "Environment metadata for CI ↔ Kaggle parity and determinism.",
+      "additionalProperties": true,
       "properties": {
-        "python": { "type": "string" },
-        "torch": { "type": "string" },
+        "python":     { "type": "string" },
+        "torch":      { "type": "string" },
         "torch_cuda": { "type": "string" },
-        "cudnn": { "type": ["string", "integer"] }
-      },
-      "additionalProperties": true
+        "cudnn":      { "type": ["string", "integer"] }
+      }
     },
 
     "created_at": {
-      "type": "string",
-      "format": "date-time",
+      "$ref": "#/$defs/dateTime",
       "description": "Timestamp when metrics snapshot was generated."
     }
-  }
+  },
+
+  "allOf": [
+    {
+      "$comment": "If stage is train/predict/diagnose, encourage providing a split.",
+      "if": { "properties": { "stage": { "enum": ["train", "predict", "diagnose"] } }, "required": ["stage"] },
+      "then": { "properties": { "split": { "enum": ["train", "val", "test", "holdout"] } } }
+    }
+  ],
+
+  "examples": [
+    {
+      "run_id": "2025-09-11T19-05-00Z_ab12cd",
+      "stage": "train",
+      "split": "val",
+      "epoch": 12,
+      "step": 3456,
+      "metrics": {
+        "gll": -1.2345,
+        "loss": 0.4567,
+        "val_loss": 0.5678,
+        "smoothness": 0.0123,
+        "nonneg": 0.0000,
+        "band_coh": 0.0041,
+        "calib_prior": 0.0007
+      },
+      "timings": { "wall_ms": 1234567, "cpu_ms": 876543, "gpu_ms": 654321 },
+      "tags": ["env=kaggle", "cfg=v50"],
+      "config_hash": "9f2c3a0b4b2e4e5dde55c2e2f1f8b0f05b95d6f52f0f9b9a0c8d829fbf9f6f83",
+      "git_rev": "1a2b3c4d5e6f7a8b9c0d",
+      "env": { "python": "3.11.7", "torch": "2.4.0", "torch_cuda": "12.1", "cudnn": "9" },
+      "created_at": "2025-09-11T19:05:30Z"
+    }
+  ]
 }
