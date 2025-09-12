@@ -1,0 +1,79 @@
+digraph provenance {
+	fontname=Helvetica fontsize=12 rankdir=LR
+	node [fontname=Helvetica fontsize=11 shape=box]
+	edge [arrowsize=0.7 fontname=Helvetica fontsize=10]
+	subgraph cluster_legend {
+		color=lightgrey fontsize=11 label=Legend style=rounded
+		L_IMPL [label="Solid edge = Implemented in code" shape=plaintext]
+		L_REF [label="Dashed edge = Referenced / influenced" shape=plaintext]
+		L_INTRO [label="Bold edge = Introduced in release" shape=plaintext]
+	}
+	subgraph cluster_adrs {
+		color=lightgrey label="Architecture Decision Records (ADRs)" style=rounded
+		ADR0000 [label="ADR 0000
+Template"]
+		ADR0001 [label="ADR 0001
+Choose Hydra + DVC"]
+		ADR0002 [label="ADR 0002
+Composite Physics-Informed Loss"]
+		ADR0004 [label="ADR 0004
+Dual Encoder Fusion
+(FGS1 + AIRS)"]
+	}
+	subgraph cluster_changelog {
+		color=lightgrey label="Changelog Releases" style=rounded
+		C0001 [label="v0.0.1
+(2025-09-01)"]
+		C0002 [label="v0.0.2
+(2025-09-02)"]
+		C0003 [label="v0.0.3
+(2025-09-03)"]
+		C0100 [label="v0.1.0
+(2025-09-05)"]
+		C0110 [label="v0.1.1
+(2025-09-06)"]
+	}
+	subgraph cluster_code {
+		color=lightgrey label="Code Modules" style=rounded
+		CLI [label="src/spectramind/cli.py"]
+		CFG [label="configs/**"]
+		DVC [label="dvc.yaml"]
+		ENC_F [label="src/spectramind/models/encoders/fgs1_encoder.py"]
+		ENC_A [label="src/spectramind/models/encoders/airs_encoder.py"]
+		FUS [label="src/spectramind/models/fusion_xattn.py"]
+		DEC [label="src/spectramind/models/decoder.py"]
+		LOSS [label="src/spectramind/losses/composite.py"]
+		CAL_LOSS [label="src/spectramind/losses/calibration.py"]
+		DATA [label="src/spectramind/data/datamodule.py"]
+	}
+	ADR0001 -> CLI [style=dashed]
+	ADR0001 -> CFG [style=solid]
+	ADR0001 -> DVC [style=solid]
+	ADR0004 -> ENC_F [style=solid]
+	ADR0004 -> ENC_A [style=solid]
+	ADR0004 -> FUS [style=solid]
+	ADR0004 -> DEC [style=dashed]
+	ADR0002 -> LOSS [style=solid]
+	ADR0002 -> CAL_LOSS [style=dashed]
+	C0001 -> CLI [penwidth=2]
+	C0001 -> CFG [penwidth=2]
+	C0001 -> DVC [penwidth=2]
+	C0002 -> ENC_F [penwidth=2]
+	C0002 -> ENC_A [penwidth=2]
+	C0003 -> FUS [penwidth=2]
+	C0003 -> DEC [penwidth=2]
+	C0100 -> LOSS [penwidth=2]
+	C0100 -> CAL_LOSS [penwidth=2]
+	C0110 -> DATA [penwidth=2]
+	ADR0001 -> C0001 [style=dashed]
+	ADR0004 -> C0003 [style=dashed]
+	ADR0002 -> C0100 [style=dashed]
+	CLI -> CFG [style=dotted]
+	CLI -> DVC [style=dotted]
+	DATA -> ENC_F [style=dotted]
+	DATA -> ENC_A [style=dotted]
+	ENC_F -> FUS [style=dotted]
+	ENC_A -> FUS [style=dotted]
+	FUS -> DEC [style=dotted]
+	DEC -> LOSS [style=dotted]
+}
