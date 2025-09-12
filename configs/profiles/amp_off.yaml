@@ -1,0 +1,16 @@
+# Force FP32 everywhere to rule out AMP-related issues
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+
+trainer:
+  precision: "32-true"
+
+precision:
+  mode: "32-true"
+  tf32:
+    allow: false
+    cudnn_allow: false
+
+experiment:
+  tags: ["profile:amp_off"]
