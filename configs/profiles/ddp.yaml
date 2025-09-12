@@ -1,0 +1,27 @@
+# Multi-GPU DDP (single node). Use torchrun or PL launchers.
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+  - /training/accumulate: accumulate
+
+trainer:
+  accelerator: "gpu"
+  devices: ${oc.env:SM_DEVICES, 2}
+  strategy: "ddp"
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 60}
+  # PL handles Dist. Samplers; keep shuffle true in data_loader.train
+
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 4}
+  persistent_workers: true
+  prefetch_factor: 4
+  pin_memory: true
+  use_distributed_sampler: "auto"
+
+experiment:
+  tags: ["profile:ddp"]
