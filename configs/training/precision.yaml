@@ -1,116 +1,136 @@
 # configs/training/precision.yaml
 # ======================================================================
-# SpectraMind V50 — Precision / Numerical Config
+# SpectraMind V50 — Precision / Numerical Config (Lightning 2.x safe)
 # ======================================================================
-# Controls mixed precision, gradient scaling, determinism, and numerical
-# safety. Designed for Kaggle GPUs but portable to CI/local.
-#
-# How to use:
-#   - Set trainer.precision in train.yaml to: ${precision.mode}
-#   - Access the rest from your training bootstrap (callbacks/strategies).
-#   - Typical override:
-#       python -m spectramind train +training/precision=precision \
-#         precision.mode=bf16-mixed precision.tf32.allow=true
+# Controls mixed precision, gradient scaling, determinism, TF32, matmul,
+# and safety guards. Defaults are Kaggle-GPU friendly (T4/V100/AMP).
 # ======================================================================
 
-# Precision mode for the PL Trainer:
-# - "32-true"    → full fp32 (safe, slower)
-# - "16-mixed"   → fp16 autocast + GradScaler (fast, default on most GPUs)
-# - "bf16-mixed" → bfloat16 autocast (if supported; stable numerics)
-# - "64-true"    → float64 (debug only)
 precision:
-  mode: ${oc.env:SM_PRECISION, "16-mixed"}
+  # Trainer.precision (map directly in Trainer factory)
+  # "32-true" | "16-mixed" | "bf16-mixed" | "64-true"
+  mode: ${oc.env:SM_PRECISION,"16-mixed"}
 
-  # Autocast configuration (applies when mode is *-mixed)
+  # -------------------------
+  # Autocast (effective when mode ends with "-mixed")
+  # -------------------------
   autocast:
     enabled: true
-    # dtype is inferred from mode; override only for expert use:
-    # options: "float16" | "bfloat16"
+    # dtype inferred from mode; override only for expert use:
+    # "float16" | "bfloat16" | null (auto)
     dtype: null
     cache_enabled: true
-    # Exclude modules/ops from autocast if they’re numerically sensitive
-    denylist_modules: []     # e.g., ["HeteroscedasticDecoder"]
+    # Modules/ops to exclude from autocast (numerically sensitive)
+    denylist_modules: []   # e.g., ["spectramind.models.decoders.Heteroscedastic"]
+    # Force CPU autocast off (CUDA runs handle most gains)
+    cpu_enabled: false
 
-  # Automatic gradient scaling (PL manages scaler when *-mixed)
+  # -------------------------
+  # Gradient Scaler (used by fp16 mixed precision; ignored by bf16)
+  # -------------------------
   grad_scaler:
-    enabled: true
-    init_scale: 65536         # 2**16
+    enabled: true          # harmless if bf16; Lightning no-ops as needed
+    init_scale: 65536      # 2**16
     growth_interval: 2000
     backoff_factor: 0.5
-    hysteresis: 2             # tolerate intermittent overflows
+    hysteresis: 2
     enabled_on_cpu: false
 
-  # Determinism & backend policy
+  # -------------------------
+  # Determinism & Repro Seeds
+  # -------------------------
   determinism:
     torch_use_deterministic_algorithms: true
-    cudnn_benchmark: false          # determinism > throughput
+    cudnn_benchmark: false
     cudnn_deterministic: true
+    # Stable hashing across Hydra sweeps & workers
     python_hash_seed: ${hydra:job.num,42}
     seed: ${oc.env:SM_SEED,42}
 
-  # TF32 gates (safe defaults off; enable after numeric validation)
+  # -------------------------
+  # TF32 (Ampere+). Keep OFF until you validate numerics.
+  # -------------------------
   tf32:
-    allow: false                    # torch.backends.cuda.matmul.allow_tf32
-    cudnn_allow: false              # torch.backends.cudnn.allow_tf32
+    allow: false           # torch.backends.cuda.matmul.allow_tf32
+    cudnn_allow: false     # torch.backends.cudnn.allow_tf32
 
-  # PyTorch 2.x matmul precision (affects GEMM kernels)
+  # -------------------------
+  # PyTorch 2.x matmul precision policy
+  # -------------------------
   matmul:
-    precision: "highest"            # "highest" | "high" | "medium"
+    precision: "highest"   # "highest" | "high" | "medium"
 
-  # Overflow / anomaly guards
+  # -------------------------
+  # Overflow / Anomaly Guards
+  # -------------------------
   safety:
-    nan_guard: true                 # trap NaN/Inf and raise
-    detect_anomaly: false           # extremely slow if true; use for debugging
+    nan_guard: true        # assert/raise on NaN/Inf in loss or grads
+    detect_anomaly: false  # VERY slow; enable for pinpoint debugging only
     overflow_recovery:
       enabled: true
-      # When GradScaler overflow is detected, apply these steps:
       steps:
-        - zero_grad                 # clear grads to avoid contamination
-        - skip_step                 # skip optimizer step for this batch
+        - zero_grad        # purge contaminated grads
+        - skip_step        # skip optimizer step for this batch
+        # Add "reduce_lr" here if you implement a reactive LR drop
 
-  # Gradient clipping policy (trainer wires these values)
+  # -------------------------
+  # Gradient Clipping (map into Trainer)
+  # -------------------------
   grad_clip:
     enabled: true
-    algorithm: "norm"               # "norm" | "value"
-    value: 1.0                      # if algorithm: "value" → max abs grad
-    max_norm: 5.0                   # if algorithm: "norm" → L2 cap
+    algorithm: "norm"      # "norm" | "value"
+    value: 1.0             # for algorithm: "value"
+    max_norm: 5.0          # for algorithm: "norm"
 
-  # Zero-grad behavior—avoids keeping stale grad tensors around
+  # -------------------------
+  # Zero-grad behavior
+  # -------------------------
   zero_grad:
     set_to_none: true
 
-# Optional precision-adjacent features (wire up in training loop as needed)
+# -------------------------
+# Precision-adjacent options (enable in training loop)
+# -------------------------
 adjacent:
-  # Memory/perf tradeoff (enable for larger batch sizes)
   activation_checkpointing:
     enabled: false
-    # list of module names/qualified paths to checkpoint
-    modules: []     # e.g., ["models.fgs1_mamba.Block", "models.airs_gnn.Layer"]
+    modules: []  # e.g., ["spectramind.models.fgs1.MambaBlock", "spectramind.models.airs.GNNLayer"]
 
-  # Exponential Moving Average of weights—often stabilizes mixed precision
   ema:
     enabled: false
     decay: 0.999
-    device: "cpu"         # "cpu" or "auto" (buffer on CUDA if memory allows)
+    device: "cpu"          # "cpu" | "auto"
     pin_memory: true
 
-  # Stochastic Weight Averaging (late-phase smoothing of the loss landscape)
   swa:
     enabled: false
-    start_epoch: 0.8       # as fraction of max_epochs (0.8 → last 20%)
+    start_epoch: 0.8       # fraction of max_epochs (0.8 → last 20%)
     anneal_epochs: 5
     lr: null               # null → reuse optimizer LR
 
+# -------------------------
+# Runtime clamps (Trainer should apply after every LR compute)
+# -------------------------
+limits:
+  lr_min: 1.0e-7
+  lr_max: ${optimizer.lr}
+
 # --------------------------------------------------------------------------------------
-# Integration hints (not used directly by Hydra, but referenced by your code):
-# - In your Trainer factory, map:
-#     trainer.precision                ← ${precision.mode}
-#     trainer.gradient_clip_algorithm  ← ${precision.grad_clip.algorithm}
-#     trainer.gradient_clip_val        ← ${precision.grad_clip.max_norm} (if norm)
-#   And set torch/cudnn flags from determinism/tf32/matmul above.
+# Integration notes (wire these in your Trainer factory):
+#   trainer.precision                 ← ${precision.mode}
+#   trainer.gradient_clip_algorithm   ← ${precision.grad_clip.algorithm}
+#   trainer.gradient_clip_val         ← ${precision.grad_clip.max_norm} (if norm)
+#   torch.backends.cuda.matmul.allow_tf32   = ${precision.tf32.allow}
+#   torch.backends.cudnn.allow_tf32         = ${precision.tf32.cudnn_allow}
+#   torch.set_float32_matmul_precision(${precision.matmul.precision})
+#   torch.use_deterministic_algorithms(${precision.determinism.torch_use_deterministic_algorithms})
+#   torch.backends.cudnn.benchmark     = ${precision.determinism.cudnn_benchmark}
+#   torch.backends.cudnn.deterministic = ${precision.determinism.cudnn_deterministic}
+#   GradScaler config: apply only when mode == "16-mixed" (safe to pass otherwise)
+#   NaN guard: add hooks/asserts around loss.backward() and post-optimizer checks.
 # --------------------------------------------------------------------------------------
 
-# Hydra runtime (quiet)
+# Hydra runtime noise floor
 hydra:
   job_logging:
     root:
