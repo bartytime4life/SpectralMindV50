@@ -1,0 +1,23 @@
+# Jupyter/Kaggle notebook ergonomics: quieter, progressive refresh, shorter runs
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+
+trainer:
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 8}
+  log_every_n_steps: 10
+  val_check_interval: 0.5
+
+training:
+  logger:
+    offline: ${oc.env:SM_LOG_OFFLINE,true}
+
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS,2}
+  persistent_workers: false
+
+experiment:
+  tags: ["profile:notebook"]
