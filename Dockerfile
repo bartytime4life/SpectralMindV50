@@ -30,12 +30,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_REQUIRE_VIRTUALENV=1 \
     UV_NO_TELEMETRY=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
-    # Virtualenv path; stable for layer caching
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH \
-    # Avoid matplotlib writing to unwritable homedir
     MPLCONFIGDIR=/tmp/matplotlib \
-    # CUDA / NCCL reliability & perf
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CUDA_MODULE_LOADING=LAZY \
@@ -47,18 +44,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # ---------- base OS ----------
-# Keep OS minimal, deterministic; apt cache is mounted for speed.
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
  && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-distutils python3-dev \
+      python3 python3-pip python3-venv python3-distutils python3-dev \
       build-essential pkg-config \
       git git-lfs curl ca-certificates \
       graphviz tini \
       libffi-dev libssl-dev \
-      # Shared libs for common wheels (opencv/scipy/numba/etc.)
       libgl1 libglib2.0-0 \
-      # Optional: locale to avoid LC_* warnings
       locales \
  && git lfs install --skip-repo \
  && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
@@ -79,32 +73,30 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
 WORKDIR /app
 
 # ==============================================================================
-# (Optional) Builder stage to prebuild wheels for hermetic installs
-# Toggle with: --build-arg BUILD_WHEELS=1
+# Builder: produce wheelhouse for hermetic install (optional)
+#   Build with:  docker build --target builder --build-arg BUILD_WHEELS=1 .
 # ==============================================================================
 FROM runtime AS builder
 ARG INSTALL_EXTRAS=""
 ARG BUILD_WHEELS=0
-# Copy only files that affect dependency resolution to maximize cache hits
-COPY --chown=${APP_USER}:${APP_USER} pyproject.toml README.md ./
-# Optional: add constraints/locks here
-# COPY --chown=${APP_USER}:${APP_USER} constraints.txt ./
 
-# Produce a local wheelhouse containing our project wheel + all dependencies.
-# This enables --no-index installs in the final stage (offline/CI friendly).
-RUN if [ "${BUILD_WHEELS}" = "1" ]; then \
+# Copy minimal metadata first (better cache)
+COPY --chown=${APP_USER}:${APP_USER} pyproject.toml README.md ./
+# Copy sources and runtime assets needed by the wheel (package_data)
+COPY --chown=${APP_USER}:${APP_USER} src ./src
+COPY --chown=${APP_USER}:${APP_USER} configs ./configs
+COPY --chown=${APP_USER}:${APP_USER} schemas ./schemas
+
+# Produce local wheels (project + deps) when requested
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "${BUILD_WHEELS}" = "1" ]; then \
       echo ">> Building wheelhouse (extras='${INSTALL_EXTRAS}')"; \
       mkdir -p /opt/wheels; \
-      # Cache pip downloads between builds
-      --mount=type=cache,target=/root/.cache/pip \
-      bash -lc ' \
-        set -euo pipefail; \
-        if [ -z "${INSTALL_EXTRAS}" ]; then \
-          python -m pip wheel --wheel-dir=/opt/wheels . ; \
-        else \
-          python -m pip wheel --wheel-dir=/opt/wheels ".[${INSTALL_EXTRAS}]" ; \
-        fi \
-      '; \
+      if [ -z "${INSTALL_EXTRAS}" ]; then \
+        python -m pip wheel --wheel-dir=/opt/wheels . ; \
+      else \
+        python -m pip wheel --wheel-dir=/opt/wheels ".[${INSTALL_EXTRAS}]" ; \
+      fi ; \
     else \
       echo ">> Skipping wheel build (BUILD_WHEELS=0)"; \
     fi
@@ -114,44 +106,45 @@ RUN if [ "${BUILD_WHEELS}" = "1" ]; then \
 ############################
 FROM runtime AS final
 
-# Allow optional extras & wheel-based install
 ARG INSTALL_EXTRAS=""
 ARG BUILD_WHEELS=0
 
-# Copy dependency metadata for install step
+# Copy metadata needed for pip editable installs
 COPY --chown=${APP_USER}:${APP_USER} pyproject.toml README.md ./
 
-# If we built a wheelhouse, copy it and install hermetically; otherwise install online.
+# If a wheelhouse was built, copy it and install hermetically; else from index
 COPY --from=builder /opt/wheels /opt/wheels
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ -d /opt/wheels ] && [ "$(ls -A /opt/wheels || true)" ]; then \
       echo ">> Installing from local wheelhouse (no network)"; \
+      # Try direct wheels; if multiple, install spectramind-v50 with extras to ensure entrypoints
       python -m pip install --no-index --find-links=/opt/wheels /opt/wheels/*.whl || \
-      (echo ">> Fallback (extras) from wheelhouse" && \
-       python -m pip install --no-index --find-links=/opt/wheels "spectramind-v50[${INSTALL_EXTRAS}]" || true); \
+      ( echo ">> Fallback: install package (extras) from wheelhouse"; \
+        if [ -z "${INSTALL_EXTRAS}" ]; then \
+          python -m pip install --no-index --find-links=/opt/wheels spectramind-v50; \
+        else \
+          python -m pip install --no-index --find-links=/opt/wheels "spectramind-v50[${INSTALL_EXTRAS}]"; \
+        fi ); \
     else \
-      echo ">> Installing from index (cache-mounted)"; \
+      echo ">> Installing from index (editable)"; \
       if [ -z "${INSTALL_EXTRAS}" ]; then \
         python -m pip install -e . ; \
       else \
         python -m pip install -e ".[${INSTALL_EXTRAS}]" ; \
-      fi; \
+      fi ; \
     fi
 
-# ------------------------------------------------------------------------------
-# App code & configs (keep later to maximize build cache on code changes)
-# ------------------------------------------------------------------------------
+# App code & configs (late copy = better cache reuse for deps)
 COPY --chown=${APP_USER}:${APP_USER} src ./src
 COPY --chown=${APP_USER}:${APP_USER} configs ./configs
 COPY --chown=${APP_USER}:${APP_USER} schemas ./schemas
-# Optional diagrams/assets if packaged
+# Optional: COPY assets if you ship them outside package
 # COPY --chown=${APP_USER}:${APP_USER} assets ./assets
 
 # Pre-compile bytecode (best-effort)
 RUN python -m compileall -q /app/src || true
 
 # ---------- healthcheck ----------
-# Check CLI is importable and prints help within 10s.
 HEALTHCHECK --interval=1m --timeout=10s --start-period=15s --retries=3 \
   CMD spectramind --help >/dev/null || exit 1
 
@@ -172,7 +165,7 @@ CMD ["--help"]
 # SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # RUN --mount=type=cache,target=/var/cache/apt \
 #     apt-get update -y && apt-get install -y --no-install-recommends \
-#       python3 python3-venv python3-distutils python3-dev \
+#       python3 python3-pip python3-venv python3-distutils python3-dev \
 #       build-essential pkg-config git git-lfs curl ca-certificates graphviz tini \
 #       libffi-dev libssl-dev libgl1 libglib2.0-0 locales \
 #   && git lfs install --skip-repo \
