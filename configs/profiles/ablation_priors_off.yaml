@@ -1,0 +1,6 @@
+# Priors OFF (GLL-only) — uses your ablation overlay
+defaults:
+  - /training/ablation: ablation
+
+experiment:
+  tags: ${oc.env:SM_TAGS, ["profile:ablation_priors_off","gll=on"]}
