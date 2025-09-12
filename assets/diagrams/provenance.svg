@@ -1,22 +1,18 @@
-# Rebuild provenance.svg (with robust fallbacks)
-from __future__ import annotations
-
-import os
+# Rebuild provenance graph; attempt SVG, always write DOT; show results
 from pathlib import Path
+import json
 
-# Try to import graphviz; handle missing system 'dot' binaries gracefully
+# Try to import graphviz
 try:
     from graphviz import Digraph
-    _HAS_GRAPHVIZ = True
-except Exception:
-    _HAS_GRAPHVIZ = False
+    HAS_GRAPHVIZ = True
+except Exception as e:
+    HAS_GRAPHVIZ = False
+    gv_import_err = repr(e)
 
 out_dir = Path("/mnt/data/assets/diagrams")
 out_dir.mkdir(parents=True, exist_ok=True)
 
-# ------------------------------
-# Graph construction (pure DOT)
-# ------------------------------
 g = Digraph("provenance", format="svg")
 g.attr(rankdir="LR", fontsize="12", fontname="Helvetica")
 g.attr("node", fontname="Helvetica", fontsize="11", shape="box")
@@ -29,7 +25,7 @@ with g.subgraph(name="cluster_legend") as c:
     c.node("L_REF", "Dashed edge = Referenced / influenced", shape="plaintext")
     c.node("L_INTRO", "Bold edge = Introduced in release", shape="plaintext")
 
-# ADRs
+# ADRs cluster
 with g.subgraph(name="cluster_adrs") as c:
     c.attr(label="Architecture Decision Records (ADRs)", style="rounded", color="lightgrey")
     c.node("ADR0000", "ADR 0000\nTemplate")
@@ -37,7 +33,7 @@ with g.subgraph(name="cluster_adrs") as c:
     c.node("ADR0002", "ADR 0002\nComposite Physics-Informed Loss")
     c.node("ADR0004", "ADR 0004\nDual Encoder Fusion\n(FGS1 + AIRS)")
 
-# Changelog
+# Changelog cluster
 with g.subgraph(name="cluster_changelog") as c:
     c.attr(label="Changelog Releases", style="rounded", color="lightgrey")
     c.node("C0001", "v0.0.1\n(2025-09-01)")
@@ -46,7 +42,7 @@ with g.subgraph(name="cluster_changelog") as c:
     c.node("C0100", "v0.1.0\n(2025-09-05)")
     c.node("C0110", "v0.1.1\n(2025-09-06)")
 
-# Code
+# Code cluster
 with g.subgraph(name="cluster_code") as c:
     c.attr(label="Code Modules", style="rounded", color="lightgrey")
     c.node("CLI", "src/spectramind/cli.py")
@@ -60,7 +56,7 @@ with g.subgraph(name="cluster_code") as c:
     c.node("CAL_LOSS", "src/spectramind/losses/calibration.py")
     c.node("DATA", "src/spectramind/data/datamodule.py")
 
-# ADRs -> Code (solid = implemented, dashed = influenced)
+# Provenance edges (ADRs -> Code)
 g.edge("ADR0001", "CLI", style="dashed")
 g.edge("ADR0001", "CFG", style="solid")
 g.edge("ADR0001", "DVC", style="solid")
@@ -73,7 +69,7 @@ g.edge("ADR0004", "DEC", style="dashed")
 g.edge("ADR0002", "LOSS", style="solid")
 g.edge("ADR0002", "CAL_LOSS", style="dashed")
 
-# Release -> Code (penwidth=2 = “bold introduced/changed”)
+# Changelog edges (Release -> Code introduced/changed)
 for rel, targets in {
     "C0001": ["CLI", "CFG", "DVC"],
     "C0002": ["ENC_F", "ENC_A"],
@@ -84,12 +80,12 @@ for rel, targets in {
     for t in targets:
         g.edge(rel, t, penwidth="2")
 
-# Cross-links: ADRs referenced by releases (dashed)
+# Cross-links: ADRs referenced by releases
 g.edge("ADR0001", "C0001", style="dashed")
 g.edge("ADR0004", "C0003", style="dashed")
 g.edge("ADR0002", "C0100", style="dashed")
 
-# Dataflow-ish (dotted)
+# Connect data flow-ish
 for a, b in [
     ("CLI", "CFG"), ("CLI", "DVC"),
     ("DATA", "ENC_F"), ("DATA", "ENC_A"),
@@ -98,28 +94,33 @@ for a, b in [
 ]:
     g.edge(a, b, style="dotted")
 
-# ------------------------------
-# Emit files
-# ------------------------------
 dot_path = out_dir / "provenance.dot"
-svg_base = out_dir / "provenance"   # graphviz will add .svg
+svg_base = out_dir / "provenance"   # graphviz will append .svg
 
-# Always write the DOT source for reproducibility
+# Always write DOT
 dot_path.write_text(g.source, encoding="utf-8")
 
-svg_path = None
-if _HAS_GRAPHVIZ:
-    try:
-        # Render to SVG (requires system 'dot' executable)
-        svg_path = Path(g.render(str(svg_base), cleanup=True))
-    except Exception as e:
-        # Fall back to DOT only; caller can render later in CI/GH Action
-        print(f"[WARN] Graphviz render failed: {e!r}")
-        svg_path = None
+result = {
+    "dot_path": str(dot_path),
+    "svg_path": None,
+    "render_ok": False,
+    "has_graphviz": HAS_GRAPHVIZ,
+    "notes": [],
+}
 
-print(f"[OK] DOT written: {dot_path}")
-if svg_path:
-    print(f"[OK] SVG written: {svg_path}")
+# Attempt SVG render if possible
+if HAS_GRAPHVIZ:
+    try:
+        svg_path = Path(g.render(str(svg_base), cleanup=True))
+        result["svg_path"] = str(svg_path)
+        result["render_ok"] = True
+    except Exception as e:
+        result["notes"].append(f"Graphviz render failed: {e!r}")
 else:
-    print("[INFO] SVG not generated (missing Graphviz 'dot'). Use:")
-    print(f"  dot -Tsvg {dot_path} -o {svg_base.with_suffix('.svg')}")
+    result["notes"].append("graphviz Python package not importable in this environment.")
+
+# List directory contents for visibility
+listing = sorted(p.name for p in out_dir.glob("provenance*"))
+result["dir_listing"] = listing
+
+print(json.dumps(result, indent=2))
