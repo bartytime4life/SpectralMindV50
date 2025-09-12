@@ -1,0 +1,15 @@
+# Run training briefly and then force diagnostics step(s)
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+
+trainer:
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 3}
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+
+experiment:
+  tags: ["profile:diagnose"]
