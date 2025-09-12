@@ -1,18 +1,14 @@
 # =====================================================================
-# 📦 SpectraMind V50 — Development Dependencies (dev-only)
+# 📦 SpectraMind V50 — Development Dependencies (dev-only, hardened)
 # ---------------------------------------------------------------------
 # Scope:
-#   Dev/test/lint/type/docs/security dependencies. No runtime libs here,
-#   to avoid drift with requirements-kaggle.txt / pyproject.toml.
+#   Dev/test/lint/type/docs/security deps only (no runtime libs).
 #
 # Usage:
 #   pip install -r requirements-dev.txt
 #
-# Notes:
-#   • Keep versions pinned for reproducible CI.
-#   • If tests touch runtime libs (pandas/polars/etc.), install runtime too:
-#       pip install -r requirements-kaggle.txt -r requirements-dev.txt
-#   • Aligns with .pre-commit-config.yaml and CI workflows.
+# If tests need runtime libs, install both:
+#   pip install -r requirements-kaggle.txt -r requirements-dev.txt
 # =====================================================================
 
 # --- Testing ----------------------------------------------------------
@@ -20,22 +16,20 @@ pytest==8.4.2                 # unit/integration tests
 pytest-cov==6.3.0             # coverage reporting
 pytest-xdist==3.8.0           # parallel tests
 pytest-timeout==2.4.0         # fail fast on hangs
-pytest-rerunfailures==14.0    # stabilize flaky external IO tests
+pytest-rerunfailures==14.0    # stabilize flaky IO/external tests
 hypothesis==6.112.0           # property-based tests
-
-# Optional local coverage runner (pytest-cov bundles coverage, this helps CLIs)
-coverage==7.6.1
+coverage==7.6.1               # CLI (pytest-cov depends on coverage; this helps direct runs)
 
 # --- Linting & Style --------------------------------------------------
-ruff==0.12.12                 # one-tool: lint + format (kept per your pin)
-pre-commit==3.7.1             # consistent hooks runner
+ruff==0.12.12                 # lint+format (kept per your pin)
+pre-commit==3.7.1             # consistent hooks
 toml-sort==0.23.1             # stable pyproject ordering
+codespell==2.3.0              # spelling in docs/code
 
-# Markdown formatting & spell-check (matches your pre-commit comments)
+# Markdown formatting (matches pre-commit usage)
 mdformat==0.7.17
 mdformat-gfm==0.3.6
 mdformat-frontmatter==2.0.8
-codespell==2.3.0
 
 # --- Type Checking ----------------------------------------------------
 mypy==1.17.1
@@ -45,24 +39,24 @@ types-requests==2.32.0.20240907
 
 # --- JSON / Schema Validation ----------------------------------------
 check-jsonschema==0.33.3
-jsonschema==4.23.0            # lockstep with runtime (requirements-kaggle.txt)
+jsonschema==4.23.0            # lockstep with runtime
 
 # --- Notebook Hygiene (pre-commit hooks) ------------------------------
-nbstripout==0.7.1             # strip outputs from notebooks
-nbqa==1.8.5                   # run ruff/mypy on notebooks (optional)
+nbstripout==0.7.1             # strip outputs
+nbqa==1.8.5                   # run ruff/mypy on notebooks
 
 # --- Docs / Diagrams --------------------------------------------------
 mkdocs==1.6.0
 mkdocs-material==9.5.39
 pymdown-extensions==10.8.1
-mkdocs-mermaid2-plugin==1.1.1 # enable Mermaid in MkDocs builds
+mkdocs-mermaid2-plugin==1.1.1
 
 # --- Security / SBOM --------------------------------------------------
-pip-audit==2.7.3              # Python supply-chain vuln audit
-cyclonedx-bom==4.3.2          # SBOM generation (CycloneDX CLI)
-# bandit==1.7.9               # (optional) static security scan
+pip-audit==2.7.3              # aligns with CI workflow
+cyclonedx-bom==4.3.2          # CycloneDX SBOM CLI
+# bandit==1.7.9               # optional static security scan
 
 # --- Packaging / Release ----------------------------------------------
-packaging==24.1
+packaging==24.2               # align with runtime pin
 build==1.2.2.post1
 twine==5.1.1
