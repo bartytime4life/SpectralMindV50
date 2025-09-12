@@ -1,26 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# SpectraMind V50 — Self-Test Script (Upgraded)
+# SpectraMind V50 — Self-Test Script (Upgraded, Precise Timing)
 # ------------------------------------------------------------------------------
-# What it does
-#   • Runs a tiny end-to-end pipeline to validate repo wiring (imports, CLI,
-#     configs, checkpoints & packaging) across Local / CI / Kaggle.
-#   • Measures per-stage duration, writes colored console logs + JSONL audit.
-#   • Creates an isolated working dir under artifacts/selftest/ with run hash.
-#
-# What it does NOT do
-#   • Heavy training. This is a smoke test with tiny batches/epochs.
-#
-# Usage:
-#   bin/spectramind-selftest.sh [--env local|kaggle|ci] [--gpu|--cpu]
-#                               [--keep] [--verbose]
-#
-# Exit codes:
-#   0  = all stages passed
-#   1+ = failure (stage name is shown; see artifacts/selftest/*)
+# Runs a tiny end-to-end pipeline to validate wiring across Local / CI / Kaggle.
+# Measures per-stage wall time precisely (atomic wrapper), logs to console + JSONL.
+# Creates isolated workdir under artifacts/selftest/<run_id>.
 # ==============================================================================
-
 set -euo pipefail
+set -o errtrace
 
 # ----------------------------- CLI & defaults ---------------------------------
 ENV_HINT=""
@@ -44,6 +31,16 @@ log()  { echo -e "${c_blu}[SELFTEST]${c_off} $*"; }
 ok()   { echo -e "${c_grn}[SELFTEST]${c_off} $*"; }
 warn() { echo -e "${c_yel}[SELFTEST]${c_off} $*"; }
 fail() { echo -e "${c_red}[SELFTEST ERROR]${c_off} $*"; exit 1; }
+
+$VERBOSE && set -x
+
+_on_err() {
+  local exit_code=$?
+  local line_no=${BASH_LINENO[0]:-?}
+  echo -e "${c_red}[SELFTEST ERROR] Failed at line ${line_no}. Last: '${BASH_COMMAND}' (exit ${exit_code})${c_off}" >&2
+  exit $exit_code
+}
+trap _on_err ERR
 
 # ----------------------------- Env detection ----------------------------------
 is_kaggle=0
@@ -75,7 +72,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTI_DIR="${ROOT_DIR}/artifacts/selftest"
 mkdir -p "${ARTI_DIR}"
 
-# Short run hash (timestamp + random)
 ts="$(date -u +"%Y%m%dT%H%M%SZ")"
 rand="$RANDOM"
 RUN_ID="st_${ts}_${rand}"
@@ -84,91 +80,106 @@ LOG_FILE="${WORKDIR}/selftest.log"
 JSONL="${WORKDIR}/events.jsonl"
 mkdir -p "${WORKDIR}"
 
-# Ensure logs also go to file
+# Tee all output
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 # ----------------------------- Pre-flight checks ------------------------------
-log "Python: $(python -V 2>&1 | tr -d '\n')"
 command -v python >/dev/null 2>&1 || fail "Python not found in PATH"
+log "Python: $(python -V 2>&1 | tr -d '\n')"
 
-# Ensure the spectramind module is importable
-python - <<'PY' || fail "spectramind package not importable; check PYTHONPATH/install."
+python - <<'PY' || exit 1
 import importlib, sys
 mod = importlib.util.find_spec("spectramind")
 cli = importlib.util.find_spec("spectramind.__main__") or importlib.util.find_spec("spectramind.cli")
 print("spectramind:", "OK" if mod else "MISSING")
 print("CLI entry  :", "OK" if cli else "MISSING")
-assert mod is not None
+if mod is None:
+    sys.exit(2)
 PY
+[[ $? -eq 0 ]] || fail "spectramind package not importable; check PYTHONPATH/install."
 
-# Helpful config sanity (best-effort)
 for f in "configs" "src/spectramind"; do
   [[ -e "${ROOT_DIR}/${f}" ]] || warn "Expected path missing: ${f} (continuing)"
 done
 
-# ----------------------------- JSONL helpers ----------------------------------
+# ----------------------------- JSONL helper -----------------------------------
 event() {
-  # event <stage> <status> <seconds> [msg]
+  # event <stage> <status> <seconds> [msg...]
   local stage="$1"; local status="$2"; local secs="$3"; shift 3 || true
   local msg="${*:-}"
-  printf '{"ts":"%s","run_id":"%s","stage":"%s","status":"%s","seconds":%s,"msg":%s}\n' \
-    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    "${RUN_ID}" \
-    "${stage}" \
-    "${status}" \
-    "${secs}" \
-    "$(python - <<PY
-import json,sys
-print(json.dumps(" ".join(sys.argv[1:])) if len(sys.argv)>1 else "null")
-PY ${msg@Q})" \
-    >> "${JSONL}"
+  python - "$stage" "$status" "$secs" "$RUN_ID" "$msg" >> "${JSONL}" <<'PY'
+import json, sys, datetime
+stage, status, secs, run_id, msg = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4], " ".join(sys.argv[5:])
+rec = {
+  "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+  "run_id": run_id,
+  "stage": stage,
+  "status": status,
+  "seconds": round(secs, 3),
+  "msg": msg or None
+}
+print(json.dumps(rec))
+PY
+}
+
+# ----------------------- Precise timing wrapper (atomic) ----------------------
+# Executes the command *inside Python*, measures wall time precisely,
+# returns child's exit code, and prints duration to stdout for capture.
+_run_timed_python() {
+  # _run_timed_python <stage> <argv...>
+  local stage="$1"; shift
+  python - "$stage" "$@" <<'PY'
+import sys, time, subprocess, shlex
+stage = sys.argv[1]
+cmd = sys.argv[2:]
+# Run without shell; each token is already separated by bash
+t0 = time.monotonic()
+proc = subprocess.run(cmd, check=False)
+dt = time.monotonic() - t0
+# Emit only the duration so caller can capture it
+print(f"{dt:.6f}")
+# Propagate child's exit code
+sys.exit(proc.returncode)
+PY
 }
 
 run_step() {
   # run_step <stage-name> <command...>
   local stage="$1"; shift
   log "▶ ${stage}"
-  local t0 t1 dt
-  t0=$(python - <<'PY';import time;print(time.time());PY)
-  if "$@"; then
-    t1=$(python - <<'PY';import time;print(time.time());PY)
-    dt=$(python - <<PY;print({}.fromkeys([None]).__class__);PY >/dev/null 2>&1; python - <<PY
-import sys,math
-t0=float(sys.argv[1]); t1=float(sys.argv[2])
-print(round(t1-t0,3))
-PY "$t0" "$t1")
-    ok "✔ ${stage} (${dt}s)"
-    event "${stage}" "ok" "${dt}"
+  local duration rc
+  # Capture duration (stdout) and exit code
+  duration="$(_run_timed_python "$stage" "$@")"; rc=$?
+  if [[ $rc -eq 0 ]]; then
+    ok "✔ ${stage} (${duration}s)"
+    event "${stage}" "ok" "${duration}"
     return 0
   else
-    t1=$(python - <<'PY';import time;print(time.time());PY)
-    dt=$(python - <<PY
-import sys
-t0=float(sys.argv[1]); t1=float(sys.argv[2])
-print(round(t1-t0,3))
-PY "$t0" "$t1")
-    event "${stage}" "fail" "${dt}" "command failed"
+    event "${stage}" "fail" "${duration:-0.0}" "command failed (rc=${rc})"
     fail "${stage} failed — see ${LOG_FILE}"
   fi
 }
 
-# Cleanup trap
+# Cleanup trap — delete workdir unless --keep (but keep last_selftest.* snapshots)
 cleanup() {
-  echo -e "${c_dim}[SELFTEST] logs: ${LOG_FILE}${c_off}"
+  echo -e "${c_dim}[SELFTEST] log:   ${LOG_FILE}${c_off}"
   echo -e "${c_dim}[SELFTEST] jsonl: ${JSONL}${c_off}"
-  $KEEP_WORKDIR || true
+  if ! $KEEP_WORKDIR; then
+    cp -f "${LOG_FILE}" "${ARTI_DIR}/last_selftest.log" || true
+    cp -f "${JSONL}"    "${ARTI_DIR}/last_selftest.jsonl" || true
+    rm -rf "${WORKDIR}" || true
+    echo -e "${c_dim}[SELFTEST] cleaned ${WORKDIR} (kept last_selftest.*)${c_off}"
+  fi
 }
 trap cleanup EXIT
 
 # ----------------------------- Common overrides -------------------------------
-# Tiny, deterministic run settings (Hydra-friendly), can be tuned later
 CALIB_OVR="+calib=fast +data=debug env=${env_name}"
 TRAIN_OVR="+data=debug env=${env_name} trainer.max_epochs=1 trainer.limit_train_batches=2 trainer.limit_val_batches=1 seed=42"
 PRED_OVR="+data=debug env=${env_name}"
 DIAG_OVR="+data=debug env=${env_name} report_dir=${WORKDIR}/report"
 SUBM_OVR="+data=debug env=${env_name} dry_run=true"
 
-# Device override for training/predict if your CLI supports it
 if [[ "${FORCE_DEVICE}" == "cpu" ]]; then
   TRAIN_OVR="${TRAIN_OVR} device=cpu"
   PRED_OVR="${PRED_OVR} device=cpu"
@@ -178,33 +189,25 @@ else
 fi
 
 # ----------------------------- Run stages -------------------------------------
-# 1) Calibrate (fast)
-run_step "calibrate" \
-  python -m spectramind calibrate ${CALIB_OVR}
+run_step "calibrate" python -m spectramind calibrate ${CALIB_OVR}
+run_step "train"     python -m spectramind train     ${TRAIN_OVR}
 
-# 2) Train (smoke)
-run_step "train" \
-  python -m spectramind train ${TRAIN_OVR}
-
-# 3) Predict (auto/latest checkpoint if supported; else last.ckpt)
-# Try to auto-discover a checkpoint inside artifacts/ or similar, else fallback.
+# Checkpoint discovery (first last.ckpt, else any .ckpt)
 CKPT="last.ckpt"
-if compgen -G "artifacts/**/last.ckpt" > /dev/null; then
-  CKPT="$(ls -1 artifacts/**/last.ckpt | head -n 1)"
-elif compgen -G "artifacts/**/*.ckpt" > /dev/null; then
-  CKPT="$(ls -1 artifacts/**/*.ckpt | head -n 1)"
+if command -v find >/dev/null 2>&1; then
+  if CK=$(find "${ROOT_DIR}/artifacts" -type f -name 'last.ckpt' -print -quit 2>/dev/null); then
+    [[ -n "$CK" ]] && CKPT="$CK"
+  fi
+  if [[ "$CKPT" == "last.ckpt" ]]; then
+    if CK=$(find "${ROOT_DIR}/artifacts" -type f -name '*.ckpt' -print -quit 2>/dev/null); then
+      [[ -n "$CK" ]] && CKPT="$CK"
+    fi
+  fi
 fi
 log "Using checkpoint: ${CKPT}"
-run_step "predict" \
-  python -m spectramind predict ${PRED_OVR} checkpoint="${CKPT}"
-
-# 4) Diagnose (HTML/JSON)
-run_step "diagnose" \
-  python -m spectramind diagnose ${DIAG_OVR}
-
-# 5) Submit (dry-run)
-run_step "submit" \
-  python -m spectramind submit ${SUBM_OVR}
+run_step "predict"  python -m spectramind predict  ${PRED_OVR}  checkpoint="${CKPT}"
+run_step "diagnose" python -m spectramind diagnose ${DIAG_OVR}
+run_step "submit"   python -m spectramind submit   ${SUBM_OVR}
 
 ok "✅ Self-test completed successfully."
 echo "[SELFTEST] Workdir: ${WORKDIR}"
