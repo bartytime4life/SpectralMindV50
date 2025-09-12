@@ -1,0 +1,28 @@
+# Tiny, loud, fail-fast debug: single batch/epoch, fp32, anomaly checks
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+
+trainer:
+  max_epochs: 1
+  limit_train_batches: 1
+  limit_val_batches: 1
+  log_every_n_steps: 1
+  profiler: "simple"
+
+precision:
+  mode: "32-true"
+  safety:
+    detect_anomaly: true
+
+data_loader:
+  num_workers: 0
+  persistent_workers: false
+
+experiment:
+  tags: ["profile:debug","fail-fast"]
