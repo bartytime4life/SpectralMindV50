@@ -1,48 +1,81 @@
+# configs/training/dataloader.yaml
 # ======================================================================
 # SpectraMind V50 — DataLoader Config (Upgraded)
 # ======================================================================
-# Governs DataLoader behavior across training/validation/test:
-# - batch sizing
-# - shuffling / drop_last
-# - worker threading & memory pinning
-# - custom collate functions for dual-sensor fusion (FGS1 + AIRS)
-#
-# Designed for Kaggle/CI constraints: limited CPU cores, no internet,
-# heavy GPU I/O. All keys are Hydra/oc.env overridable (SM_*).
+# Governs DataLoader behavior across train/val/test/predict:
+# • batch sizing • shuffle/drop_last • workers/pinning/prefetch
+# • custom collate for dual-sensor fusion (FGS1 + AIRS)
+# Kaggle/CI-safe: low worker counts, deterministic, no net access.
+# All keys overridable via SM_* env vars.
 # ======================================================================
 
-dataloader:
-  # ------------------------------ General ------------------------------
-  batch_size: ${oc.env:SM_BATCH_SIZE, 32}
-  shuffle: ${oc.env:SM_SHUFFLE, true}
-  drop_last: ${oc.env:SM_DROP_LAST, true}
+# ------------------------------ Canonical node ------------------------------
+data_loader:
+  # ------------------------------ General --------------------------------
+  batch_size: ${oc.env:SM_BATCH_SIZE,32}
+  shuffle: ${oc.env:SM_SHUFFLE,true}
+  drop_last: ${oc.env:SM_DROP_LAST,true}
 
-  # ------------------------------ Workers ------------------------------
-  num_workers: ${oc.env:SM_WORKERS, 2}          # Kaggle-safe default
-  prefetch_factor: ${oc.env:SM_PREFETCH, 2}     # per-worker prefetch
-  persistent_workers: ${oc.env:SM_PERSISTENT, false}
-  pin_memory: ${oc.env:SM_PIN_MEMORY, true}
+  # ------------------------------ Workers --------------------------------
+  # NOTE: num_workers==0 for maximal determinism; 1–2 for mild speedup on Kaggle.
+  num_workers: ${oc.env:SM_WORKERS,2}
+  persistent_workers: ${oc.env:SM_PERSISTENT,false}   # only effective if num_workers>0
+  prefetch_factor: ${oc.env:SM_PREFETCH,2}            # per-worker; ignored if num_workers==0
+  pin_memory: ${oc.env:SM_PIN_MEMORY,true}
+  pin_memory_device: ${oc.env:SM_PIN_DEVICE,""}       # "" | "cuda" (torch>=2)
+  multiprocessing_context: ${oc.env:SM_MP_CTX,""}     # "" | "spawn" | "fork" | "forkserver"
+  timeout: ${oc.env:SM_DL_TIMEOUT,0}                  # seconds; 0 = no timeout
 
-  # ------------------------------ Collate ------------------------------
-  collate_fn: ${oc.env:SM_COLLATE, "spectramind.data.collate.dual_channel_collate"}
-  # The collate function aligns:
-  #   - FGS1 long time-series (possibly binned / detrended)
-  #   - AIRS 283-bin spectral cubes (μ, σ targets)
-  # Produces consistent tensors + masks across a batch.
+  # ------------------------------ Seeding --------------------------------
+  # For reproducible shuffles across workers.
+  seed_workers: ${oc.env:SM_SEED_WORKERS,true}
+  generator_seed: ${oc.env:SM_SEED,1337}
 
-  # -------------------------- Validation Loader ------------------------
+  # ------------------------------ Collate --------------------------------
+  collate_fn: ${oc.env:SM_COLLATE,"spectramind.data.collate.dual_channel_collate"}
+  # Aligns:
+  #   • FGS1 long time-series (may be binned/detrended)
+  #   • AIRS 283-bin spectral tensors (μ, σ targets)
+  # Produces tensors + masks with consistent padding and dtype.
+
+  # --------------------------- Sampler / DDP -----------------------------
+  # Leave null to let PL/DataModule inject DistributedSampler for DDP.
+  sampler: null
+  use_distributed_sampler: ${oc.env:SM_USE_DIST_SAMPLER,"auto"}  # "auto"|true|false
+  # When DDP is on:
+  #   - shuffle should be true for train; DistributedSampler handles epoch shuffling.
+
+  # ------------------------- Per-split overrides -------------------------
+  train:
+    batch_size: ${oc.env:SM_BATCH_SIZE,32}
+    shuffle: true
+    drop_last: true
+
   val:
-    batch_size: ${oc.env:SM_VAL_BATCH_SIZE, 64}
+    batch_size: ${oc.env:SM_VAL_BATCH_SIZE,64}
     shuffle: false
     drop_last: false
 
-  # ----------------------------- Test Loader ---------------------------
   test:
-    batch_size: ${oc.env:SM_TEST_BATCH_SIZE, 64}
+    batch_size: ${oc.env:SM_TEST_BATCH_SIZE,64}
     shuffle: false
     drop_last: false
 
-# ------------------------------ Hydra I/O ------------------------------
+  predict:
+    batch_size: ${oc.env:SM_PRED_BATCH_SIZE,64}
+    shuffle: false
+    drop_last: false
+
+  # -------------------------- Advanced hooks -----------------------------
+  # Optional fully-qualified paths your DataModule can import/call.
+  worker_init_fn: ${oc.env:SM_WORKER_INIT,""}   # e.g., "spectramind.utils.dl.worker_init"
+  generator_factory: ${oc.env:SM_GEN_FACTORY,""}# e.g., "spectramind.utils.dl.make_generator"
+
+# ------------------------------ Back-compat alias ------------------------------
+# Some stacks reference `dataloader`. Keep it pointing to `data_loader`.
+dataloader: ${data_loader}
+
+# ------------------------------ Hydra I/O --------------------------------
 hydra:
   job_logging:
     root:
