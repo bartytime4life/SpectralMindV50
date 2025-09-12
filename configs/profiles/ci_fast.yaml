@@ -1,0 +1,6 @@
+# GitHub/Kaggle CI: 2 epochs FP32, tiny slices, deterministic
+defaults:
+  - /training/fast_ci: fast_ci
+
+experiment:
+  tags: ${oc.env:SM_TAGS, ["profile:ci_fast"]}
