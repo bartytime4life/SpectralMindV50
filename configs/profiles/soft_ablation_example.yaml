@@ -1,0 +1,21 @@
+# Soft ablation reference (reduce priors by 10×; keep them non-zero)
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/accumulate: accumulate
+
+loss:
+  composite:
+    weights:
+      smoothness: ${oc.env:SM_ABL_SMOOTH, 0.1}
+      nonneg:     ${oc.env:SM_ABL_NONNEG, 0.1}
+      band_coherence: ${oc.env:SM_ABL_BAND, 0.1}
+      calibration: ${oc.env:SM_ABL_CALIB, 0.1}
+
+experiment:
+  tags: ${oc.env:SM_TAGS, ["profile:soft_ablation(0.1x)"]}
