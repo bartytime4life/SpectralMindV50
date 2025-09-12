@@ -1,0 +1,39 @@
+# Full production run: long schedule, cosine decay, warmup, AdamW
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/accumulate: accumulate
+
+trainer:
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 120}
+  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 50}
+
+precision:
+  mode: ${oc.env:SM_PRECISION,"16-mixed"}
+  tf32:
+    allow: false
+    cudnn_allow: false
+
+optimizer:
+  name: adamw
+  lr_scaling:
+    enabled: ${oc.env:SM_LR_SCALE,true}
+    reference_batch_size: ${oc.env:SM_REF_BS,256}
+
+scheduler:
+  name: cosine_annealing
+  warmup:
+    enabled: ${oc.env:SM_WARMUP,true}
+    steps: ${oc.env:SM_WARMUP_STEPS,1000}
+  cosine_annealing:
+    T_max: ${trainer.max_epochs}
+    eta_min: 1.0e-6
+
+experiment:
+  tags: ${oc.env:SM_TAGS, ["profile:full"]}
