@@ -1,0 +1,14 @@
+# Resume from the latest/best checkpoint path provided via env
+defaults:
+  - /training/lightning: lightning
+
+trainer:
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 60}
+
+paths:
+  ckpt_dir: ${oc.env:SM_CKPT_DIR,artifacts/models}
+  resume_ckpt: ${oc.env:SM_RESUME_CKPT,""}     # e.g., artifacts/models/last.ckpt
+
+# Your launcher/Trainer factory should pass ckpt_path=paths.resume_ckpt when non-empty.
+experiment:
+  tags: ["profile:resume"]
