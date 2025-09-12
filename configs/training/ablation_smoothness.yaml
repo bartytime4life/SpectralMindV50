@@ -1,25 +1,30 @@
+# configs/training/ablation_smoothness.yaml
 # ======================================================================
 # SpectraMind V50 — Ablate ONLY the smoothness prior
 # Usage:
-#   python -m spectramind train +defaults='[/training/ablation_smoothness]'
+#   spectramind train +defaults='[/training/ablation_smoothness]'
+# Notes:
+#   • This overlay ONLY sets the smoothness weight; other priors inherit
+#     from your base loss config unchanged.
+#   • Flip via env: SM_ABL_SMOOTH (default 0.0 = fully ablated)
 # ======================================================================
 
 loss:
   composite:
     weights:
-      # keep main task & other priors as-is (env-overridable)
-      gll:          ${oc.env:SM_ABL_GLL, 1.0}
-      nonneg:       ${oc.env:SM_ABL_NONNEG, null}
-      band_coherence:${oc.env:SM_ABL_BAND, null}
-      calibration:  ${oc.env:SM_ABL_CALIB, null}
-      # ablate target prior
-      smoothness:   ${oc.env:SM_ABL_SMOOTH, 0.0}
+      smoothness: ${oc.env:SM_ABL_SMOOTH, 0.0}
 
+# Light, CI/Kaggle-friendly trainer tweaks for quick comparison runs
 trainer:
   max_epochs: ${oc.env:SM_ABL_EPOCHS, 25}
   val_check_interval: ${oc.env:SM_ABL_VAL_INTERVAL, 0.5}
   log_every_n_steps: ${oc.env:SM_ABL_LOG_EVERY, 20}
 
+# Add a visible tag so dashboards/JSONL/TB separate these runs
+experiment:
+  tags: ${oc.env:SM_TAGS, ["ablation:smoothness=off"]}
+
+# Timestamped, segregated outputs for this ablation
 hydra:
   run:
     dir: outputs/train-ablation/smoothness/${now:%Y-%m-%d_%H-%M-%S}
