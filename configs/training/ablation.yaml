@@ -1,39 +1,32 @@
+# configs/training/ablation.yaml
 # ======================================================================
 # SpectraMind V50 — Loss Ablation Profile (Upgraded)
 # ======================================================================
-# Use this profile to zero out auxiliary physics-informed losses
-# and test the effect of ablating priors vs. full composite loss.
-#
+# Zero all auxiliary physics-informed priors; keep GLL active.
 # Usage:
-#   python -m spectramind train +defaults='[/training/ablation]'
-#
-# Notes:
-# - Keeps Gaussian Log-Likelihood (GLL) term active for leaderboard metric.
-# - Auxiliary priors (smoothness, nonnegativity, band coherence,
-#   calibration) set to 0.0.
-# - Training shortened for faster turnaround.
+#   spectramind train +defaults='[/training/ablation]'
 # ======================================================================
 
 loss:
   composite:
     weights:
-      gll: ${oc.env:SM_ABL_GLL, 1.0}                 # main task
-      smoothness: ${oc.env:SM_ABL_SMOOTH, 0.0}       # ablated
-      nonneg: ${oc.env:SM_ABL_NONNEG, 0.0}           # ablated
-      band_coherence: ${oc.env:SM_ABL_BAND, 0.0}     # ablated
-      calibration: ${oc.env:SM_ABL_CALIB, 0.0}       # ablated
+      gll:            ${oc.env:SM_ABL_GLL, 1.0}   # main task on
+      smoothness:     ${oc.env:SM_ABL_SMOOTH, 0.0}
+      nonneg:         ${oc.env:SM_ABL_NONNEG, 0.0}
+      band_coherence: ${oc.env:SM_ABL_BAND, 0.0}
+      calibration:    ${oc.env:SM_ABL_CALIB, 0.0}
 
-# ----------------------------------------------------------------------
-# Trainer overrides for ablation runs (shorter, faster, CI/Kaggle-safe)
-# ----------------------------------------------------------------------
+# Short, Kaggle/CI-friendly trainer tweaks
 trainer:
-  max_epochs: ${oc.env:SM_ABL_EPOCHS, 25}
-  val_check_interval: ${oc.env:SM_ABL_VAL_INTERVAL, 0.5}  # validate twice per epoch
+  max_epochs:        ${oc.env:SM_ABL_EPOCHS, 25}
+  val_check_interval:${oc.env:SM_ABL_VAL_INTERVAL, 0.5}   # validate 2×/epoch
   log_every_n_steps: ${oc.env:SM_ABL_LOG_EVERY, 20}
 
-# ----------------------------------------------------------------------
-# Hydra bookkeeping for reproducibility
-# ----------------------------------------------------------------------
+# Make runs easy to filter in JSONL/TB/W&B
+experiment:
+  tags: ${oc.env:SM_TAGS, ["ablation:priors=off", "gll=on"]}
+
+# Reproducible, segregated outputs
 hydra:
   run:
     dir: outputs/train-ablation/${now:%Y-%m-%d_%H-%M-%S}
