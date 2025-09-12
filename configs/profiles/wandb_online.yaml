@@ -1,0 +1,16 @@
+# W&B online tracking (disable for Kaggle by switching to kaggle profile)
+defaults:
+  - /training/logger: logger
+
+training:
+  logger:
+    offline: false
+    backend:
+      name: "wandb"
+      passthrough:
+        project: ${oc.env:WANDB_PROJECT,"spectramind-v50"}
+        entity: ${oc.env:WANDB_ENTITY,""}
+        run_name: "${experiment.name}-${now:%Y%m%d-%H%M%S}${training.logger.uuid_suffix}"
+
+experiment:
+  tags: ["profile:wandb_online"]
