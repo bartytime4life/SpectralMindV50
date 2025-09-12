@@ -1,0 +1,13 @@
+# Inference-only runs (no training), disable checkpoints/early-stop
+defaults:
+  - /training/lightning: lightning
+  - /training/dataloader: dataloader
+
+trainer:
+  max_epochs: 0
+  enable_checkpointing: false
+
+callbacks: {}
+
+experiment:
+  tags: ["profile:predict_only"]
