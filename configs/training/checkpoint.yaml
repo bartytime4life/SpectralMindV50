@@ -1,22 +1,32 @@
+# configs/callbacks/model_checkpoint.yaml
 # ======================================================================
-# SpectraMind V50 — ModelCheckpoint Config (Upgraded)
+# SpectraMind V50 — ModelCheckpoint Config (Lightning 2.x, Upgraded)
 # ======================================================================
-# Swapable Hydra config for PyTorch Lightning ModelCheckpoint callback.
-# Provides env-driven overrides for monitoring, modes, retention, and
-# filenames. Safe defaults tuned for Kaggle/CI reproducibility.
+# Hydra-swappable config for pytorch_lightning.callbacks.ModelCheckpoint.
+# Safe defaults for Kaggle/CI; env overrides via SM_CKPT_*.
 # ======================================================================
 
 _target_: pytorch_lightning.callbacks.ModelCheckpoint
 
+# Toggle (let your callback builder skip registering if falsy)
+_enabled: ${oc.env:SM_CKPT_ENABLED, true}
+
 # ------------------------------ Monitoring ------------------------------
+# Must correspond to a logged metric (see training/lightning.yaml)
 monitor: ${oc.env:SM_CKPT_MONITOR, "val/loss"}
-mode: ${oc.env:SM_CKPT_MODE, "min"}    # "min" for loss/GLL; "max" for scores
+mode: ${oc.env:SM_CKPT_MODE, "min"}          # "min" for loss/GLL; "max" for scores
 
 # ------------------------------ Retention -------------------------------
-save_top_k: ${oc.env:SM_CKPT_TOPK, 3}  # keep best N checkpoints
+# save_top_k: 3 → keep best 3; 0 → keep none; -1 → keep all (requires disk headroom)
+save_top_k: ${oc.env:SM_CKPT_TOPK, 3}
 save_last: ${oc.env:SM_CKPT_LAST, true}
-every_n_epochs: ${oc.env:SM_CKPT_EVERY_EPOCH, 1}
-every_n_train_steps: ${oc.env:SM_CKPT_EVERY_STEPS, null}
+
+# Choose exactly ONE cadence below (others null). Your factory should enforce mutual exclusivity.
+every_n_epochs: ${oc.env:SM_CKPT_EVERY_EPOCH, 1}      # int | null
+every_n_train_steps: ${oc.env:SM_CKPT_EVERY_STEPS, null}  # int | null
+
+# Optional: time-based cadence (factory converts to timedelta if >0)
+every_n_seconds: ${oc.env:SM_CKPT_EVERY_SECS, 0}      # 0 disables time-based saves
 
 # ------------------------------- Paths ----------------------------------
 dirpath: ${oc.env:SM_CKPT_DIR, ${paths.ckpt_dir}}
@@ -25,3 +35,12 @@ filename: ${oc.env:SM_CKPT_FILENAME, "epoch{epoch:03d}-step{step}-valloss{val/lo
 # ------------------------------- Options --------------------------------
 auto_insert_metric_name: ${oc.env:SM_CKPT_AUTO_NAME, false}
 save_on_train_epoch_end: ${oc.env:SM_CKPT_ON_TRAIN_END, true}
+
+# When true, Lightning will raise if monitored metric is missing at save time.
+strict: ${oc.env:SM_CKPT_STRICT, true}
+
+# ------------------------------ Safety ---------------------------------
+# Max on-disk size gate (MB). Factory can prune extra old checkpoints if exceeded.
+disk_budget_mb: ${oc.env:SM_CKPT_DISK_BUDGET_MB, 2048}
+# Keep an always-fresh "latest.ckpt" symlink/copy for resumability (factory-managed).
+maintain_latest_link: ${oc.env:SM_CKPT_LATEST_LINK, true}
