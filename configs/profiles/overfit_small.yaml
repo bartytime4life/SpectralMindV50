@@ -1,0 +1,20 @@
+# Overfit a tiny slice to validate learning signal + loss plumbing
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+
+trainer:
+  max_epochs: 50
+  overfit_batches: 0.01      # PL will iterate same small set
+  log_every_n_steps: 5
+
+precision:
+  mode: "32-true"
+
+experiment:
+  tags: ["profile:overfit_small"]
