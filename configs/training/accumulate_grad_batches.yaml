@@ -1,38 +1,44 @@
+# configs/training/accumulate.yaml
 # ======================================================================
-# SpectraMind V50 — Gradient Accumulation Config
+# SpectraMind V50 — Gradient Accumulation Config (Upgraded)
 # ======================================================================
 # Defines how many mini-batches to accumulate before one optimizer step.
-# This allows simulation of larger effective batch sizes under GPU/VRAM
-# constraints (esp. Kaggle’s 16 GB GPUs).
-#
-# Usage:
-#   spectramind train +training/accumulate_grad_batches=2
-#
-# Notes:
-# - Effective batch size = dataloader.batch_size * accumulate_grad_batches
-# - Value = 1 → no accumulation (default).
-# - Adjust LR scaling when increasing accumulation (linear scaling rule).
+# Effective batch size = data_loader.batch_size * accumulate_grad_batches
+# Wire to Trainer as: trainer.accumulate_grad_batches ← ${accumulate_grad_batches}
 # ======================================================================
 
-# Default accumulation factor
+# Default accumulation factor (Kaggle-safe)
 accumulate_grad_batches: ${oc.env:SM_ACCUM, 2}
 
-# ----------------------------------------------------------------------
-# Profiles tuned for common environments
-# ----------------------------------------------------------------------
+# ------------------------------ Derived --------------------------------
+# Useful for LR scaling or logs. (OmegaConf eval.)
+derived:
+  effective_batch_size: ${eval:'${data_loader.batch_size} * ${accumulate_grad_batches}'}
+
+# ------------------------------ Presets --------------------------------
 profiles:
   kaggle:
-    accumulate_grad_batches: ${oc.env:SM_ACCUM_KAGGLE, 2}   # safe for T4 / 16 GB
+    accumulate_grad_batches: ${oc.env:SM_ACCUM_KAGGLE, 2}   # T4/L4 16GB safe
   local:
     accumulate_grad_batches: ${oc.env:SM_ACCUM_LOCAL, 1}    # no accumulation
   large_gpu:
     accumulate_grad_batches: ${oc.env:SM_ACCUM_LARGE, 4}    # A100/RTX6000 class
   debug:
-    accumulate_grad_batches: 1                              # ensure quick feedback
+    accumulate_grad_batches: 1                              # fastest feedback
 
-# ----------------------------------------------------------------------
-# Hydra bookkeeping
-# ----------------------------------------------------------------------
+# ------------------------------ Notes ----------------------------------
+# • If you increase accumulation, consider linear LR scaling:
+#     optimizer.lr ← base_lr * (accumulate_grad_batches / reference_accum)
+#   You can also enable configs/training/optimizer.yaml → lr_scaling.
+# • With step-based schedulers (OneCycle, step, polynomial with steps):
+#     ensure total update steps reflect accumulation:
+#       total_steps ≈ floor(num_batches / accumulate_grad_batches) * epochs
+# • Keep gradient clipping in Trainer/precision.yaml — it operates on the
+#   accumulated gradients right before optimizer.step().
+# • For DDP, Lightning handles gradient syncs under the hood; accumulation
+#   applies per process.
+
+# ------------------------------ Hydra I/O ------------------------------
 hydra:
   run:
     dir: outputs/training/accum/${now:%Y-%m-%d_%H-%M-%S}
