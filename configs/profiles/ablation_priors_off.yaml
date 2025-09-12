@@ -1,6 +1,9 @@
-# Priors OFF (GLL-only) — uses your ablation overlay
+# configs/profiles/ablation_priors_off.yaml
+# Priors OFF (GLL-only) — use the ablation overlay and tag the run
 defaults:
   - /training/ablation: ablation
 
+# Optional: add/merge a run name for easier filtering
 experiment:
-  tags: ${oc.env:SM_TAGS, ["profile:ablation_priors_off","gll=on"]}
+  name: ${oc.env:SM_EXPERIMENT_NAME, "ablation-priors-off"}
+  tags: ${oc.env:SM_TAGS, ["profile:ablation_priors_off", "gll=on"]}
