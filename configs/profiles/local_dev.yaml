@@ -1,0 +1,33 @@
+# Local development: faster feedback, rich UI, partial epochs
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/accumulate: accumulate
+
+trainer:
+  accelerator: ${oc.env:SM_ACCELERATOR,"auto"}
+  devices: ${oc.env:SM_DEVICES,1}
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 10}
+  limit_train_batches: ${oc.env:SM_LIMIT_TRAIN,0.25}
+  limit_val_batches: ${oc.env:SM_LIMIT_VAL,0.5}
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY,10}
+  profiler: ${oc.env:SM_PROFILER,null}
+
+precision:
+  mode: ${oc.env:SM_PRECISION,"32-true"}  # keep debugging simple
+  safety:
+    detect_anomaly: ${oc.env:SM_DETECT_ANOMALY,false}
+
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS,4}
+  persistent_workers: false
+  pin_memory: true
+  prefetch_factor: 2
+
+experiment:
+  tags: ${oc.env:SM_TAGS, ["profile:local_dev"]}
