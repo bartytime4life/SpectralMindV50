@@ -1,0 +1,10 @@
+# Safe settings for producing a Kaggle submission artifact
+defaults:
+  - /profiles/kaggle: kaggle
+
+trainer:
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 60}
+
+# If your CLI has `submit` stage, the same profile can be reused.
+experiment:
+  tags: ["profile:kaggle_submit"]
