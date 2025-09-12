@@ -1,4 +1,4 @@
-# Rebuild provenance graph; attempt SVG, always write DOT; show results
+# Execute the user's graphviz script verbatim (with environment-safe paths)
 from pathlib import Path
 import json
 
