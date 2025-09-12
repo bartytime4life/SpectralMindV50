@@ -1,0 +1,16 @@
+# MLflow tracking (local or remote)
+defaults:
+  - /training/logger: logger
+
+training:
+  logger:
+    offline: false
+    backend:
+      name: "mlflow"
+      passthrough:
+        tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,""}
+        experiment_name: ${experiment.name}
+        run_name: "${experiment.name}-${now:%Y%m%d-%H%M%S}${training.logger.uuid_suffix}"
+
+experiment:
+  tags: ["profile:mlflow"]
