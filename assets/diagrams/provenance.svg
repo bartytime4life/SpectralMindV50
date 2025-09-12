@@ -1,25 +1,119 @@
-# Inspect the generated SVG for validity and basic structure
+# Build a syntax-aware provenance SVG with tooltips and stable IDs, then sanitize for renderer compatibility
 from pathlib import Path
 import xml.etree.ElementTree as ET
-import json
 
-svg_path = Path("/mnt/data/assets/diagrams/provenance.svg")
-out = {"exists": svg_path.exists(), "size_bytes": None, "head": None, "tail": None, "xml_ok": None, "root_tag": None, "width": None, "height": None, "viewBox": None}
+# Graphviz build
+from graphviz import Digraph
 
-if svg_path.exists():
-    data = svg_path.read_text(encoding="utf-8", errors="replace")
-    out["size_bytes"] = len(data.encode("utf-8"))
-    out["head"] = data[:400]
-    out["tail"] = data[-400:]
-    try:
-        root = ET.fromstring(data)
-        out["xml_ok"] = True
-        out["root_tag"] = root.tag
-        out["width"] = root.attrib.get("width")
-        out["height"] = root.attrib.get("height")
-        out["viewBox"] = root.attrib.get("viewBox")
-    except Exception as e:
-        out["xml_ok"] = False
-        out["xml_err"] = repr(e)
+repo_root = Path("/mnt/data")  # working sandbox root
+target_svg = repo_root / "assets/diagrams/provenance.svg"
+target_svg.parent.mkdir(parents=True, exist_ok=True)
 
-print(json.dumps(out, indent=2))
+g = Digraph("provenance", format="svg")
+g.attr(rankdir="LR", fontsize="12", fontname="Helvetica")
+g.attr("node", fontname="Helvetica", fontsize="11", shape="box")
+g.attr("edge", fontname="Helvetica", fontsize="10", arrowsize="0.7")
+
+def node(node_id: str, label: str, tooltip: str):
+    g.node(node_id, label, _attributes={"id": f"node_{node_id}", "tooltip": tooltip})
+
+def edge(src: str, dst: str, style: str = "solid", penwidth: str = "1", tooltip: str = ""):
+    g.edge(src, dst, style=style, penwidth=penwidth, _attributes={"id": f"edge_{src}_{dst}", "tooltip": tooltip or f"{src} → {dst} ({style}, penwidth={penwidth})"})
+
+# Legend (as plaintext nodes with explanatory tooltips)
+with g.subgraph(name="cluster_legend") as c:
+    c.attr(label="Legend", style="rounded", color="lightgrey", fontsize="11")
+    c.node("L_IMPL", "Solid edge = Implemented in code", shape="plaintext", tooltip="Solid edge ⇒ implemented/realized in code")
+    c.node("L_REF", "Dashed edge = Referenced / influenced", shape="plaintext", tooltip="Dashed edge ⇒ soft influence/reference")
+    c.node("L_INTRO", "Bold edge = Introduced in release", shape="plaintext", tooltip="Bold (penwidth=2) ⇒ introduced/changed in release")
+
+# ADRs
+with g.subgraph(name="cluster_adrs") as c:
+    c.attr(label="Architecture Decision Records (ADRs)", style="rounded", color="lightgrey")
+    node("ADR0000", "ADR 0000\nTemplate", "ADR template and authoring standard")
+    node("ADR0001", "ADR 0001\nChoose Hydra + DVC", "Decision: Hydra configs + DVC pipeline")
+    node("ADR0002", "ADR 0002\nComposite Physics-Informed Loss", "Decision: Composite physics-informed training losses")
+    node("ADR0004", "ADR 0004\nDual Encoder Fusion\n(FGS1 + AIRS)", "Decision: Dual encoders with fusion (FGS1 + AIRS)")
+
+# Changelog
+with g.subgraph(name="cluster_changelog") as c:
+    c.attr(label="Changelog Releases", style="rounded", color="lightgrey")
+    node("C0001", "v0.0.1\n(2025-09-01)", "Release v0.0.1")
+    node("C0002", "v0.0.2\n(2025-09-02)", "Release v0.0.2")
+    node("C0003", "v0.0.3\n(2025-09-03)", "Release v0.0.3")
+    node("C0100", "v0.1.0\n(2025-09-05)", "Release v0.1.0 (minor)")
+    node("C0110", "v0.1.1\n(2025-09-06)", "Release v0.1.1 (patch)")
+
+# Code
+with g.subgraph(name="cluster_code") as c:
+    c.attr(label="Code Modules", style="rounded", color="lightgrey")
+    node("CLI", "src/spectramind/cli.py", "CLI entrypoints")
+    node("CFG", "configs/**", "Hydra config tree")
+    node("DVC", "dvc.yaml", "DVC pipeline stages")
+    node("ENC_F", "src/spectramind/models/encoders/fgs1_encoder.py", "FGS1 encoder")
+    node("ENC_A", "src/spectramind/models/encoders/airs_encoder.py", "AIRS encoder")
+    node("FUS", "src/spectramind/models/fusion_xattn.py", "Fusion / cross-attention")
+    node("DEC", "src/spectramind/models/decoder.py", "Decoder / head")
+    node("LOSS", "src/spectramind/losses/composite.py", "Composite loss (physics-informed)")
+    node("CAL_LOSS", "src/spectramind/losses/calibration.py", "Calibration loss")
+    node("DATA", "src/spectramind/data/datamodule.py", "Data module")
+
+# ADRs -> Code
+edge("ADR0001", "CLI", style="dashed", tooltip="ADR0001 influences CLI behavior")
+edge("ADR0001", "CFG", style="solid", tooltip="ADR0001 implemented in configs")
+edge("ADR0001", "DVC", style="solid", tooltip="ADR0001 implemented in DVC pipeline")
+
+edge("ADR0004", "ENC_F", style="solid", tooltip="ADR0004 implemented: FGS1 encoder")
+edge("ADR0004", "ENC_A", style="solid", tooltip="ADR0004 implemented: AIRS encoder")
+edge("ADR0004", "FUS",  style="solid", tooltip="ADR0004 implemented: Fusion module")
+edge("ADR0004", "DEC",  style="dashed", tooltip="ADR0004 influences decoder design")
+
+edge("ADR0002", "LOSS",     style="solid", tooltip="ADR0002 implemented: composite loss")
+edge("ADR0002", "CAL_LOSS", style="dashed", tooltip="ADR0002 influences calibration loss")
+
+# Release -> Code (penwidth=2 = bold/introduced/changed)
+for rel, targets in {
+    "C0001": ["CLI", "CFG", "DVC"],
+    "C0002": ["ENC_F", "ENC_A"],
+    "C0003": ["FUS", "DEC"],
+    "C0100": ["LOSS", "CAL_LOSS"],
+    "C0110": ["DATA"],
+}.items():
+    for t in targets:
+        edge(rel, t, penwidth="2", tooltip=f"{t} introduced/changed in {rel}")
+
+# Cross-links: ADRs referenced by releases
+edge("ADR0001", "C0001", style="dashed", tooltip="ADR0001 cited in v0.0.1")
+edge("ADR0004", "C0003", style="dashed", tooltip="ADR0004 cited in v0.0.3")
+edge("ADR0002", "C0100", style="dashed", tooltip="ADR0002 cited in v0.1.0")
+
+# Dataflow-ish (dotted)
+for a, b in [
+    ("CLI", "CFG"), ("CLI", "DVC"),
+    ("DATA", "ENC_F"), ("DATA", "ENC_A"),
+    ("ENC_F", "FUS"), ("ENC_A", "FUS"),
+    ("FUS", "DEC"), ("DEC", "LOSS"),
+]:
+    edge(a, b, style="dotted", tooltip=f"data-flow: {a} → {b}")
+
+# Render to a temp SVG first
+tmp_svg = repo_root / "assets/diagrams/provenance.raw.svg"
+tmp_svg_path = Path(g.render(str(tmp_svg.with_suffix('')), cleanup=True))
+
+# Sanitize: make responsive, ensure viewBox, preserveAspectRatio, keep IDs/tooltips
+tree = ET.parse(tmp_svg_path)
+root = tree.getroot()
+root.set("width", "100%")
+root.set("height", "100%")
+if "viewBox" not in root.attrib:
+    root.set("viewBox", "0 0 1600 900")
+root.set("preserveAspectRatio", "xMidYMid meet")
+
+# Write final target
+tree.write(target_svg, encoding="utf-8", xml_declaration=True)
+
+print(json.dumps({
+    "target_svg": str(target_svg),
+    "size_bytes": target_svg.stat().st_size,
+    "ok": target_svg.exists()
+}, indent=2))
