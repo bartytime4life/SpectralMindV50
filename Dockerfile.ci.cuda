@@ -1,37 +1,57 @@
+# ==============================================================================
+# Dockerfile.ci.cuda — SpectraMind V50 (CI GPU image, Kaggle-aligned)
+# ------------------------------------------------------------------------------
+# • CUDA 12.1 + cuDNN 8 on Ubuntu 22.04 (matches Kaggle’s cu121 wheels)
+# • Uses a dedicated venv at /opt/venv (no system-site contamination)
+# • Installs Torch stack from PyTorch cu121 index
+# • Optionally installs runtime deps from requirements-kaggle.txt
+# ==============================================================================
+
 # Pinned to Kaggle CUDA 12.1 + cuDNN 8, Ubuntu 22.04
-# Path: ./Dockerfile.ci.cuda
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     FORCE_CUDA=1 \
-    LC_ALL=C.UTF-8 LANG=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
+# Base tools + Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-pip python3-dev python3-venv \
+      python3 python3-pip python3-venv python3-dev \
       git curl ca-certificates build-essential jq pciutils \
   && rm -rf /var/lib/apt/lists/*
 
-# defaults
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
-    python -m pip install --upgrade pip setuptools wheel
+# Create an isolated venv and upgrade pip/setuptools/wheel
+RUN python3 -m venv "${VIRTUAL_ENV}" \
+  && "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip setuptools wheel
 
-# Match Kaggle torch stack
-RUN pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
-      torch==2.3.1+cu121 torchvision==0.18.1+cu121 torchaudio==2.3.1+cu121
+# ---- PyTorch (CUDA 12.1) -----------------------------------------------------
+# Use the cu121 index; no need to append +cu121 in version pins.
+RUN pip install --index-url https://download.pytorch.org/whl/cu121 \
+      torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1
 
-# (Optional) minimal deps used by repo; will be reinstalled in CI step with -e .
+# ---- Optional: runtime deps (will usually be reinstalled in CI -e .) ----------
+# Keep this step non-fatal in case the file isn’t present at build-time.
 COPY requirements-kaggle.txt /tmp/requirements-kaggle.txt
-RUN pip install -r /tmp/requirements-kaggle.txt || true
+RUN [ -s /tmp/requirements-kaggle.txt ] && pip install -r /tmp/requirements-kaggle.txt || true
 
+# Non-root user for CI
 RUN useradd -ms /bin/bash runner
 USER runner
 WORKDIR /workspace
 
+# Sanity print (build/runtime). Note: torch.cuda.is_available() requires GPU runtime.
 CMD python - <<'PY'
 import torch, sys
-print("Torch:", torch.__version__, "CUDA:", torch.version.cuda)
-print("cuDNN:", torch.backends.cudnn.version())
-print(sys.version)
+print("Torch:", torch.__version__, "CUDA build:", torch.version.cuda)
+try:
+    import torch.backends.cudnn as cudnn
+    print("cuDNN:", cudnn.version())
+except Exception:
+    print("cuDNN: n/a")
+print("Python:", sys.version.split()[0])
 PY
