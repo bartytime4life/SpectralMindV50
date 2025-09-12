@@ -1,16 +1,16 @@
 # ==============================================================================
-# dvc.yaml — SpectraMind V50 (Reproducible Pipeline, Refactored)
+# dvc.yaml — SpectraMind V50 (reproducible pipeline, hardened)
 # ------------------------------------------------------------------------------
 # Stages: calibrate → preprocess → train → predict → diagnose → submit
-# Conventions:
-#   • Hydra selectors live in params.yaml under hydra.*
-#   • Use DVC experiments to switch profiles:
+# Notes:
+#   • Use `params:` to trigger stage reproduction; avoid ${params.*} in `cmd`.
+#   • Switch profiles with DVC Experiments (Hydra overrides), e.g.:
 #       dvc exp run \
 #         -S hydra.env=kaggle \
 #         -S hydra.model=v50 \
 #         -S hydra.config_name_train=train
 #   • Persist calibrated/processed data for reuse & Kaggle packaging.
-#   • Keep metrics small JSON; heavy logs/artifacts stay out of cache or use live.
+#   • Keep heavy logs out of cache; track small JSON metrics.
 # ==============================================================================
 
 stages:
@@ -18,13 +18,11 @@ stages:
     desc: "Raw → CALIBRATED tensors (FGS1 + AIRS); physics-based calibration only"
     cmd: >
       spectramind calibrate run data/raw
-      --set hydra.env=${params.hydra.env}
-      --set hydra.data=${params.hydra.data}
-      --set hydra.calib=${params.hydra.calib}
     deps:
       - data/raw
-      - configs/
-      - src/
+      - configs
+      - src
+      - params.yaml
     params:
       - hydra.env
       - hydra.data
@@ -37,13 +35,11 @@ stages:
     desc: "CALIBRATED → PROCESSED; detrend/normalize/bin/features"
     cmd: >
       spectramind preprocess run data/calibrated
-      --set hydra.env=${params.hydra.env}
-      --set hydra.data=${params.hydra.data}
-      --set hydra.preprocess=${params.hydra.preprocess}
     deps:
       - data/calibrated
-      - configs/
-      - src/
+      - configs
+      - src
+      - params.yaml
     params:
       - hydra.env
       - hydra.data
@@ -53,19 +49,14 @@ stages:
         persist: true
 
   train:
-    desc: "Train dual-channel encoders + heteroscedastic decoder (μ, σ)"
+    desc: "Train dual-channel encoders + heteroscedastic decoder (μ,σ)"
     cmd: >
       spectramind train run
-      --set hydra.env=${params.hydra.env}
-      --set hydra.data=${params.hydra.data}
-      --set hydra.model=${params.hydra.model}
-      --set hydra.training=${params.hydra.training}
-      --set hydra.loss=${params.hydra.loss}
-      --set hydra.logger=${params.hydra.logger}
     deps:
       - data/processed
-      - configs/
-      - src/
+      - configs
+      - src
+      - params.yaml
     params:
       - hydra.env
       - hydra.data
@@ -74,30 +65,30 @@ stages:
       - hydra.loss
       - hydra.logger
     outs:
+      # Checkpointed model artifact for iterative/exp runs
       - path: artifacts/ckpt.pt
         checkpoint: true
+      # Keep a lightweight metrics JSON under cache for diffs
       - path: artifacts/metrics.json
         cache: true
     outs_no_cache:
-      - logs/train/
+      - logs/train
     metrics:
       - artifacts/metrics.json:
           type: json
           xpath: .
-          cache: false
+          cache: false  # metrics are tracked by DVC; no need to cache
 
   predict:
     desc: "Run inference on processed data → predictions CSV"
     cmd: >
-      spectramind predict run artifacts/ckpt.pt
-      --out-csv artifacts/predictions/preds.csv
-      --set hydra.env=${params.hydra.env}
-      --set hydra.data=${params.hydra.data}
+      spectramind predict run artifacts/ckpt.pt --out-csv artifacts/predictions/preds.csv
     deps:
       - artifacts/ckpt.pt
       - data/processed
-      - configs/
-      - src/
+      - configs
+      - src
+      - params.yaml
     params:
       - hydra.env
       - hydra.data
@@ -108,31 +99,29 @@ stages:
   diagnose:
     desc: "Diagnostics: GLL/MAE/RMSE/coverage + plots + report"
     cmd: >
-      spectramind diagnose run artifacts/predictions/preds.csv
-      --out-dir artifacts/diagnostics
-      --set hydra.env=${params.hydra.env}
-      --set hydra.data=${params.hydra.data}
+      spectramind diagnose run artifacts/predictions/preds.csv --out-dir artifacts/diagnostics
     deps:
       - artifacts/predictions/preds.csv
-      - configs/
-      - src/
+      - configs
+      - src
+      - params.yaml
     params:
       - hydra.env
       - hydra.data
     outs:
       - path: artifacts/diagnostics/report.html
         cache: true
-      - path: artifacts/diagnostics/plots/
+      - path: artifacts/diagnostics/plots
         cache: true
     plots:
-      - artifacts/diagnostics/plots/:
+      - artifacts/diagnostics/plots:
           cache: false
     metrics:
       - artifacts/diagnostics/summary.json:
           type: json
           xpath: .
           cache: false
-    # Optional live logging (DVC studio/HTML); enable in CLI when desired:
+    # Optional live logging (DVC Studio/HTML). Enable in CLI as needed:
     # live:
     #   artifacts/diagnostics/live:
     #     summary: true
@@ -141,15 +130,16 @@ stages:
   submit:
     desc: "Package submission artifacts (ZIP with MANIFEST); schema-validate"
     cmd: >
-      spectramind submit package artifacts/predictions/preds.csv
-      --out-zip dist/submission.zip
+      spectramind submit package artifacts/predictions/preds.csv --out-zip dist/submission.zip
     deps:
       - artifacts/predictions/preds.csv
-      - configs/
-      - src/
+      - configs
+      - src
     outs:
       - path: dist/submission.zip
         cache: true
+    # If you want this to always rebuild (e.g., embeds timestamps), uncomment:
+    # always_changed: true
 
   package-precalibrated:
     desc: "Zip CALIBRATED tensors for Kaggle dataset attachment (runtime saver)"
