@@ -3,10 +3,7 @@
 # SpectraMind V50 — Fast profile for CI/Kaggle smoke tests (Upgraded)
 # ======================================================================
 # Layer this on top of your normal train stack, e.g.:
-#   python -m spectramind train +defaults='[/training/fast_ci]'
-# or:
 #   spectramind train +defaults='[/training/fast_ci]'
-#
 # Goals:
 # - ~2 epochs, FP32, tiny data slices → fast + stable
 # - Deterministic kernels for CI reproducibility
@@ -14,18 +11,22 @@
 # - Safe dataloader settings for GitHub/Kaggle runners
 # ======================================================================
 
-# Keep your logger selection via /logger indirection if present elsewhere.
+# Keep your logger selection via the training/logger selector elsewhere.
 
-# Optionally reuse your base callbacks set, then override below.
+# If you use a callbacks selector node, you can override it here.
+# Otherwise we override the top-level callbacks section directly.
+# (Safe to keep; harmless if the node doesn't exist.)
 defaults:
-  # If you have a callbacks selector node under training.callbacks, keep it:
-  - override /training/callbacks@training.callbacks: callbacks
+  - override /training/logger: logger
+  # Uncomment if you have a callbacks selector:
+  # - override /training/callbacks@training.callbacks: callbacks
 
 # ----------------------------- Trainer overrides ------------------------------
 trainer:
   # Run length & precision
   max_epochs: 2
   precision: "32-true"                  # Avoid AMP flakiness in CI
+  accelerator: "auto"
   devices: 1
   strategy: "auto"
 
@@ -36,8 +37,8 @@ trainer:
 
   # Stability
   accumulate_grad_batches: 1
-  gradient_clip_val: 0.5
   gradient_clip_algorithm: "norm"
+  gradient_clip_val: 0.5
   benchmark: false
   deterministic: true                   # force deterministic kernels
 
@@ -50,10 +51,8 @@ trainer:
   # UI/noise
   enable_checkpointing: true
   profiler: null                        # keep off in CI
-  # ModelSummary can be heavy; leave off for smoke runs
-  enable_model_summary: false
 
-  # Let base config define these; set here for safety if missing
+  # Root dir fallback (base config defines paths)
   default_root_dir: ${paths.logs_dir}
 
 # --------------------------- Dataloader perf (CI) -----------------------------
@@ -70,46 +69,63 @@ paths:
   run_name: ${oc.env:SM_RUN_NAME, "ci-${now:%Y%m%d-%H%M%S}"}
 
 # ------------------------------ Quick callbacks -------------------------------
-training:
-  callbacks:
-    callbacks:
-      - _target_: pytorch_lightning.callbacks.EarlyStopping
-        monitor: "val/loss"
-        mode: "min"
-        patience: 2
-        min_delta: 0.0
-        strict: true
-        verbose: true
+# This replaces/overrides your base callbacks for smoke runs.
+callbacks:
+  early_stopping:
+    _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: "val/loss"
+    mode: "min"
+    patience: 2
+    min_delta: 0.0
+    verbose: true
 
-      - _target_: pytorch_lightning.callbacks.ModelCheckpoint
-        dirpath: "${paths.ckpt_dir}"
-        filename: "ci-{epoch:02d}-{val/loss:.4f}"
-        monitor: "val/loss"
-        mode: "min"
-        save_top_k: 1
-        save_last: false
-        auto_insert_metric_name: false
+  model_checkpoint:
+    _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: ${paths.ckpt_dir}
+    filename: "ci-{epoch:02d}-{val/loss:.4f}"
+    monitor: "val/loss"
+    mode: "min"
+    save_top_k: 1
+    save_last: false
+    auto_insert_metric_name: false
 
-      - _target_: pytorch_lightning.callbacks.LearningRateMonitor
-        logging_interval: "epoch"
-        log_momentum: false
+  lr_monitor:
+    _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: "epoch"
+    log_momentum: false
 
 # -------------------------- Small, deterministic optim ------------------------
-# These override your base optimizer/scheduler for smoke runs only.
+# These **override** your base optimizer/scheduler configs via your selectors.
+# (No raw _target_ here; we reuse your existing factories.)
 optimizer:
-  _target_: torch.optim.AdamW
+  name: adamw
   lr: 5.0e-4
   weight_decay: 0.0
   betas: [0.9, 0.999]
   eps: 1.0e-8
+  amsgrad: false
+  impl:
+    fused: false           # keep it simple/stable in CI
+    foreach: false
 
 scheduler:
-  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-  T_max: ${trainer.max_epochs}
-  eta_min: 1.0e-5
+  name: cosine_annealing
+  pl:
+    interval: epoch
+    frequency: 1
+    monitor: val/loss
+    strict: true
+  warmup:
+    enabled: false         # save time in CI
+  cosine_annealing:
+    T_max: ${trainer.max_epochs}
+    eta_min: 1.0e-5
+  limits:
+    lr_min: 1.0e-7
+    lr_max: ${optimizer.lr}
 
 # ------------------------------- Reproducibility ------------------------------
-seed: ${oc.env:SM_SEED, 1337}
+seed: ${oc.env:SM_SEED,1337}
 
 # ------------------------------- Hydra runtime --------------------------------
 defaults:
