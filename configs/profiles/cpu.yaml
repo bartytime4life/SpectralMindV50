@@ -1,0 +1,24 @@
+# CPU-only bring-up / sanity (e.g., cloud CI without GPUs)
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+
+trainer:
+  accelerator: "cpu"
+  devices: 1
+  precision: "32-true"
+  max_epochs: 2
+  limit_train_batches: 0.1
+  limit_val_batches: 0.1
+
+data_loader:
+  num_workers: 0
+  pin_memory: false
+
+experiment:
+  tags: ["profile:cpu"]
