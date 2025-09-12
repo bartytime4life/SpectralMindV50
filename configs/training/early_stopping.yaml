@@ -1,28 +1,35 @@
+# configs/callbacks/early_stopping.yaml
 # ======================================================================
-# SpectraMind V50 — Early Stopping Configuration
+# SpectraMind V50 — Early Stopping Configuration (Lightning 2.x)
 # ======================================================================
-# Encapsulates PyTorch Lightning EarlyStopping callback parameters.
-# Designed to be Hydra-composable and CLI-override-safe. Values can be
-# overridden via environment variables (SM_*). Works in concert with
-# configs/training/lightning.yaml and fast_ci.yaml profiles.
+# Hydra-composable; override via CLI or SM_* env vars.
+# Works with configs/training/lightning.yaml and /training/fast_ci.yaml.
 # ======================================================================
 
 _target_: pytorch_lightning.callbacks.EarlyStopping
 
-# Which metric to monitor — must be logged by Lightning
-monitor: ${oc.env:SM_ES_MONITOR, "val/loss"}
+# Toggle (your callback builder should respect this)
+_enabled: ${oc.env:SM_ES_ENABLED, true}
 
-# Mode: "min" → stop when metric stops decreasing; "max" → stop when increasing
-mode: ${oc.env:SM_ES_MODE, "min"}
+# Metric wiring (must be logged by your validation loop)
+monitor: ${oc.env:SM_ES_MONITOR, "val/loss"}      # e.g., "val/gll", "val/score"
 
-# How many validation epochs to wait for improvement
-patience: ${oc.env:SM_ES_PATIENCE, 10}
+# Direction of improvement
+mode: ${oc.env:SM_ES_MODE, "min"}                 # "min" | "max"
 
-# Minimum relative change to qualify as improvement
-min_delta: ${oc.env:SM_ES_MIN_DELTA, 0.0}
+# Sensitivity & patience
+min_delta: ${oc.env:SM_ES_MIN_DELTA, 0.0}         # absolute change required
+patience:  ${oc.env:SM_ES_PATIENCE, 10}           # epochs (or checks) without improvement
 
-# Whether to raise if the monitored metric is missing
-strict: ${oc.env:SM_ES_STRICT, true}
-
-# Verbosity of logging
+# Robustness
+strict: ${oc.env:SM_ES_STRICT, true}              # raise if metric missing
+check_finite: ${oc.env:SM_ES_CHECK_FINITE, true}  # stop if metric becomes NaN/Inf
 verbose: ${oc.env:SM_ES_VERBOSE, true}
+
+# Optional hard thresholds (None → unused)
+# If metric crosses these, stop immediately (regardless of patience).
+stopping_threshold:   ${oc.env:SM_ES_STOPPING_THRESH, null}    # e.g., 0.001 for loss
+divergence_threshold: ${oc.env:SM_ES_DIVERGENCE_THRESH, null}  # e.g., 10.0  for loss
+
+# Multi-process logging hygiene (DDP)
+log_rank_zero_only: ${oc.env:SM_ES_LOG_RANK0, true}
