@@ -1,81 +1,216 @@
-Gotcha — “Invalid image source” means the Markdown is pointing to a path your renderer can’t fetch. The SVG itself is fine; the link is what’s broken.
+<?xml version="1.0" encoding="UTF-8"?>
+<svg version="1.1" id="provenance" xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     viewBox="0 0 1600 900" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">
+  <defs>
+    <style type="text/css"><![CDATA[
+      .cluster { fill:#f7f7f7; stroke:#cccccc; stroke-width:2; rx:12; ry:12; }
+      .node { fill:#ffffff; stroke:#333333; stroke-width:1.5; rx:8; ry:8; }
+      .label { font-family: Helvetica, Arial, sans-serif; font-size:14px; fill:#111; }
+      .small { font-size:12px; fill:#222; }
+      .edge { stroke:#000000; stroke-width:1.2; fill:none; marker-end:url(#arrow); }
+      .edge.solid { stroke-dasharray:none; }
+      .edge.dashed { stroke-dasharray:6 4; }
+      .edge.dotted { stroke-dasharray:2 6; }
+      .edge.bold { stroke-width:2.5; }
+      .legend-text { font-family: Helvetica, Arial, sans-serif; font-size:12px; fill:#444; }
+    ]]></style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5"
+            markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#000"/>
+    </marker>
+  </defs>
 
-Here’s how to make it work in the three common contexts, plus a PNG fallback.
+  <!-- Title -->
+  <text x="800" y="36" text-anchor="middle" class="label" style="font-size:20px;">SpectraMind V50 — Provenance</text>
 
-### 1) GitHub README (in the repo)
+  <!-- ===== Legend ===== -->
+  <g transform="translate(40,720)">
+    <rect class="cluster" x="0" y="0" width="420" height="140"/>
+    <text class="label" x="210" y="28" text-anchor="middle">Legend</text>
+    <g transform="translate(20,54)">
+      <line x1="0" y1="0" x2="60" y2="0" class="edge solid"/>
+      <text x="72" y="4" class="legend-text">Solid edge = Implemented in code</text>
+    </g>
+    <g transform="translate(20,84)">
+      <line x1="0" y1="0" x2="60" y2="0" class="edge dashed"/>
+      <text x="72" y="4" class="legend-text">Dashed edge = Referenced / influenced</text>
+    </g>
+    <g transform="translate(20,114)">
+      <line x1="0" y1="0" x2="60" y2="0" class="edge bold"/>
+      <text x="72" y="4" class="legend-text">Bold edge = Introduced / changed in release</text>
+    </g>
+  </g>
 
-Put the file at exactly this path in your repo (case-sensitive):
+  <!-- ===== ADRs cluster ===== -->
+  <g transform="translate(40,80)">
+    <rect class="cluster" x="0" y="0" width="420" height="300"/>
+    <text class="label" x="210" y="28" text-anchor="middle">Architecture Decision Records (ADRs)</text>
 
-```
-assets/diagrams/provenance.svg
-```
+    <g id="ADR0000" transform="translate(30,60)">
+      <rect class="node" x="0" y="0" width="170" height="54"/>
+      <text class="label" x="85" y="22" text-anchor="middle">ADR 0000</text>
+      <text class="small" x="85" y="40" text-anchor="middle">Template</text>
+    </g>
 
-Then embed with a **relative** path (no leading slash):
+    <g id="ADR0001" transform="translate(220,60)">
+      <rect class="node" x="0" y="0" width="170" height="54"/>
+      <text class="label" x="85" y="22" text-anchor="middle">ADR 0001</text>
+      <text class="small" x="85" y="40" text-anchor="middle">Choose Hydra + DVC</text>
+    </g>
 
-```md
-![Provenance](assets/diagrams/provenance.svg)
-```
+    <g id="ADR0002" transform="translate(30,140)">
+      <rect class="node" x="0" y="0" width="170" height="54"/>
+      <text class="label" x="85" y="22" text-anchor="middle">ADR 0002</text>
+      <text class="small" x="85" y="40" text-anchor="middle">Composite Physics-Informed Loss</text>
+    </g>
 
-If you’re on a branch other than `main`, GitHub’s relative path still resolves correctly.
+    <g id="ADR0004" transform="translate(220,140)">
+      <rect class="node" x="0" y="0" width="170" height="68"/>
+      <text class="label" x="85" y="24" text-anchor="middle">ADR 0004</text>
+      <text class="small" x="85" y="42" text-anchor="middle">Dual Encoder Fusion</text>
+      <text class="small" x="85" y="58" text-anchor="middle">(FGS1 + AIRS)</text>
+    </g>
+  </g>
 
-### 2) GitHub issue / PR comment (needs absolute “raw” URL)
+  <!-- ===== Changelog cluster ===== -->
+  <g transform="translate(520,40)">
+    <rect class="cluster" x="0" y="0" width="560" height="160"/>
+    <text class="label" x="280" y="28" text-anchor="middle">Changelog Releases</text>
 
-Use the “raw” URL form:
+    <g id="C0001" transform="translate(20,60)">
+      <rect class="node" x="0" y="0" width="100" height="54"/>
+      <text class="label" x="50" y="22" text-anchor="middle">v0.0.1</text>
+      <text class="small" x="50" y="40" text-anchor="middle">(2025-09-01)</text>
+    </g>
 
-```md
-![Provenance](https://raw.githubusercontent.com/<org>/<repo>/<branch>/assets/diagrams/provenance.svg)
-```
+    <g id="C0002" transform="translate(140,60)">
+      <rect class="node" x="0" y="0" width="100" height="54"/>
+      <text class="label" x="50" y="22" text-anchor="middle">v0.0.2</text>
+      <text class="small" x="50" y="40" text-anchor="middle">(2025-09-02)</text>
+    </g>
 
-### 3) MkDocs / GitHub Pages
+    <g id="C0003" transform="translate(260,60)">
+      <rect class="node" x="0" y="0" width="100" height="54"/>
+      <text class="label" x="50" y="22" text-anchor="middle">v0.0.3</text>
+      <text class="small" x="50" y="40" text-anchor="middle">(2025-09-03)</text>
+    </g>
 
-If `docs/` is your site root, place the asset under `docs/assets/diagrams/` or set `mkdocs.yml`:
+    <g id="C0100" transform="translate(380,60)">
+      <rect class="node" x="0" y="0" width="100" height="54"/>
+      <text class="label" x="50" y="22" text-anchor="middle">v0.1.0</text>
+      <text class="small" x="50" y="40" text-anchor="middle">(2025-09-05)</text>
+    </g>
 
-```yaml
-docs_dir: docs
-extra_css:
-  - assets/css/site.css
-```
+    <g id="C0110" transform="translate(500,60)">
+      <rect class="node" x="0" y="0" width="100" height="54"/>
+      <text class="label" x="50" y="22" text-anchor="middle">v0.1.1</text>
+      <text class="small" x="50" y="40" text-anchor="middle">(2025-09-06)</text>
+    </g>
+  </g>
 
-Then embed:
+  <!-- ===== Code cluster ===== -->
+  <g transform="translate(1120,60)">
+    <rect class="cluster" x="0" y="0" width="440" height="700"/>
+    <text class="label" x="220" y="28" text-anchor="middle">Code Modules</text>
 
-```md
-![Provenance](/assets/diagrams/provenance.svg)
-```
+    <g id="CLI" transform="translate(30,60)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/cli.py</text>
+    </g>
 
-(Leading slash is correct for site-rooted MkDocs URLs.)
+    <g id="CFG" transform="translate(30,120)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">configs/**</text>
+    </g>
 
-### 4) Kaggle Markdown cell
+    <g id="DVC" transform="translate(30,180)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">dvc.yaml</text>
+    </g>
 
-Kaggle cannot fetch private GitHub files with relative repo paths. Either:
+    <g id="ENC_F" transform="translate(30,260)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/models/encoders/fgs1_encoder.py</text>
+    </g>
 
-* Upload the SVG to the Kaggle notebook as a dataset/file and reference with a notebook-local path, or
-* Use an **absolute** raw GitHub URL (public repo only).
+    <g id="ENC_A" transform="translate(30,320)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/models/encoders/airs_encoder.py</text>
+    </g>
 
----
+    <g id="FUS" transform="translate(30,380)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/models/fusion_xattn.py</text>
+    </g>
 
-### Files I’ve produced for you (download and commit)
+    <g id="DEC" transform="translate(30,440)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/models/decoder.py</text>
+    </g>
 
-* SVG (responsive): [assets/diagrams/provenance.svg](sandbox:/mnt/data/assets/diagrams/provenance.svg)
-* DOT (debuggable source): [assets/diagrams/provenance.dot](sandbox:/mnt/data/assets/diagrams/provenance.dot)
-* Secondary SVG name (some static site toolchains prefer no mutations): [assets/diagrams/provenance.static.svg](sandbox:/mnt/data/assets/diagrams/provenance.static.svg)
-* PNG fallback: [assets/diagrams/provenance\_for\_png.png](sandbox:/mnt/data/assets/diagrams/provenance_for_png.png)
+    <g id="LOSS" transform="translate(30,500)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/losses/composite.py</text>
+    </g>
 
-### Commit snippet
+    <g id="CAL_LOSS" transform="translate(30,560)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/losses/calibration.py</text>
+    </g>
 
-```bash
-# from repo root
-mkdir -p assets/diagrams
-cp /mnt/data/assets/diagrams/provenance.svg assets/diagrams/provenance.svg
-cp /mnt/data/assets/diagrams/provenance_for_png.png assets/diagrams/provenance.png
-git add assets/diagrams/provenance.svg assets/diagrams/provenance.png
-git commit -m "docs(diagrams): add provenance graph (SVG + PNG fallback)"
-```
+    <g id="DATA" transform="translate(30,620)">
+      <rect class="node" x="0" y="0" width="380" height="40"/>
+      <text class="small" x="190" y="25" text-anchor="middle">src/spectramind/data/datamodule.py</text>
+    </g>
+  </g>
 
-### Quick checks if it still errors
+  <!-- ===== Edges ===== -->
 
-* ✅ Path exists on that branch/commit (open the file directly in GitHub to verify).
-* ✅ No leading `/` in README image paths (use relative).
-* ✅ Case matches exactly (`Assets/` ≠ `assets/`).
-* ✅ For issues/PRs/Kaggle, use absolute “raw” URL or upload the asset.
+  <!-- ADRs -> Code (solid = implemented, dashed = influenced) -->
+  <path class="edge dashed" d="M 260 140 C 420 160 1080 110 1150 110" />  <!-- ADR0001 -> CLI -->
+  <path class="edge solid"  d="M 260 140 C 420 180 1080 170 1150 170" />  <!-- ADR0001 -> CFG -->
+  <path class="edge solid"  d="M 260 140 C 420 200 1080 230 1150 230" />  <!-- ADR0001 -> DVC -->
 
-If you want, I can also embed clickable links inside the SVG (nodes → repo files/ADRs) so the diagram doubles as navigation.
+  <path class="edge solid"  d="M 305 220 C 460 300 1080 350 1150 350" />  <!-- ADR0004 -> ENC_F -->
+  <path class="edge solid"  d="M 305 220 C 480 340 1080 410 1150 410" />  <!-- ADR0004 -> ENC_A -->
+  <path class="edge solid"  d="M 305 220 C 500 380 1080 470 1150 470" />  <!-- ADR0004 -> FUS -->
+  <path class="edge dashed" d="M 305 220 C 520 420 1080 530 1150 530" />  <!-- ADR0004 -> DEC -->
+
+  <path class="edge solid"  d="M 115 220 C 380 420 1080 590 1150 590" />  <!-- ADR0002 -> LOSS -->
+  <path class="edge dashed" d="M 115 220 C 360 480 1080 650 1150 650" />  <!-- ADR0002 -> CAL_LOSS -->
+
+  <!-- Release -> Code (bold = introduced/changed) -->
+  <path class="edge bold" d="M 580 120 C 880 120 1080 110 1150 110" />   <!-- C0001 -> CLI -->
+  <path class="edge bold" d="M 580 120 C 880 150 1080 170 1150 170" />   <!-- C0001 -> CFG -->
+  <path class="edge bold" d="M 580 120 C 880 180 1080 230 1150 230" />   <!-- C0001 -> DVC -->
+
+  <path class="edge bold" d="M 700 120 C 980 240 1080 350 1150 350" />   <!-- C0002 -> ENC_F -->
+  <path class="edge bold" d="M 700 120 C 980 300 1080 410 1150 410" />   <!-- C0002 -> ENC_A -->
+
+  <path class="edge bold" d="M 820 120 C 1040 340 1080 470 1150 470" />  <!-- C0003 -> FUS -->
+  <path class="edge bold" d="M 820 120 C 1060 380 1080 530 1150 530" />  <!-- C0003 -> DEC -->
+
+  <path class="edge bold" d="M 940 120 C 1100 440 1080 590 1150 590" />  <!-- C0100 -> LOSS -->
+  <path class="edge bold" d="M 940 120 C 1120 500 1080 650 1150 650" />  <!-- C0100 -> CAL_LOSS -->
+
+  <path class="edge bold" d="M 1060 120 C 1170 560 1080 710 1150 710" /> <!-- C0110 -> DATA -->
+
+  <!-- Cross-links: ADRs referenced by releases (dashed) -->
+  <path class="edge dashed" d="M 260 140 C 420 100 560 100 580 120" />  <!-- ADR0001 -> C0001 -->
+  <path class="edge dashed" d="M 305 220 C 540 160 820 160 820 120" /> <!-- ADR0004 -> C0003 -->
+  <path class="edge dashed" d="M 115 220 C 360 160 940 160 940 120" /> <!-- ADR0002 -> C0100 -->
+
+  <!-- Dataflow-ish (dotted) -->
+  <path class="edge dotted" d="M 1310 100 C 1310 140 1310 150 1310 160" /> <!-- CLI -> CFG -->
+  <path class="edge dotted" d="M 1310 100 C 1310 160 1310 210 1310 220" /> <!-- CLI -> DVC -->
+
+  <path class="edge dotted" d="M 1210 730 C 1210 680 1210 620 1210 600" /> <!-- DATA -> ENC_F -->
+  <path class="edge dotted" d="M 1210 730 C 1250 680 1290 640 1330 620" /> <!-- DATA -> ENC_A -->
+
+  <path class="edge dotted" d="M 1210 340 C 1310 380 1410 380 1410 420" /> <!-- ENC_F -> FUS -->
+  <path class="edge dotted" d="M 1330 400 C 1370 430 1410 440 1410 460" /> <!-- ENC_A -> FUS -->
+
+  <path class="edge dotted" d="M 1410 460 C 1450 490 1490 510 1490 540" /> <!-- FUS -> DEC -->
+  <path class="edge dotted" d="M 1490 540 C 1490 580 1490 600 1490 620" /> <!-- DEC -> LOSS -->
+</svg>
