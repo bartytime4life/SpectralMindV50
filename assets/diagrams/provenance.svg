@@ -1,12 +1,26 @@
-# Rebuild provenance.svg to ensure it exists at the requested path
-from graphviz import Digraph
+# Rebuild provenance.svg (with robust fallbacks)
+from __future__ import annotations
+
 import os
+from pathlib import Path
 
-out_dir = "/mnt/data/assets/diagrams"
-os.makedirs(out_dir, exist_ok=True)
+# Try to import graphviz; handle missing system 'dot' binaries gracefully
+try:
+    from graphviz import Digraph
+    _HAS_GRAPHVIZ = True
+except Exception:
+    _HAS_GRAPHVIZ = False
 
+out_dir = Path("/mnt/data/assets/diagrams")
+out_dir.mkdir(parents=True, exist_ok=True)
+
+# ------------------------------
+# Graph construction (pure DOT)
+# ------------------------------
 g = Digraph("provenance", format="svg")
 g.attr(rankdir="LR", fontsize="12", fontname="Helvetica")
+g.attr("node", fontname="Helvetica", fontsize="11", shape="box")
+g.attr("edge", fontname="Helvetica", fontsize="10", arrowsize="0.7")
 
 # Legend
 with g.subgraph(name="cluster_legend") as c:
@@ -15,7 +29,7 @@ with g.subgraph(name="cluster_legend") as c:
     c.node("L_REF", "Dashed edge = Referenced / influenced", shape="plaintext")
     c.node("L_INTRO", "Bold edge = Introduced in release", shape="plaintext")
 
-# ADRs cluster
+# ADRs
 with g.subgraph(name="cluster_adrs") as c:
     c.attr(label="Architecture Decision Records (ADRs)", style="rounded", color="lightgrey")
     c.node("ADR0000", "ADR 0000\nTemplate")
@@ -23,7 +37,7 @@ with g.subgraph(name="cluster_adrs") as c:
     c.node("ADR0002", "ADR 0002\nComposite Physics-Informed Loss")
     c.node("ADR0004", "ADR 0004\nDual Encoder Fusion\n(FGS1 + AIRS)")
 
-# Changelog cluster
+# Changelog
 with g.subgraph(name="cluster_changelog") as c:
     c.attr(label="Changelog Releases", style="rounded", color="lightgrey")
     c.node("C0001", "v0.0.1\n(2025-09-01)")
@@ -32,7 +46,7 @@ with g.subgraph(name="cluster_changelog") as c:
     c.node("C0100", "v0.1.0\n(2025-09-05)")
     c.node("C0110", "v0.1.1\n(2025-09-06)")
 
-# Code cluster
+# Code
 with g.subgraph(name="cluster_code") as c:
     c.attr(label="Code Modules", style="rounded", color="lightgrey")
     c.node("CLI", "src/spectramind/cli.py")
@@ -46,7 +60,7 @@ with g.subgraph(name="cluster_code") as c:
     c.node("CAL_LOSS", "src/spectramind/losses/calibration.py")
     c.node("DATA", "src/spectramind/data/datamodule.py")
 
-# Provenance edges (ADRs -> Code)
+# ADRs -> Code (solid = implemented, dashed = influenced)
 g.edge("ADR0001", "CLI", style="dashed")
 g.edge("ADR0001", "CFG", style="solid")
 g.edge("ADR0001", "DVC", style="solid")
@@ -59,38 +73,53 @@ g.edge("ADR0004", "DEC", style="dashed")
 g.edge("ADR0002", "LOSS", style="solid")
 g.edge("ADR0002", "CAL_LOSS", style="dashed")
 
-# Changelog edges (Release -> Code introduced/changed)
-g.edge("C0001", "CLI", penwidth="2")       # introduced
-g.edge("C0001", "CFG", penwidth="2")
-g.edge("C0001", "DVC", penwidth="2")
+# Release -> Code (penwidth=2 = “bold introduced/changed”)
+for rel, targets in {
+    "C0001": ["CLI", "CFG", "DVC"],
+    "C0002": ["ENC_F", "ENC_A"],
+    "C0003": ["FUS", "DEC"],
+    "C0100": ["LOSS", "CAL_LOSS"],
+    "C0110": ["DATA"],
+}.items():
+    for t in targets:
+        g.edge(rel, t, penwidth="2")
 
-g.edge("C0002", "ENC_F", penwidth="2")
-g.edge("C0002", "ENC_A", penwidth="2")
-
-g.edge("C0003", "FUS", penwidth="2")
-g.edge("C0003", "DEC", penwidth="2")
-
-g.edge("C0100", "LOSS", penwidth="2")
-g.edge("C0100", "CAL_LOSS", penwidth="2")
-
-g.edge("C0110", "DATA", penwidth="2")
-
-# Cross-links: ADRs referenced by releases
+# Cross-links: ADRs referenced by releases (dashed)
 g.edge("ADR0001", "C0001", style="dashed")
 g.edge("ADR0004", "C0003", style="dashed")
 g.edge("ADR0002", "C0100", style="dashed")
 
-# Connect data flow-ish
-g.edge("CLI", "CFG", style="dotted")
-g.edge("CLI", "DVC", style="dotted")
-g.edge("DATA", "ENC_F", style="dotted")
-g.edge("DATA", "ENC_A", style="dotted")
-g.edge("ENC_F", "FUS", style="dotted")
-g.edge("ENC_A", "FUS", style="dotted")
-g.edge("FUS", "DEC", style="dotted")
-g.edge("DEC", "LOSS", style="dotted")
+# Dataflow-ish (dotted)
+for a, b in [
+    ("CLI", "CFG"), ("CLI", "DVC"),
+    ("DATA", "ENC_F"), ("DATA", "ENC_A"),
+    ("ENC_F", "FUS"), ("ENC_A", "FUS"),
+    ("FUS", "DEC"), ("DEC", "LOSS"),
+]:
+    g.edge(a, b, style="dotted")
 
-out_path = os.path.join(out_dir, "provenance")
-g.render(out_path)
+# ------------------------------
+# Emit files
+# ------------------------------
+dot_path = out_dir / "provenance.dot"
+svg_base = out_dir / "provenance"   # graphviz will add .svg
 
-out_path + ".svg"
+# Always write the DOT source for reproducibility
+dot_path.write_text(g.source, encoding="utf-8")
+
+svg_path = None
+if _HAS_GRAPHVIZ:
+    try:
+        # Render to SVG (requires system 'dot' executable)
+        svg_path = Path(g.render(str(svg_base), cleanup=True))
+    except Exception as e:
+        # Fall back to DOT only; caller can render later in CI/GH Action
+        print(f"[WARN] Graphviz render failed: {e!r}")
+        svg_path = None
+
+print(f"[OK] DOT written: {dot_path}")
+if svg_path:
+    print(f"[OK] SVG written: {svg_path}")
+else:
+    print("[INFO] SVG not generated (missing Graphviz 'dot'). Use:")
+    print(f"  dot -Tsvg {dot_path} -o {svg_base.with_suffix('.svg')}")
