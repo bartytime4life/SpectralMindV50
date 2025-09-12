@@ -1,0 +1,21 @@
+# Sensible defaults for Hydra multirun sweeps (grid/random handled via CLI)
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+
+trainer:
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 40}
+  log_every_n_steps: 25
+  val_check_interval: 0.5
+
+training:
+  logger:
+    offline: true   # safe for CI; flip off if you want W&B online
+
+experiment:
+  tags: ["profile:hyper_sweep"]
