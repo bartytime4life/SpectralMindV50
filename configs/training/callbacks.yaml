@@ -1,70 +1,60 @@
+# configs/training/callbacks.yaml
 # ======================================================================
 # SpectraMind V50 — Callback bundle (Hydra-compatible, Upgraded)
 # ======================================================================
-# One place to compose common Lightning callbacks:
-#   - EarlyStopping
-#   - ModelCheckpoint
-#   - LearningRateMonitor
-#   - JSONL metrics logger (custom)
-#   - Rich progress bar (optional)
-#   - Model summary (optional)
-#   - SWA (optional; disabled by default)
-#
-# Everything is overrideable via env (SM_*) or Hydra CLI, e.g.:
-#   python -m spectramind train \
-#     training.callbacks.callbacks[0].patience=20 \
-#     SM_CKPT_MONITOR=val/gll SM_CKPT_MODE=max
-# ======================================================================
 
 callbacks:
-  # ── Early Stopping ──────────────────────────────────────────────────────────────
+  # ── Early Stopping ───────────────────────────────────────────────────
   - _target_: pytorch_lightning.callbacks.EarlyStopping
-    monitor: ${oc.env:SM_ES_MONITOR, "val/loss"}    # e.g. "val/gll"
-    mode: ${oc.env:SM_ES_MODE, "min"}               # "min" or "max"
+    monitor: ${oc.env:SM_ES_MONITOR, "val/loss"}   # e.g., "val/gll"
+    mode: ${oc.env:SM_ES_MODE, "min"}              # "min" | "max"
     patience: ${oc.env:SM_ES_PATIENCE, 10}
     min_delta: ${oc.env:SM_ES_MIN_DELTA, 0.0}
     strict: ${oc.env:SM_ES_STRICT, true}
     verbose: ${oc.env:SM_ES_VERBOSE, true}
+    # Optional hard guards (null → unused)
+    stopping_threshold: ${oc.env:SM_ES_STOPPING_THRESH, null}
+    divergence_threshold: ${oc.env:SM_ES_DIVERGENCE_THRESH, null}
 
-  # ── Model Checkpoint ───────────────────────────────────────────────────────────
+  # ── Model Checkpoint ─────────────────────────────────────────────────
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     monitor: ${oc.env:SM_CKPT_MONITOR, "val/loss"}
     mode: ${oc.env:SM_CKPT_MODE, "min"}
     save_top_k: ${oc.env:SM_CKPT_TOPK, 3}
     save_last: ${oc.env:SM_CKPT_LAST, true}
+    # Choose ONE cadence (others must be null)
     every_n_epochs: ${oc.env:SM_CKPT_EVERY_EPOCH, 1}
     every_n_train_steps: ${oc.env:SM_CKPT_EVERY_STEPS, null}
     dirpath: ${oc.env:SM_CKPT_DIR, ${paths.ckpt_dir}}
     filename: ${oc.env:SM_CKPT_FILENAME, "epoch{epoch:03d}-step{step}-valloss{val/loss:.4f}"}
     auto_insert_metric_name: ${oc.env:SM_CKPT_AUTO_NAME, false}
     save_on_train_epoch_end: ${oc.env:SM_CKPT_ON_TRAIN_END, true}
+    strict: ${oc.env:SM_CKPT_STRICT, true}
 
-  # ── Learning Rate Monitor ─────────────────────────────────────────────────────
+  # ── Learning Rate Monitor ────────────────────────────────────────────
   - _target_: pytorch_lightning.callbacks.LearningRateMonitor
-    logging_interval: ${oc.env:SM_LR_LOG_INTERVAL, "epoch"}   # "step" or "epoch"
+    logging_interval: ${oc.env:SM_LR_LOG_INTERVAL, "epoch"}  # "step" | "epoch"
     log_momentum: ${oc.env:SM_LR_LOG_MOMENTUM, false}
 
-  # ── JSONL Metrics Logger (custom callback) ────────────────────────────────────
-  # Expects implementation in: src/spectramind/train/callbacks.py
+  # ── JSONL Metrics Logger (custom callback) ───────────────────────────
+  # Implementation: src/spectramind/train/callbacks.py::JsonlMetricsLogger
   - _target_: spectramind.train.callbacks.JsonlMetricsLogger
-    out_path: ${oc.env:SM_JSONL_PATH, ${paths.artifacts}/metrics.jsonl}
-    append: ${oc.env:SM_JSONL_APPEND, true}
-    flush_every_n_steps: ${oc.env:SM_JSONL_FLUSH_STEPS, 0}  # 0 = flush on close
+    log_dir: ${oc.env:SM_JSONL_DIR, ${paths.logs_dir}/jsonl}
+    filename: ${oc.env:SM_JSONL_FILENAME, "metrics.jsonl"}
+    flush_secs: ${oc.env:SM_JSONL_FLUSH_SECS, 0}     # 0 = flush on close
+    overwrite: ${oc.env:SM_JSONL_OVERWRITE, false}
+    pretty: ${oc.env:SM_JSONL_PRETTY, false}
 
-  # ── Rich Progress Bar (optional; gate via env) ─────────────────────────────────
+  # ── Rich Progress Bar (remove via list edit if noisy in CI) ──────────
   - _target_: pytorch_lightning.callbacks.RichProgressBar
     refresh_rate: ${oc.env:SM_PROGRESS_REFRESH, 1}
-    # To disable quickly in CI: set SM_PROGRESS_ENABLE=0 and drop via CLI:
-    #  +training.callbacks.callbacks=[] or index delete syntax.
-    # (PL doesn’t support _enabled; use Hydra list editing to remove.)
 
-  # ── Model Summary (optional) ──────────────────────────────────────────────────
+  # ── Model Summary (omit if you want faster CI) ───────────────────────
   - _target_: pytorch_lightning.callbacks.ModelSummary
-    max_depth: ${oc.env:SM_SUMMARY_DEPTH, -1}   # -1 → full tree
+    max_depth: ${oc.env:SM_SUMMARY_DEPTH, -1}        # -1 → full tree
 
-  # ── Stochastic Weight Averaging (optional) ────────────────────────────────────
-  # NOTE: Set SM_SWA_LR>0 to enable; 0.0 effectively disables SWA.
+  # ── Stochastic Weight Averaging (disabled unless lr>0) ───────────────
   - _target_: pytorch_lightning.callbacks.StochasticWeightAveraging
-    swa_lrs: ${oc.env:SM_SWA_LR, 0.0}
+    swa_lrs: ${oc.env:SM_SWA_LR, 0.0}                # set >0 to enable
     annealing_epochs: ${oc.env:SM_SWA_ANNEAL_EPOCHS, 10}
     annealing_strategy: ${oc.env:SM_SWA_ANNEAL_STRAT, "cos"}
