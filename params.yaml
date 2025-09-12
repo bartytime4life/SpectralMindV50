@@ -16,11 +16,12 @@ defaults:
 
 # -----------------------------------------------------------------------------
 # Run-level knobs (reproducibility & convenience)
+#   NOTE: oc.decode ensures types are parsed from env strings correctly.
 # -----------------------------------------------------------------------------
-seed: ${oc.env:SM_SEED,42}
-deterministic: ${oc.env:SM_DETERMINISTIC,true}
-num_workers: ${oc.env:SM_NUM_WORKERS,2}
-precision: ${oc.env:SM_TRAIN_PRECISION,32}   # 16|bf16|32
+seed: ${oc.decode:${oc.env:SM_SEED,42}}
+deterministic: ${oc.decode:${oc.env:SM_DETERMINISTIC,true}}   # true|false
+num_workers: ${oc.decode:${oc.env:SM_NUM_WORKERS,2}}          # int
+precision: ${oc.decode:${oc.env:SM_TRAIN_PRECISION,32}}       # 16|bf16|32
 
 # Canonical path surface (env-first, safe defaults)
 paths:
@@ -62,19 +63,36 @@ hydra:
   job:
     chdir: true
     name: spectramind
-    # Optional: make override dirnames compact & deterministic (nice for CI artifacts)
     config:
+      # Make override dirnames compact & deterministic (nice for CI artifacts)
       override_dirname:
         kv_sep: "="
         item_sep: ","
         exclude_keys: [seed, num_workers, precision]
 
-  # If your Hydra version supports it, this tightens unknown-key errors.
+  # Tighten unknown-key handling (only if supported by your Hydra version)
   strict: true
 
-  # Allow disabling .hydra in CI: set HYDRA_OUTPUT_SUBDIR=.
+  # Allow disabling .hydra in CI: set HYDRA_OUTPUT_SUBDIR='.'
   output_subdir: ${oc.env:HYDRA_OUTPUT_SUBDIR,.hydra}
 
-  # (Optional) append additional search paths if you ship packaged configs
+  # Quieter logging out of the box (can be overridden per-env)
+  job_logging:
+    version: 1
+    disable_existing_loggers: false
+    formatters:
+      simple:
+        format: "[%(levelname)s] %(message)s"
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        level: INFO
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers: [console]
+
+  # (Optional) add packaged config search paths if you ship configs in-wheel
   # searchpath:
   #   - pkg://spectramind.configs
