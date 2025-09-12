@@ -38,12 +38,17 @@
       "type": "string",
       "minLength": 1
     },
+    "mimeType": {
+      "type": "string",
+      "pattern": "^[\\w.-]+\\/[\\w.+-]+$",
+      "description": "Basic MIME type format (type/subtype)"
+    },
 
     "payload.cli_invoked": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "argv": { "type": "array", "items": { "type": "string" } },
+        "argv": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
         "cwd":  { "type": "string" },
         "env":  { "type": "object", "additionalProperties": { "type": "string" } },
         "version": { "type": "string" }
@@ -55,8 +60,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "stage": { "$ref": "#/$defs/stage" },
-        "config": { "type": "string" },  
+        "stage":   { "$ref": "#/$defs/stage" },
+        "config":  { "type": "string" },
         "attempt": { "type": "integer", "minimum": 1 }
       },
       "required": ["stage"]
@@ -66,12 +71,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "stage": { "$ref": "#/$defs/stage" },
-        "status": { "type": "string", "enum": ["ok", "failed", "skipped", "resumed-skip"] },
+        "stage":        { "$ref": "#/$defs/stage" },
+        "status":       { "type": "string", "enum": ["ok", "failed", "skipped", "resumed-skip"] },
         "duration_sec": { "type": "number", "minimum": 0 },
-        "rc": { "type": "integer", "minimum": 0 },
-        "attempt": { "type": "integer", "minimum": 1 },
-        "message": { "type": "string" }
+        "rc":           { "type": "integer", "minimum": 0 },
+        "attempt":      { "type": "integer", "minimum": 1 },
+        "message":      { "type": "string" }
       },
       "required": ["stage", "status"]
     },
@@ -80,9 +85,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "name":  { "$ref": "#/$defs/nonEmptyString" },
         "value": { "type": "number" },
-        "step": { "type": "integer", "minimum": 0 },
+        "step":  { "type": "integer", "minimum": 0 },
         "split": { "type": "string", "enum": ["train", "val", "test"] }
       },
       "required": ["name", "value"]
@@ -92,10 +97,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "code": { "type": "string" },
-        "message": { "$ref": "#/$defs/nonEmptyString" },
+        "code":      { "type": "string" },
+        "message":   { "$ref": "#/$defs/nonEmptyString" },
         "traceback": { "type": "string" },
-        "stage": { "$ref": "#/$defs/stage" }
+        "stage":     { "$ref": "#/$defs/stage" }
       },
       "required": ["message"]
     },
@@ -105,7 +110,7 @@
       "additionalProperties": false,
       "properties": {
         "message": { "$ref": "#/$defs/nonEmptyString" },
-        "stage": { "$ref": "#/$defs/stage" }
+        "stage":   { "$ref": "#/$defs/stage" }
       },
       "required": ["message"]
     },
@@ -114,11 +119,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "path": { "type": "string" },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "bytes": { "type": "integer", "minimum": 0 },
-        "content_type": { "type": "string" },
-        "role": { "type": "string", "enum": ["input", "output", "log", "report", "model", "other"] }
+        "path":         { "type": "string" },
+        "sha256":       { "$ref": "#/$defs/sha256" },
+        "bytes":        { "type": "integer", "minimum": 0 },
+        "content_type": { "$ref": "#/$defs/mimeType" },
+        "role":         { "type": "string", "enum": ["input", "output", "log", "report", "model", "other"] }
       },
       "required": ["path"]
     },
@@ -167,7 +172,7 @@
 
     "run_id": {
       "type": "string",
-      "description": "UUID or hash linking this event to a specific run/session.",
+      "description": "UUID/ULID/hash linking this event to a specific run/session.",
       "minLength": 6,
       "maxLength": 128
     },
@@ -203,7 +208,7 @@
     "tags": {
       "type": "array",
       "description": "Optional freeform tags for filtering/search (e.g., stage=calibrate).",
-      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\s]+$" },
       "uniqueItems": true,
       "maxItems": 32
     }
