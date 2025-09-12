@@ -1,0 +1,29 @@
+# Squeeze into 8–12GB: more accumulation, fewer workers, conservative prefetch
+defaults:
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
+  - /training/accumulate: accumulate
+
+accumulate_grad_batches: 4
+
+precision:
+  mode: "16-mixed"
+
+data_loader:
+  batch_size: 16
+  num_workers: 1
+  prefetch_factor: 2
+  pin_memory: true
+
+scheduler:
+  warmup:
+    enabled: true
+    steps: 500
+
+experiment:
+  tags: ["profile:low_vram"]
