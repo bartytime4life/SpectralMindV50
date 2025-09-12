@@ -22,6 +22,17 @@
 #   - If internet is disabled, exits early unless all deps already present.
 # =============================================================================
 set -euo pipefail
+set -o errtrace
+
+# --- nice error messages ------------------------------------------------------
+_on_err() {
+  local exit_code=$?
+  local line_no=${BASH_LINENO[0]:-?}
+  echo -e "\033[1;31m[ERR] Bootstrap failed at line ${line_no}.\
+ Last command: '${BASH_COMMAND}' (exit ${exit_code})\033[0m" >&2
+  exit $exit_code
+}
+trap _on_err ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -43,10 +54,10 @@ done
 
 # ---------------------------- PRINT UTILS ------------------------------------
 c_cyan='\033[1;36m'; c_yel='\033[1;33m'; c_red='\033[1;31m'; c_grn='\033[1;32m'; c_off='\033[0m'
-banner(){ printf "${c_cyan}\n==> %s${c_off}\n" "$1"; }
-note(){ printf "${c_yel}[-] %s${c_off}\n" "$1"; }
-ok(){ printf "${c_grn}[OK] %s${c_off}\n" "$1"; }
-err(){ printf "${c_red}[ERR] %s${c_off}\n" "$1"; }
+banner(){ $QUIET || printf "${c_cyan}\n==> %s${c_off}\n" "$1"; }
+note(){   $QUIET || printf "${c_yel}[-] %s${c_off}\n" "$1"; }
+ok(){     $QUIET || printf "${c_grn}[OK] %s${c_off}\n" "$1"; }
+err(){    printf "${c_red}[ERR] %s${c_off}\n" "$1"; }
 
 banner "SpectraMind V50 — Kaggle Bootstrap"
 
@@ -55,16 +66,25 @@ IS_KAGGLE=0
 if [[ -d /kaggle && -d /kaggle/working ]]; then IS_KAGGLE=1; fi
 note "Kaggle runtime detected: ${IS_KAGGLE}"
 
-# Enforce a local pip cache on Kaggle to speed restarts
+# Enforce a local pip/cache/tmp on Kaggle to speed restarts & avoid /tmp limits
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/kaggle/working/.cache/pip}"
-mkdir -p "$PIP_CACHE_DIR"
+export TMPDIR="${TMPDIR:-/kaggle/working/.tmp}"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+
+# Pip noise & safety
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_NO_PYTHON_VERSION_WARNING=1
+export PYTHONUTF8=1
 
 # Simple internet check (Kaggle often runs with internet disabled)
 INTERNET_OK=0
 if python - <<'PY' >/dev/null 2>&1; then
-import socket
-socket.gethostbyname("pypi.org")
-print("ok")
+import socket, sys
+try:
+    socket.gethostbyname("pypi.org")
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
 PY
 then INTERNET_OK=1; else INTERNET_OK=0; fi
 
@@ -79,7 +99,7 @@ $QUIET && PIP_QUIET+=(-q)
 pip_retry() {
   # pip_retry <args...>
   local n=0; local max=3
-  until pip install "${PIP_QUIET[@]}" "$@"; do
+  until python -m pip install "${PIP_QUIET[@]}" "$@"; do
     n=$((n+1))
     if [[ $n -ge $max ]]; then err "pip install failed after ${max} attempts: $*"; return 1; fi
     note "pip retry $n/$max for: $*"; sleep 2
@@ -91,10 +111,14 @@ have_py() { python - "$@" >/dev/null 2>&1; }
 torch_ready() {
   # torch_ready <cpu|cuda>
   python - "$1" <<'PY'
-import sys, torch
+import sys
+try:
+    import torch
+except Exception:
+    sys.exit(1)
 want = sys.argv[1]
 if want == "cpu":
-    ok = not torch.cuda.is_available()
+    ok = (not torch.cuda.is_available())
 else:
     ok = torch.cuda.is_available()
 sys.exit(0 if ok else 1)
@@ -103,7 +127,7 @@ PY
 
 pyg_needed() {
   python - <<'PY'
-import importlib
+import importlib, sys
 mods = ["torch_geometric","torch_scatter","torch_sparse","torch_cluster","torch_spline_conv"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 sys.exit(0 if not missing else 1)
@@ -134,8 +158,10 @@ fi
 # ------------------------------- TORCH ---------------------------------------
 banner "Torch / CUDA setup"
 
-# If torch is already installed and meets CPU/GPU intent, keep it unless user pinned a version
 KEEP_EXISTING=false
+EXISTING_VER=""
+EXISTING_CUDA=""
+
 if have_py 'import torch'; then
   EXISTING_VER="$(python - <<'PY'
 import torch; print(getattr(torch, "__version__", ""), end="")
@@ -145,7 +171,7 @@ PY
 import torch; print(torch.version.cuda or "cpu", end="")
 PY
 )"
-  note "Found torch ${EXISTING_VER} (CUDA ${EXISTING_CUDA})"
+  note "Found torch ${EXISTING_VER:-unknown} (CUDA ${EXISTING_CUDA:-unknown})"
   if [[ -z "$TARGET_TORCH" ]]; then
     if $FORCE_CPU; then
       torch_ready cpu && KEEP_EXISTING=true
@@ -175,6 +201,8 @@ else
     if command -v nvidia-smi >/dev/null 2>&1; then
       RAW="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || true)"
       note "nvidia-smi present (driver ${RAW:-unknown})"
+    else
+      note "nvidia-smi not present; proceeding with CUDA wheels based on index URL"
     fi
     note "Installing CUDA-enabled torch ${TARGET_TORCH:+(target $TARGET_TORCH)} via ${CUDA_URL}"
     if [[ -n "$TARGET_TORCH" ]]; then
@@ -236,7 +264,7 @@ fi
 # ------------------------------- REPORT --------------------------------------
 banner "Environment summary"
 python - <<'PY'
-import sys
+import sys, importlib
 def safe(x): return x if x else "n/a"
 try:
     import torch
@@ -244,6 +272,9 @@ try:
     tcuda = safe(getattr(getattr(torch, "version", None), "cuda", None)) or ("cuda" if torch.cuda.is_available() else "cpu")
 except Exception:
     tver, tcuda = "n/a", "n/a"
+def has(m):
+    try: importlib.import_module(m); return "yes"
+    except Exception: return "no"
 try:
     import dvc
     dver = safe(dvc.__version__)
@@ -251,6 +282,8 @@ except Exception:
     dver = "n/a"
 print(f"Torch: {tver} (CUDA {tcuda})")
 print(f"DVC:   {dver}")
+print("PyG:   tg:", has("torch_geometric"), " tsct:", has("torch_scatter"), " tspr:", has("torch_sparse"),
+      " tclu:", has("torch_cluster"), " tspl:", has("torch_spline_conv"))
 print("Python:", sys.version.split()[0])
 PY
 
