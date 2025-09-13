@@ -1,24 +1,61 @@
-# Deeper performance profiling
+# ==============================================================================
+# SpectraMind V50 — Profile: Deep Profiling (kernel-level & step breakdown)
+# ------------------------------------------------------------------------------
+# Usage:
+#   # CPU & GPU timeline, op-level stats, export traces:
+#   SM_PROFILER=advanced python -m spectramind train +defaults='[/profiles/profiling_deep]'
+#
+#   # Lighter pass:
+#   SM_PROFILER=simple   python -m spectramind train +defaults='[/profiles/profiling_deep]'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
   - /training/dataloader: dataloader
 
 trainer:
-  profiler: ${oc.env:SM_PROFILER,"advanced"}
-  max_epochs: 3
-  limit_train_batches: 0.2
-  limit_val_batches: 0.2
-  log_every_n_steps: 5
+  profiler: ${oc.env:SM_PROFILER, "advanced"}   # "advanced" | "simple" | null
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 3}
+  limit_train_batches: ${oc.env:SM_LIMIT_TRAIN, 0.2}
+  limit_val_batches: ${oc.env:SM_LIMIT_VAL, 0.2}
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 5}
+  enable_progress_bar: true
+  benchmark: true                                 # allow cuDNN autotune for perf studies
+  deterministic: false
 
+# Precision: Ampere-friendly default; override with 32-true for numeric baselines
 precision:
-  mode: ${oc.env:SM_PRECISION,"bf16-mixed"}
+  mode: ${oc.env:SM_PRECISION, "bf16-mixed"}
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, true}
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, true}
+  matmul:
+    precision: ${oc.env:SM_MATMUL_PRECISION, "high"}
+  safety:
+    detect_anomaly: ${oc.env:SM_DETECT_ANOMALY, false}   # anomaly adds overhead; enable only for NaN hunts
 
+# DataLoader: realistic, steady-state settings to expose stalls
 data_loader:
-  num_workers: ${oc.env:SM_WORKERS,4}
+  num_workers: ${oc.env:SM_WORKERS, 4}
   persistent_workers: true
-  prefetch_factor: 4
+  prefetch_factor: ${oc.env:SM_PREFETCH, 4}
   pin_memory: true
+  pin_memory_device: "cuda"
+
+# Optional: emit torch.compile() friendly flags if your stack uses it
+#compile:
+#  mode: ${oc.env:SM_COMPILE_MODE, "default"}  # "reduce-overhead"|"max-autotune" etc.
+#  fullgraph: ${oc.env:SM_COMPILE_FULLGRAPH, false}
+
+# Optional: write profiler traces to outputs for Chrome trace viewer
+profiling:
+  export:
+    enabled: ${oc.env:SM_PROFILE_EXPORT, true}
+    # these paths assume your Hydra paths.outputs is set; adjust if needed
+    dir: ${paths.outputs}/profiling
+    filename: "trace-${now:%Y%m%d-%H%M%S}.json"
 
 experiment:
-  tags: ["profile:profiling"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "profiling-deep"}
+  tags: ${oc.env:SM_TAGS, ["profile:profiling","perf","timeline"]}
