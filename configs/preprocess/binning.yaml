@@ -1,10 +1,60 @@
-# BINNING — (optional) spectral/time binning on AIRS/FGS1
+# BINNING — optional spectral/time binning on AIRS/FGS1 (upgraded)
+
+# Notes:
+# • factor > 1 coarsens resolution (downsampling/aggregation).
+# • For spectral binning, ensure factor divides ${preprocess.shapes.bins} (typically 283).
+# • Bin 0 is FGS1; it's never folded into AIRS and stays at index 0.
 
 time:
   enable: false
-  factor: 1                  # factor>1 => coarsen temporal resolution
+  factor: 1                       # >1 => downsample time
+  mode: "mean"                    # 'mean'|'median'|'sum'|'first'|'last'
+  anti_alias:
+    enable: true                  # apply low-pass before downsample
+    kind: "moving_avg"            # 'moving_avg'|'savgol'
+    window: 3                     # odd; applied per-channel
+    savgol:
+      window: 5
+      polyorder: 2
+  edge:
+    drop_remainder: true          # drop tail if not divisible by factor
+    pad_mode: "reflect"           # used only if drop_remainder=false
+  # record mapping if you need to reverse/trace
+  export_map: true                # writes time_bin_map.npy alongside features
 
 spectral:
   enable: false
-  factor: 1                  # factor>1 => reduce AIRS bins (keep divisible with BINS)
-  preserve_fgs1: true
+  factor: 1                       # >1 => reduce AIRS bins (keep divisible with BINS)
+  mode: "mean"                    # 'mean'|'median'|'sum'|'max'|'min'
+  anti_alias:
+    enable: true
+    kind: "moving_avg"
+    window: 3
+  preserve_fgs1: true             # keep FGS1 at bin 0, untouched
+  # AIRS-only binning; FGS1 is never aggregated into AIRS
+  apply_to:
+    airs: true
+    fgs1: false
+  edge:
+    drop_remainder: true
+    pad_mode: "reflect"
+  export_map: true                # writes spec_bin_map.npy (old->new indices)
+  validate:
+    must_divide_bins: true        # assert BINS % factor == 0 (excluding FGS1)
+    keep_fgs1_at_zero: true       # hard guardrail
+
+# Recompute/propagate stats after binning (so normalize stays consistent)
+stats:
+  recompute_after: true           # derive new μ/σ on binned tensors
+  write_to: ${io.features_root}/scaler_binned  # separate namespace to avoid clashes
+
+# Contracts / provenance
+provenance:
+  write_manifest: true            # add binning entry to preprocess manifest
+  fields:
+    - time.factor
+    - time.mode
+    - spectral.factor
+    - spectral.mode
+    - spectral.preserve_fgs1
+    - stats.recompute_after
