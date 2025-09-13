@@ -1,54 +1,68 @@
 # ==============================================================================
 # .cz.toml — Commitizen configuration for SpectraMind V50 (hardened)
 # ------------------------------------------------------------------------------
-# Conventional Commits + automated version/tag/changelog bumps.
-# Canonical version source: pyproject.toml (PEP 621).
+# • Conventional Commits
+# • Version/tag/changelog automation
+# • Canonical version source: pyproject.toml ([project].version, PEP 621)
 # ==============================================================================
 
 [tool.commitizen]
 name = "cz_conventional_commits"
 
 # ---- Canonical version source (avoid drift) ----------------------------------
-version_provider = "pep621"            # read from [project].version in pyproject.toml
-version_scheme   = "pep440"
-major_version_zero = true              # semver semantics under 1.0.0 (feat -> MINOR)
+version_provider    = "pep621"          # read from pyproject.toml [project].version
+version_scheme      = "pep440"
+major_version_zero  = true              # under 1.0.0: feat -> MINOR, fix -> PATCH
 
 # ---- Tags --------------------------------------------------------------------
-tag_format     = "v$version"           # e.g. v0.1.0
-annotated_tag  = true
-tag_message    = "release: v$version"
+tag_format          = "v$version"       # e.g., v0.1.0
+annotated_tag       = true
+tag_message         = "release: v$version"
 
-# ---- Bump commit message -----------------------------------------------------
-bump_message = "chore(release): v$current_version → v$new_version"
+# ---- Commit message & bump ---------------------------------------------------
+bump_message        = "chore(release): v$current_version → v$new_version"
 
-# ---- Files to bump in lockstep -----------------------------------------------
-# First file is the source of truth (pyproject via pep621). Others mirror it.
+# Files to keep in lockstep with pyproject (pyproject is handled by version_provider)
 version_files = [
   "VERSION",
-  "pyproject.toml:^version\\s*=\\s*\"(?P<version>.*)\"",
   "src/spectramind/__init__.py:^__version__\\s*=\\s*\"(?P<version>.*)\"",
 ]
 
-# ---- Changelog generation -----------------------------------------------------
+# ---- Changelog generation ----------------------------------------------------
 update_changelog_on_bump = true
 changelog_file           = "CHANGELOG.md"
 changelog_incremental    = true
-# Optionally set a start revision for first release notes:
-# changelog_start_rev = "v0.1.0"
+# If you want the first generated notes to start after an initial tag:
+# changelog_start_rev   = "v0.1.0"
 
-# ---- Presentation order in CHANGELOG -----------------------------------------
+# Order sections in CHANGELOG (top to bottom)
 change_type_order = [
   "feat", "fix", "perf", "refactor", "build", "ci", "test", "docs", "style", "chore", "revert"
 ]
 
+# Optional: customize how types map to CHANGELOG titles
+# (Commitizen defaults are reasonable; uncomment to override)
+# [tool.commitizen.change_type_map]
+# feat = "🚀 Added"
+# fix  = "🛠️ Fixed"
+# perf = "🧪 Performance"
+# docs = "📝 Docs"
+# ci   = "🧱 CI"
+# build= "🏗️ Build"
+# test = "✅ Tests"
+# style= "💅 Style"
+# chore= "🧹 Chore"
+# refactor = "♻️ Refactor"
+# revert   = "⏪ Revert"
+
 # ---- (Optional) prereleases/devreleases --------------------------------------
 # prerelease     = true
-# prerelease_tag = "rc"                 # or "a" / "b"
-# devrelease     = false                # .devN suffixes
+# prerelease_tag = "rc"                  # or "a"/"b"
+# devrelease     = false                 # .devN suffixes
 
-# ---- Advisory: message template & allowed types/scopes (informational) -------
+# ---- Advisory: message template & allowed types/scopes -----------------------
 [tool.commitizen.customize]
-message_template = "{{type}}{{#scope}}({{.}}){{/scope}}: {{message}}"
+message_template = "{{type}}{{#scope}}({{.}}){{/scope}}{{#is_breaking_change}}!{{/is_breaking_change}}: {{message}}"
 
 types = [
   { type = "feat",     description = "A new feature" },
