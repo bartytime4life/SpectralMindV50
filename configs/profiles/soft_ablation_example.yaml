@@ -1,4 +1,13 @@
-# Soft ablation reference (reduce priors by 10×; keep them non-zero)
+# ==============================================================================
+# SpectraMind V50 — Profile: Soft Ablation (priors @ 0.1×, non-zero)
+# ------------------------------------------------------------------------------
+# Intent:
+#   - Keep physics priors on, but 10× weaker to gauge marginal impact
+#   - GLL remains the dominant term (challenge metric)
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/soft_ablation]'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -9,13 +18,25 @@ defaults:
   - /training/callbacks: callbacks
   - /training/accumulate: accumulate
 
+# Composite loss (ADR-0002): reduce priors to 0.1× but keep them non-zero
 loss:
   composite:
+    # If your stack uses per-term on/off switches, ensure they are enabled (not shown here).
     weights:
-      smoothness: ${oc.env:SM_ABL_SMOOTH, 0.1}
-      nonneg:     ${oc.env:SM_ABL_NONNEG, 0.1}
-      band_coherence: ${oc.env:SM_ABL_BAND, 0.1}
-      calibration: ${oc.env:SM_ABL_CALIB, 0.1}
+      smoothness:     ${oc.env:SM_ABL_SMOOTH, 0.1}
+      nonneg:         ${oc.env:SM_ABL_NONNEG, 0.1}
+      band_coherence: ${oc.env:SM_ABL_BAND,   0.1}
+      calibration:    ${oc.env:SM_ABL_CALIB,  0.1}
+    # Optionally keep GLL explicit (many repos default to 1.0)
+    gll_weight: ${oc.env:SM_ABL_GLL, 1.0}
+
+# Keep numerics simple unless you’re benchmarking speed
+precision:
+  mode: ${oc.env:SM_PRECISION, "32-true"}
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, false}
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, false}
 
 experiment:
-  tags: ${oc.env:SM_TAGS, ["profile:soft_ablation(0.1x)"]}
+  name: ${oc.env:SM_EXPERIMENT_NAME, "soft-ablation-0p1x"}
+  tags: ${oc.env:SM_TAGS, ["profile:soft_ablation(0.1x)","priors=0.1","GLL=1.0"]}
