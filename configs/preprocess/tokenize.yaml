@@ -1,0 +1,14 @@
+# TOKENIZE — positional encodings
+
+time_pe:
+  mode: "sinusoid"         # 'sinusoid'|'none'
+  d_model: 32
+  base: 10000.0
+
+spec_pe:
+  mode: "sinusoid"         # spectral PE for AIRS bins
+  d_model: 16
+  base: 10000.0
+
+concat_to_inputs: false     # if true, append PE to inputs; else export separately
+broadcast_spec_pe: true
