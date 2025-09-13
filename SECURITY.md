@@ -1,102 +1,152 @@
+Here’s a **drop-in `SECURITY.md`**—tight, GitHub-friendly, Kaggle-aware, and aligned with the repo’s tooling and CI. Replace your file with this.
+
+````markdown
 # 🔐 Security Policy — SpectraMind V50
+
+Mission-critical guardrails for a research-grade, competition-safe pipeline.
+
+---
 
 ## 📌 Supported Versions
 
 We actively maintain the **latest `main` branch** and all tagged releases.
 
 | Version | Supported                                |
-| ------- | ---------------------------------------- |
+|--------:|:-----------------------------------------|
 | `main`  | ✅                                        |
-| `0.x`   | ✅ (active dev, breaking changes allowed) |
+| `0.x`   | ✅ (active dev; breaking changes allowed) |
 | `<0.x`  | ❌                                        |
 
-⚠️ Kaggle submissions must **always use pinned dependencies** in  
-`requirements-kaggle.txt` for reproducibility and security:contentReference[oaicite:0]{index=0}.
+> **Kaggle submissions** must use **pinned dependencies** from `requirements-kaggle.txt` for reproducibility and supply-chain safety.
 
 ---
 
 ## 🛡️ Reporting a Vulnerability
 
-If you discover a vulnerability:
+If you believe you’ve found a security issue:
 
 1. **Do not open a public GitHub Issue.**
-2. Email: **[security@spectramind-v50.org](mailto:security@spectramind-v50.org)**  
-   or use GitHub’s [Security Advisories](https://docs.github.com/code-security/security-advisories/repository-security-advisories).
-3. Include:
-   * Repo commit hash
-   * Steps to reproduce
-   * Expected vs. actual behavior
-   * Minimal proof of concept
+2. Contact us privately:
+   - Email: **security@spectramind-v50.org**
+   - or use GitHub **Security Advisories** on this repository
+3. Please include:
+   - Affected commit/tag (`git rev-parse --short HEAD`)
+   - Reproduction steps / PoC (minimal)
+   - Expected vs. actual behavior
+   - Impact assessment (confidentiality/integrity/availability)
+   - Any logs, stack traces, or screenshots that help triage
 
-We aim to **acknowledge within 72h** and provide a fix/mitigation plan **within 30 days**.
+**Response targets**
+- Acknowledgement **≤ 72 hours**
+- Initial remediation plan **≤ 30 days** (severity-dependent)
+- Credit in release notes (opt-in), unless anonymity requested
+
+Optional: if you prefer encryption, ask for our PGP key in your initial email.
 
 ---
 
 ## 🔒 Security Principles
 
 ### Dependency Hygiene
-* Runtime: pinned in `requirements-kaggle.txt`  
-* Dev/CI: pinned in `requirements-dev.txt`  
-* Enforced with optional `constraints.txt`  
-* Automated scans: Dependabot + `pip-audit`:contentReference[oaicite:1]{index=1}
+- Runtime pins in `requirements-kaggle.txt` (offline kernels; no `pip install` at runtime)
+- Dev/CI pins in `requirements-dev.txt`; optional `constraints.txt` for resolver stability
+- Automated checks in CI: **pip-audit** and Dependabot (PRs grouped & reviewed)
 
 ### Supply Chain Protection
-* SBOM (CycloneDX/SPDX) auto-generated via **Syft/Grype**:contentReference[oaicite:2]{index=2}
-* GitHub Actions enforce `--require-hashes` where feasible
-* No unpinned system calls in scripts (`bash -Eeuo pipefail`):contentReference[oaicite:3]{index=3}
+- **SBOM** generation (CycloneDX/SPDX) via Syft; optional Grype scan
+- Reproducible builds: pinned Python, pinned wheels where feasible
+- Shell scripts run with `bash -Eeuo pipefail`; no unpinned curl|bash patterns
 
 ### Code Quality & Safety
-* Strict typing (`mypy --strict`):contentReference[oaicite:4]{index=4}
-* Lint enforced (`ruff`, `flake8`):contentReference[oaicite:5]{index=5}
-* Tests cover error paths & CLI misuse
-* No secrets in repo — use `.env`, Kaggle secrets, or CI secrets:contentReference[oaicite:6]{index=6}
+- Type checks: **mypy** (strict for core, relaxed for CLI/tests)
+- Linters: **ruff** (Black-compatible), **flake8** plug-ins as needed
+- Tests cover error paths and misuse of CLI flags
+- **No secrets** in repo; use `.env` (git-ignored), CI secrets, or Kaggle secrets
 
 ### Execution Environments
-* Kaggle kernels: **offline, ≤9h runtime** enforced:contentReference[oaicite:7]{index=7}
-* Local/CI: reproducible via Hydra + DVC:contentReference[oaicite:8]{index=8}
-* Docker: minimal base (`python:3.10-slim`), non-root runtime:contentReference[oaicite:9]{index=9}
+- **Kaggle** kernels: **offline**, ≤ **9h** GPU wallclock, ≤ **30 GB** RAM; outputs to `/kaggle/working`
+- **Local/CI**: reproducible via Hydra + DVC; deterministic seeds; JSONL logs
+- **Docker**: minimal base, non-root runtime; GPU optional; pinned OS packages when installed
 
 ---
 
 ## 🛰️ Scope of Protection
 
-This repo processes **scientific challenge data** (FGS1 photometry + AIRS spectra).  
-Protections focus on:
+This repository processes **scientific challenge data** (FGS1 photometry + AIRS spectroscopy). We protect:
 
-* 🔒 **Data confidentiality** of competition datasets  
-* 📑 **Traceability** of configs & calibration (`configs/` are DVC-tracked):contentReference[oaicite:10]{index=10}  
-* 🧪 **Integrity** against malicious PRs (pre-commit hooks + CI checks):contentReference[oaicite:11]{index=11}
+- 🔒 **Dataset confidentiality** (competition rules & licenses)
+- 📑 **Traceability** of configs & calibration (Hydra snapshots; DVC lineage)
+- 🧪 **Integrity** of results (schema-checked submissions; manifest checksums)
+- 🔄 **Provenance** of artifacts (manifests, `scaler/` stats, and run metadata)
+
+Out of scope (unless they materially affect safety): typos, stylistic nits, non-security doc issues.
 
 ---
 
-## 🛠️ Security Tooling (CI/CD Integrated)
+## 🛠️ Security Tooling (CI/CD)
 
-* GitHub **CodeQL** (static analysis):contentReference[oaicite:12]{index=12}
-* **Trivy** (container & IaC scan):contentReference[oaicite:13]{index=13}
-* **Syft + Grype** (SBOM + vuln scan):contentReference[oaicite:14]{index=14}
-* **pip-audit** (Python deps):contentReference[oaicite:15]{index=15}
-* **Ruff / flake8** (lint + import safety):contentReference[oaicite:16]{index=16}
-* **pre-commit** (YAML lint, secrets scan, nbstripout):contentReference[oaicite:17]{index=17}
+- **CodeQL** (static analysis for Python)
+- **Trivy** (filesystem & IaC scanning; optional container image scan)
+- **Syft + Grype** (SBOM + vulnerability scan)
+- **pip-audit** (Python dependency CVEs)
+- **Ruff / flake8** (lint, import safety)
+- **pre-commit** (YAML lint, secrets scan, notebook output stripping)
+
+Run locally:
+
+```bash
+make scan     # SBOM + pip-audit + basic linters (non-failing locally)
+make sbom     # SBOM → artifacts/sbom.json
+````
 
 ---
 
 ## 🤝 Responsible Disclosure
 
-We follow [CVE](https://cve.mitre.org/) rules:
+We follow coordinated disclosure practices:
 
-* Low-risk issues (typos, Kaggle-only warnings) → patched silently.  
-* Critical issues → **out-of-band release** + coordinated advisory.  
-* All fixes are linked to commit hashes + DVC data versions for full reproducibility:contentReference[oaicite:18]{index=18}.
+* **Low-risk** issues (docs, warnings) → patched silently in `main`
+* **Moderate/Critical** → out-of-band patch release + advisory
+* CVSS scoring used internally to prioritize
+* Fixes tie back to commit hashes and (when applicable) DVC data versions
+* We credit reporters (if desired) in release notes
 
 ---
 
 ## ✅ Best Practices for Contributors
 
-* Run `make check` before pushing (enforces lint, type, tests, schema).  
-* Use `make sbom` + `make scan` to locally validate dependencies.  
-* Never push `.env` or real secrets — repo CI enforces `.gitignore` + secret scan.  
-* If working on Kaggle notebooks, **only import from `/kaggle/input/...`** (competition data mount):contentReference[oaicite:19]{index=19}.  
-* Follow clean architecture patterns (separation of CLI vs. logic):contentReference[oaicite:20]{index=20}.  
-* Document configs and pipeline runs in `artifacts/run_events.jsonl` for audit traceability:contentReference[oaicite:21]{index=21}.
+* Run `make check` before pushing (pre-commit, lint, types, tests)
+* Use `make sbom` and `make scan` to sanity-check dependencies
+* Never commit `.env` or real secrets; rely on CI/Kaggle secrets
+* Kaggle notebooks should **only** read from `/kaggle/input/...` and write to `/kaggle/working`
+* Keep CLI (I/O) separate from core logic (clean architecture)
+* Document notable runs in `artifacts/` (e.g., `events.jsonl`, `manifest.json`) for auditability
+
+---
+
+## 📬 security.txt (optional)
+
+Consider publishing a `.well-known/security.txt` in your project site or org:
+
+```
+Contact: mailto:security@spectramind-v50.org
+Preferred-Languages: en
+Policy: https://github.com/<OWNER>/<REPO>/blob/main/SECURITY.md
+Acknowledgements: https://github.com/<OWNER>/<REPO>/releases
+```
+
+---
+
+## 🧭 Versioning & Backports
+
+* Security fixes land on `main`, then are **cherry-picked** to the latest stable tag if applicable.
+* We do **not** guarantee backports to `<0.x` unless severity warrants.
+
+---
+
+## 📄 License & Legal
+
+* Licensed under **MIT**. Submissions must comply with competition rules and dataset licenses.
+* By reporting vulnerabilities, you agree to act in good faith and avoid privacy violations or data exfiltration.
 
 ---
