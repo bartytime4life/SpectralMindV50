@@ -18,7 +18,6 @@ on:
       - "requirements*.txt"
   workflow_dispatch:
 
-# Least-privilege by default; only this workflow needs these
 permissions:
   contents: read
   packages: write          # push to GHCR (non-PR)
@@ -32,15 +31,12 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}           # normalized by metadata-action
-  PLATFORMS: linux/amd64                         # set "linux/amd64,linux/arm64" for multi-arch
+  IMAGE_NAME: ${{ github.repository }}     # normalized by metadata-action
+  PLATFORMS: linux/amd64                   # set "linux/amd64,linux/arm64" for multi-arch
   ARTIFACT_RETENTION_DAYS: 14
-  # Trivy DB cache salt (bump to force refresh)
   TRIVY_KEY_SALT: v1
-  # Optional failure gate for Trivy: none | low | medium | high | critical
-  TRIVY_FAIL_ON: none
-  # Trivy action version (tag). Say the word and I'll pin the exact SHA.
-  TRIVY_ACTION_VERSION: "0.33.1"
+  TRIVY_FAIL_ON: none                      # none | low | medium | high | critical
+  TRIVY_ACTION_VERSION: "0.33.1"           # tag; say the word and I’ll pin SHA
 
 jobs:
   build:
@@ -52,6 +48,16 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
+      - name: 🔎 Guard — Dockerfile present?
+        id: guard
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No Dockerfile found — skipping image build/scan."
+            echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 🔢 Derive version
         id: ver
         run: |
@@ -60,13 +66,14 @@ jobs:
           echo "version=${v}" >> "$GITHUB_OUTPUT"
 
       - name: 🧹 Dockerfile lint (Hadolint)
-        if: hashFiles('Dockerfile') != ''
+        if: steps.guard.outputs.has_dockerfile == 'true'
         uses: hadolint/hadolint-action@v3.2.0
         with:
           dockerfile: Dockerfile
 
       - name: 🏷️ Docker metadata (tags & labels)
         id: meta
+        if: steps.guard.outputs.has_dockerfile == 'true'
         uses: docker/metadata-action@8e5442c4ef9f78752691e2a88c2ef49dc42b97de # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -82,18 +89,19 @@ jobs:
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+            org.opencontainers.image.created=${{ github.run_started_at }}
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: 🧬 Set up QEMU (for multi-arch)
-        if: contains(env.PLATFORMS, ',')
+        if: steps.guard.outputs.has_dockerfile == 'true' && contains(env.PLATFORMS, ',')
         uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
 
       - name: 🧱 Set up Buildx
+        if: steps.guard.outputs.has_dockerfile == 'true'
         uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3
 
       - name: 🔐 Login to GHCR
-        if: github.event_name != 'pull_request'
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name != 'pull_request'
         uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -102,11 +110,11 @@ jobs:
 
       # PRs → build locally (no push) so Trivy can scan the image
       - name: 🏗️ Build (PR) — load to local Docker
-        if: github.event_name == 'pull_request'
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name == 'pull_request'
         uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6
         with:
           context: .
-          platforms: linux/amd64          # local load supports single-arch only
+          platforms: linux/amd64
           load: true
           push: false
           pull: true
@@ -121,7 +129,7 @@ jobs:
       # main branch / manual → push to GHCR
       - name: 🚀 Build & Push (main)
         id: build-push
-        if: github.event_name != 'pull_request'
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name != 'pull_request'
         uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6
         with:
           context: .
@@ -147,8 +155,8 @@ jobs:
           format: cyclonedx-json
 
       - name: 📦 Image SBOM (Syft → CycloneDX)
-        if: github.event_name != 'pull_request'
-        uses: anchore/syft-action@v0.20.5
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name != 'pull_request'
+        uses: anchore/syft-action@0a56d7a2fa6060d0b4f2b2d1a2dcd71b2f6a3fd1 # v0.20.5 pinned
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
           output: cyclonedx-json=sbom-image.cdx.json
@@ -174,7 +182,7 @@ jobs:
             trivy-db-${{ env.TRIVY_KEY_SALT }}-${{ runner.os }}-
 
       - name: 🔎 Trivy image scan (PR local)
-        if: github.event_name == 'pull_request'
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name == 'pull_request'
         uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: image
@@ -186,7 +194,7 @@ jobs:
         continue-on-error: true
 
       - name: 🔎 Trivy image scan (pushed)
-        if: github.event_name != 'pull_request'
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@${{ env.TRIVY_ACTION_VERSION }}
         with:
           scan-type: image
@@ -202,7 +210,7 @@ jobs:
           [ -s trivy.sarif ] || echo '{"runs":[]}' > trivy.sarif
 
       - name: ⬆️ Upload Trivy SARIF (fork-safe)
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
+        if: ${{ steps.guard.outputs.has_dockerfile == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true) }}
         uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy.sarif
@@ -216,8 +224,11 @@ jobs:
           path: trivy.sarif
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
+      - name: 🧰 Install jq for gate
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
       - name: 🚦 Optional Trivy failure gate
-        if: always()
+        if: always() && steps.guard.outputs.has_dockerfile == 'true'
         shell: bash
         run: |
           lvl="${TRIVY_FAIL_ON,,}"
@@ -242,7 +253,7 @@ jobs:
 
       # ---------- Build provenance attestation (GHCR) ----------
       - name: 🧾 Attest build provenance
-        if: github.event_name != 'pull_request'
+        if: steps.guard.outputs.has_dockerfile == 'true' && github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@bdd51370d99a66c718e0de0492932ad2c8c24a73 # v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -254,9 +265,11 @@ jobs:
         run: |
           echo "### Docker build summary" >> $GITHUB_STEP_SUMMARY
           echo "- Version: \`${{ steps.ver.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Tags: \`${{ steps.meta.outputs.tags || fromJSON(steps.meta.outputs.json).tags[0] }}\`" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ steps.build-push.outputs.digest }}" ]; then
-            echo "- Digest: \`${{ steps.build-push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.guard.outputs.has_dockerfile }}" = "true" ]; then
+            echo "- Tags: \`${{ steps.meta.outputs.tags || fromJSON(steps.meta.outputs.json).tags[0] }}\`" >> $GITHUB_STEP_SUMMARY
+            [ -n "${{ steps.build-push.outputs.digest }}" ] && echo "- Digest: \`${{ steps.build-push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Build skipped (no Dockerfile)" >> $GITHUB_STEP_SUMMARY
           fi
           test -f sbom-repo.cdx.json && echo "- Repo SBOM: ✅" >> $GITHUB_STEP_SUMMARY || true
           test -f sbom-image.cdx.json && echo "- Image SBOM: ✅" >> $GITHUB_STEP_SUMMARY || echo "- Image SBOM: (PR only ⇒ skipped)" >> $GITHUB_STEP_SUMMARY
