@@ -1,6 +1,3 @@
-Here’s a **drop-in `SECURITY.md`**—tight, GitHub-friendly, Kaggle-aware, and aligned with the repo’s tooling and CI. Replace your file with this.
-
-````markdown
 # 🔐 Security Policy — SpectraMind V50
 
 Mission-critical guardrails for a research-grade, competition-safe pipeline.
