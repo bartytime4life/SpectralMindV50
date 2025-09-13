@@ -1,16 +1,60 @@
-# W&B online tracking (disable for Kaggle by switching to kaggle profile)
+# ==============================================================================
+# SpectraMind V50 — Profile: W&B Online Tracking
+# ------------------------------------------------------------------------------
+# Usage:
+#   # Online run (requires WANDB_API_KEY in env):
+#   python -m spectramind train +defaults='[/profiles/logger_wandb]'
+#
+#   # Grouped sweep:
+#   WANDB_GROUP="ablation-001" python -m spectramind train +defaults='[/profiles/logger_wandb]'
+#
+#   # Resume a run (if your launcher supports passing resume policy):
+#   WANDB_RESUME="allow" WANDB_RUN_ID="<existing-run-id>" \
+#   python -m spectramind train +defaults='[/profiles/logger_wandb]'
+# ==============================================================================
+
 defaults:
   - /training/logger: logger
 
 training:
   logger:
+    # Online logging (set false or switch to kaggle profile when running on Kaggle)
     offline: false
+
+    # DDP-safety: only rank 0 talks to W&B to avoid duplicate runs
+    rank_zero_only: ${oc.env:WANDB_RANK_ZERO_ONLY, true}
+
     backend:
       name: "wandb"
       passthrough:
-        project: ${oc.env:WANDB_PROJECT,"spectramind-v50"}
-        entity: ${oc.env:WANDB_ENTITY,""}
+        # Core W&B identifiers
+        project: ${oc.env:WANDB_PROJECT, "spectramind-v50"}
+        entity:  ${oc.env:WANDB_ENTITY, ""}                       # optional, e.g., your team/org
         run_name: "${experiment.name}-${now:%Y%m%d-%H%M%S}${training.logger.uuid_suffix}"
+        group:    ${oc.env:WANDB_GROUP, "${experiment.name}"}      # sweep/collection grouping
+        job_type: ${oc.env:WANDB_JOB_TYPE, "train"}
 
+        # Mode / storage
+        mode: ${oc.env:WANDB_MODE, "online"}                       # "online" | "offline" | "disabled"
+        dir:  ${oc.env:WANDB_DIR, "${paths.outputs}/wandb"}        # local files/artifacts landing zone
+
+        # Model & TB integration
+        log_model: ${oc.env:WANDB_LOG_MODEL, false}                # true to upload models
+        sync_tensorboard: ${oc.env:WANDB_SYNC_TB, true}            # if you also emit TB logs
+        save_code: ${oc.env:WANDB_SAVE_CODE, true}                 # attach current source for reproducibility
+
+        # Resume policies
+        resume: ${oc.env:WANDB_RESUME, "never"}                    # "never" | "allow" | "must"
+        id:     ${oc.env:WANDB_RUN_ID, ""}                         # set to existing run id to resume
+
+        # Extra tags (merged with experiment.tags)
+        extra_tags:
+          git_commit: ${oc.env:GIT_COMMIT, ""}
+          git_branch: ${oc.env:GIT_BRANCH, ""}
+          host: ${oc.env:HOSTNAME, ""}
+          user: ${oc.env:USER, ""}
+
+# Keep experiment identity simple — W&B uses run_name/group above
 experiment:
-  tags: ["profile:wandb_online"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "wandb-online"}
+  tags: ${oc.env:SM_TAGS, ["profile:wandb_online","logger=wandb"]}
