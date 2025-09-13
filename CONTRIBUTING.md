@@ -1,7 +1,3 @@
-Here’s a hardened, cross-wired **`CONTRIBUTING.md`** you can drop at repo root. It fixes the loose connections to our CLI, Hydra/DVC pipeline, security policy, make targets, ADR naming, and Kaggle constraints — all consistent with the rest of SpectraMind V50.
-
----
-
 # 🤝 Contributing Guide — SpectraMind V50
 
 Welcome to **SpectraMind V50** — a **mission-grade, reproducible AI pipeline** for the NeurIPS 2025 **Ariel Data Challenge**.
