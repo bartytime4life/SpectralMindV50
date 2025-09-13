@@ -1,4 +1,16 @@
-# Ampere-class GPUs (A100/L4/4090): bf16 + TF32 for speed (validate numerics!)
+# ==============================================================================
+# SpectraMind V50 — Profile: Ampere (bf16 + TF32)  🚀
+# ------------------------------------------------------------------------------
+# Target HW: NVIDIA Ampere+ (A100 / L4 / 3090/4090)
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/ampere_bf16_tf32]'
+#
+# Purpose:
+#   - Enable bf16 mixed precision + TF32 matmul kernels for high throughput.
+#   - Keep numerics sane; validate against FP32 when debugging.
+#   - Warmup-friendly schedule and performant DataLoader defaults.
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -9,25 +21,44 @@ defaults:
   - /training/callbacks: callbacks
   - /training/accumulate: accumulate
 
-precision:
-  mode: ${oc.env:SM_PRECISION,"bf16-mixed"}
-  tf32:
-    allow: ${oc.env:SM_TF32_ALLOW,true}
-    cudnn_allow: ${oc.env:SM_TF32_CUDNN,true}
-  matmul:
-    precision: ${oc.env:SM_MATMUL_PRECISION,"high"}  # bf16 autocast + TF32 kernels
+# Trainer integration (PyTorch Lightning)
+trainer:
+  # Mirror precision.mode so Lightning & our precision schema stay in lockstep
+  precision: ${precision.mode}     # typically "bf16-mixed"
+  detect_anomaly: false            # flip to true only when chasing NaNs
+  benchmark: true                  # allow cuDNN autotune (speed over strict reproducibility)
 
+# Precision/Math backends
+precision:
+  # bf16 autocast for Ampere; override via env for quick A/B
+  mode: ${oc.env:SM_PRECISION, "bf16-mixed"}
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, true}         # torch.backends.cuda.matmul.allow_tf32
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, true}   # torch.backends.cudnn.allow_tf32
+  matmul:
+    # PyTorch 2.x matmul precision guard; "high" → prefer TF32 on Ampere while
+    # keeping fp32/bf16 fallback where needed.
+    precision: ${oc.env:SM_MATMUL_PRECISION, "high"}
+
+# Scheduler warmup (safer numerics when enabling bf16/TF32)
 scheduler:
   warmup:
-    enabled: ${oc.env:SM_WARMUP,true}
-    steps: ${oc.env:SM_WARMUP_STEPS,200}
+    enabled: ${oc.env:SM_WARMUP, true}
+    steps: ${oc.env:SM_WARMUP_STEPS, 200}
 
+# DataLoader performance defaults (tune per-host)
 data_loader:
-  num_workers: ${oc.env:SM_WORKERS,4}
+  num_workers: ${oc.env:SM_WORKERS, 4}
   persistent_workers: true
   prefetch_factor: 4
   pin_memory: true
   pin_memory_device: "cuda"
 
+# Optional: small grad accumulation to stabilize bf16 on large batches
+#accumulate:
+#  grad_batches: ${oc.env:SM_ACCUM, 1}
+
+# Experiment metadata
 experiment:
-  tags: ${oc.env:SM_TAGS, ["profile:ampere_bf16","tf32:on"]}
+  name: ${oc.env:SM_EXPERIMENT_NAME, "ampere-bf16-tf32"}
+  tags: ${oc.env:SM_TAGS, ["profile:ampere_bf16","tf32:on","precision=bf16"]}
