@@ -1,4 +1,13 @@
-# Overfit a tiny slice to validate learning signal + loss plumbing
+# ==============================================================================
+# SpectraMind V50 — Profile: Overfit Tiny Slice (learning signal validation)
+# ------------------------------------------------------------------------------
+# Intent:
+#   - Force the model to memorize a tiny subset → loss should go ~0
+#   - Validates loss plumbing, optimizer step, and gradient flow end-to-end
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/overfit_small]'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -9,12 +18,35 @@ defaults:
   - /training/scheduler: scheduler
 
 trainer:
-  max_epochs: 50
-  overfit_batches: 0.01      # PL will iterate same small set
-  log_every_n_steps: 5
+  max_epochs: ${oc.env:SM_MAX_EPOCHS, 50}
+  overfit_batches: ${oc.env:SM_OVERFIT, 0.01}   # reuse same small batch slice
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 5}
+  enable_progress_bar: true
+  deterministic: true                            # make the curve reproducible
+  benchmark: false
 
+# Keep numerics simple for debugging; flip to mixed when optimizing
 precision:
-  mode: "32-true"
+  mode: ${oc.env:SM_PRECISION, "32-true"}
+  tf32:
+    allow: false
+    cudnn_allow: false
+
+# Make the loader stable & predictable
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 0}
+  persistent_workers: false
+  prefetch_factor: 2
+  pin_memory: false
+  # If your datamodule supports it, you can also set a tiny fixed subset size via env/config
+
+# Optional: shorter, more aggressive schedule for quick convergence
+#optimizer:
+#  lr: ${oc.env:SM_LR, 1.0e-3}
+#scheduler:
+#  warmup:
+#    enabled: false
 
 experiment:
-  tags: ["profile:overfit_small"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "overfit-small"}
+  tags: ${oc.env:SM_TAGS, ["profile:overfit_small","learning-signal","debug"]}
