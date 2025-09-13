@@ -1,0 +1,17 @@
+# PACK — assemble model-ready tensors (+ masks/meta)
+
+dtype: "float32"
+assemble:
+  fgs1: true
+  airs: true
+  masks: true
+  labels: true            # only for train/val
+meta:
+  keep:
+    - sample_id
+    - star_id
+    - exposure_time
+    - split
+validate:
+  enforce_shapes: true
+  enforce_bins: ${preprocess.shapes.bins}
