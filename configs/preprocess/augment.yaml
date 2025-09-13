@@ -1,22 +1,75 @@
-# AUGMENT — train-only physics-friendly augs
+# AUGMENT — train-only physics-friendly augs (upgraded)
 
 enable: true
-when: "train"
+when: "train"                 # train|always  (never applied to val/test due to guardrails)
+
+# Global controls
+prob: 1.0                     # master prob (0..1) to apply any augmentation to a sample
+max_ops_per_sample: 2         # cap number of ops sampled per example
+order: ["time_shift", "gauss_noise", "dropout_time", "jitter_amp"]  # deterministic op order
+
+# Curriculum / warmup (epoch-based)
+schedule:
+  enable: true
+  warmup_epochs: 2            # keep augs off for first N epochs
+  ramp_epochs: 3              # linearly ramp op.prob from 0->op.prob over these epochs
+  cooldown_last_k: 0          # optional: taper augs near end of training
+
+# Ops (each has its own probability)
 ops:
   time_shift:
     enable: true
-    max_shift: 4
+    prob: 0.50
+    max_shift: 4              # samples/steps; kept conservative to preserve transit placement
+    preserve_labels: true     # never shift labels; only features/masks
+    align_to_phase: true      # prefer shifts that keep phase center near middle when possible
+
   gauss_noise:
     enable: true
-    std_fgs1: 0.002
+    prob: 0.50
+    std_fgs1: 0.002           # fallback absolute std (used if scale_to_stats=false or stats missing)
     std_airs: 0.002
+    scale_to_stats: true      # scale σ by per-channel/std from normalize stats (robust to SNR)
+    max_sigma_factor: 0.25    # clamp: σ_added <= factor * channel_std
+    per_time_iid: true        # independent noise across time (not common-mode)
+    clamp_min: null           # optional clamp after noise (e.g., 0.0)
+    clamp_max: null
+
   dropout_time:
     enable: false
-    p: 0.02
+    prob: 0.20
+    p: 0.02                   # time-wise dropout probability
+    blockwise: false          # if true, zero contiguous blocks of length L
+    block_len: 8
+    apply_to:
+      fgs1: false             # keep FGS1 pristine for anchoring
+      airs: true
+    mask_consistent: true     # set mask=0 where dropped
+
   jitter_amp:
     enable: false
-    scale: 0.01
+    prob: 0.20
+    scale: 0.01               # multiplicative amplitude jitter: (1 + U[-scale, +scale])
+    center_around_one: true
+    apply_to:
+      fgs1: false
+      airs: true
+    clamp_min: null
+    clamp_max: null
+
+# Strict guardrails (never violate)
 guardrails:
   never_on_eval: true
   never_on_test: true
-  preserve_fgs1_anchor: true
+  preserve_fgs1_anchor: true        # prohibit any op from altering FGS1 baseline statistics
+  preserve_transit_shape: true      # prevent ops from distorting ingress/egress curvature
+  forbid_label_mods: true           # labels y must never be changed by augs
+  max_total_variation_delta: 0.10   # hard cap: ||Δμ||_tv / ||μ||_tv ≤ 0.10 after all ops
+  sanity_check_after: true          # validate masks/NaNs/shapes after augmentation
+  fail_fast: true                   # raise on contract violation
+
+# Debug / tracing
+debug:
+  log_sample_rate: 0.0              # fraction of samples to snapshot (0..1)
+  save_dir: ${paths.outputs}/debug/aug_samples
+  dump_masks: false
