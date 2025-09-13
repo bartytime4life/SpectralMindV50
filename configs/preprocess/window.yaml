@@ -1,0 +1,7 @@
+# WINDOW — segment streams into fixed-length examples
+
+length: ${preprocess.shapes.time_len}    # T
+stride: ${preprocess.shapes.stride}
+align_to_phase: true                     # snap windows to transit phase if available
+center_transit: true                     # prefer windows centered around transit
+drop_remainder: true
