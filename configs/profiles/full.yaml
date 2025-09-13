@@ -1,4 +1,15 @@
-# Full production run: long schedule, cosine decay, warmup, AdamW
+# ==============================================================================
+# SpectraMind V50 — Profile: Full Production (AdamW + Warmup → Cosine)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/full_production]'
+#
+# Purpose:
+#   - Long horizon training with stable AdamW
+#   - Linear warmup followed by cosine annealing
+#   - Mixed precision by default (override via env)
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -9,31 +20,66 @@ defaults:
   - /training/callbacks: callbacks
   - /training/accumulate: accumulate
 
+# Trainer: long schedule, periodic validation & logging
 trainer:
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 120}
-  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}
+  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}   # validate ~4x per epoch
   log_every_n_steps: ${oc.env:SM_LOG_EVERY, 50}
+  enable_progress_bar: true
+  benchmark: true                                       # autotune for speed
+  deterministic: false
 
+# Precision policy (override via env if doing fp32 comparisons)
 precision:
-  mode: ${oc.env:SM_PRECISION,"16-mixed"}
+  mode: ${oc.env:SM_PRECISION, "16-mixed"}              # "32-true" | "bf16-mixed" | "16-mixed"
   tf32:
-    allow: false
+    allow: false                                        # keep numerics stable
     cudnn_allow: false
 
+# DataLoader: production defaults (tune with envs on different hosts)
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 8}
+  persistent_workers: true
+  prefetch_factor: 4
+  pin_memory: true
+  pin_memory_device: "cuda"
+  # Leave dataset shuffle=True; Lightning will handle samplers for DDP
+
+# Optimizer: AdamW with weight decay and grad clipping hooks available
 optimizer:
   name: adamw
+  lr: ${oc.env:SM_LR, 3.0e-4}                           # base LR before scaling/warmup/schedule
+  weight_decay: ${oc.env:SM_WD, 0.01}
+  betas: [${oc.env:SM_BETA1, 0.9}, ${oc.env:SM_BETA2, 0.999}]
+  eps: ${oc.env:SM_ADAM_EPS, 1.0e-8}
+  # Optional: scale LR by global batch size vs reference
   lr_scaling:
-    enabled: ${oc.env:SM_LR_SCALE,true}
-    reference_batch_size: ${oc.env:SM_REF_BS,256}
+    enabled: ${oc.env:SM_LR_SCALE, true}
+    reference_batch_size: ${oc.env:SM_REF_BS, 256}      # effective global batch (accum * GPUs * per-GPU bs)
 
+# Scheduler: warmup (linear) → cosine anneal
 scheduler:
   name: cosine_annealing
+  # Linear warmup (by steps) before cosine kicks in
   warmup:
-    enabled: ${oc.env:SM_WARMUP,true}
-    steps: ${oc.env:SM_WARMUP_STEPS,1000}
+    enabled: ${oc.env:SM_WARMUP, true}
+    steps: ${oc.env:SM_WARMUP_STEPS, 1000}
+    mode: "linear"
+    start_factor: ${oc.env:SM_WARMUP_START, 1.0e-3}     # LR starts at start_factor * base_lr
   cosine_annealing:
-    T_max: ${trainer.max_epochs}
-    eta_min: 1.0e-6
+    T_max: ${trainer.max_epochs}                         # epoch-based cosine decay
+    eta_min: ${oc.env:SM_ETA_MIN, 1.0e-6}               # min LR floor
 
+# (Optional) Gradient accumulation & clipping for stability at scale
+accumulate:
+  grad_batches: ${oc.env:SM_ACCUM, 1}
+#callbacks:
+#  gradient_clip_val: ${oc.env:SM_CLIP_VAL, 0.0}         # set >0 to enable clipping
+
+# Seed (set if you require stronger reproducibility)
+#seed: ${oc.env:SM_SEED, 123}
+
+# Experiment identity
 experiment:
-  tags: ${oc.env:SM_TAGS, ["profile:full"]}
+  name: ${oc.env:SM_EXPERIMENT_NAME, "full-production"}
+  tags: ${oc.env:SM_TAGS, ["profile:full","sched=cosine","warmup=on","opt=adamw"]}
