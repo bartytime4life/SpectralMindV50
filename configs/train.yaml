@@ -4,7 +4,7 @@
 #
 # Usage (examples):
 #   python -m spectramind train
-#   python -m spectramind train env=kaggle precision=bf16-mixed trainer.max_epochs=30
+#   python -m spectramind train env=kaggle precision.mode=bf16-mixed trainer.max_epochs=30
 #   python -m spectramind train loss=composite loss.composite.weights.nonneg=0.7
 #   python -m spectramind train training/callbacks@training.callbacks=callbacks_fast
 # ──────────────────────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ defaults:
 experiment:
   name: "spectramind_v50_train"
   tags: ["v50", "train", "fgs1", "airs"]
-  notes: ""                           # free-form; can be overridden from CLI
+  notes: ""                           # free-form; override from CLI if needed
 
 # Canonical paths (ENV-DRIVEN for portability: local/CI/Kaggle)
 paths:
@@ -39,22 +39,30 @@ paths:
   cache: ${paths.artifacts_root}/cache
   manifests: ${paths.artifacts_root}/manifests
 
-# Reproducibility & backend knobs
+# Reproducibility & backend knobs (torch <-> cudnn bridged)
 seed: ${env.reproducibility.seed}
 reproducibility:
-  torch_deterministic_algorithms: ${env.reproducibility.deterministic}  # torch.use_deterministic_algorithms
-  cudnn_benchmark: false                     # keep deterministic throughput stable
+  torch_deterministic_algorithms: ${env.reproducibility.deterministic}
+  cudnn_benchmark: false
   cudnn_deterministic: ${env.reproducibility.deterministic}
-  allow_tf32: false                          # set true only after validating numerics on your GPU
-  python_hash_seed: ${seed}                  # PYTHONHASHSEED alignment
+  allow_tf32: false                    # raise only after validating numerics
+  python_hash_seed: ${seed}
 
-# Precision (override via CLI or env overrides; bf16 preferred on A100)
-precision: "16-mixed"   # "32-true" | "16-mixed" | "bf16-mixed"
+# Precision (Hydra-friendly structure)
+precision:
+  mode: "16-mixed"                    # "32-true" | "16-mixed" | "bf16-mixed"
+  tf32:
+    allow: ${reproducibility.allow_tf32}
+    cudnn_allow: ${reproducibility.allow_tf32}
+  grad_scaler:                        # used when mode == "16-mixed"
+    enabled: true
+    init_scale: 65536
+    growth_interval: 2000
 
 # Optional PyTorch 2.x compiler (TorchDynamo); default off
 compile:
   enabled: false
-  mode: "default"        # "default" | "reduce-overhead" | "max-autotune"
+  mode: "default"                     # "default" | "reduce-overhead" | "max-autotune"
   fullgraph: false
   dynamic: false
 
@@ -65,7 +73,7 @@ data:
     val: 64
     test: 64
   num_workers: ${env.num_workers}
-  pin_memory: true        # safe default; harmless on CPU
+  pin_memory: true
   persistent_workers: true
   prefetch_factor: 2
   drop_last: true
@@ -75,38 +83,31 @@ data:
     dropout: 0.0
   normalization:
     enabled: true
-    method: "zscore"       # "minmax" | "none"
+    method: "zscore"                   # "minmax" | "none"
 
 # PyTorch Lightning Trainer (PL 2.x)
 trainer:
   max_epochs: 50
   min_epochs: 1
-  accelerator: ${env.device}       # "cuda" | "cpu" (env-driven)
+  accelerator: ${env.device}           # "cuda" | "cpu"
   devices: 1
-  strategy: auto                   # "auto" | "ddp" | "ddp_find_unused_parameters_false" etc.
-  precision: ${precision}
+  strategy: auto                       # "auto" | "ddp" | "ddp_find_unused_parameters_false" etc.
+  precision: ${precision.mode}
   accumulate_grad_batches: 2
   gradient_clip_val: 1.0
   gradient_clip_algorithm: "norm"
   log_every_n_steps: 50
-  val_check_interval: 0.25         # validate 4× per epoch; keep <= 1.0
+  val_check_interval: 0.25
   check_val_every_n_epoch: null
   deterministic: ${env.reproducibility.deterministic}
   enable_checkpointing: true
   enable_model_summary: true
   detect_anomaly: false
   benchmark: false
-  inference_mode: true
   profiler: null
   callbacks: ${training.callbacks.callbacks}
 
-# AMP / GradScaler controls
-amp:
-  enabled: true
-  init_scale: 65536
-  growth_interval: 2000
-
-# Optimizer / Scheduler
+# Optimizer / Scheduler (composable; warmup → cosine is the default policy)
 optimizer:
   name: "AdamW"
   _target_: torch.optim.AdamW
@@ -114,12 +115,21 @@ optimizer:
   weight_decay: 1e-2
   betas: [0.9, 0.999]
   eps: 1e-8
+  lr_scaling:
+    enabled: false                     # set true if you want global-batch scaling
+    reference_batch_size: 256          # effective global batch (accum * gpus * per-gpu bs)
 
 scheduler:
-  name: "CosineAnnealingLR"
-  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
-  T_max: ${trainer.max_epochs}
-  eta_min: 1e-6
+  policy: "warmup_cosine"              # "cosine" | "warmup_cosine" | "none"
+  warmup:
+    enabled: true
+    steps: 1000
+    mode: "linear"
+    start_factor: 1.0e-3               # lr starts at start_factor * base_lr
+  cosine:
+    _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+    T_max: ${trainer.max_epochs}
+    eta_min: 1.0e-6
 
 # Loggers (select via defaults: jsonl | csv | wandb)
 logger:
@@ -133,7 +143,7 @@ logger:
   wandb:
     project: "spectramind-v50"
     entity: null
-    mode: disabled           # enable when WANDB_API_KEY is available
+    mode: disabled                     # set to "online" with WANDB_API_KEY
     tags: ${experiment.tags}
     notes: ${experiment.notes}
     save_code: true
@@ -153,7 +163,7 @@ loss:
         lambda_max: 0.2
       nonneg:
         margin: 0.0
-        penalty: "l2"        # or "hinge"
+        penalty: "l2"                   # or "hinge"
       band_coherence:
         window: 5
         lambda_max: 0.3
@@ -164,7 +174,7 @@ loss:
 # Callback bundle (swappable via defaults)
 training:
   callbacks:
-    callbacks: []
+    callbacks: []                      # e.g., ["model_checkpoint", "early_stopping", ...]
 
 # Evaluation / reporting passes
 evaluation:
