@@ -1,0 +1,10 @@
+# BINNING — (optional) spectral/time binning on AIRS/FGS1
+
+time:
+  enable: false
+  factor: 1                  # factor>1 => coarsen temporal resolution
+
+spectral:
+  enable: false
+  factor: 1                  # factor>1 => reduce AIRS bins (keep divisible with BINS)
+  preserve_fgs1: true
