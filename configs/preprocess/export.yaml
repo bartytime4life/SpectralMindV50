@@ -1,17 +1,83 @@
-# EXPORT — write features + manifests
+# EXPORT — write features + manifests (upgraded)
 
-format: ${io.format}       # 'npz'|'parquet'
+# --------------------------
+# Format / compression
+# --------------------------
+format: ${io.format}            # 'npz'|'parquet'
 compress:
-  npz: "zip"               # 'zip'|'none'
-  parquet: "snappy"        # codec name (if parquet)
+  npz:
+    codec: "zip"                # 'zip'|'none'
+    level: 4                    # 0..9 (tradeoff cpu vs size)
+  parquet:
+    codec: "snappy"             # 'snappy'|'gzip'|'brotli'
+    compression_level: null     # null -> library default
+    row_group_size: 65536       # tune for IO/scan patterns
+    write_stats: true
+
+# --------------------------
+# Paths / layout
+# --------------------------
 paths:
   root: ${io.features_root}
   train_dir: ${io.features_root}/train
   val_dir:   ${io.features_root}/val
   test_dir:  ${io.features_root}/test
+  tmp_dir:   ${io.features_root}/.tmp           # atomic write staging
+  index_name: "_index.jsonl"                    # per-split rolling index
+
+# Sharding (large splits)
+shards:
+  enable: true
+  max_records_per_shard: 100000                 # split files deterministically
+  name_pattern: "part-{split}-{shard:05d}.{ext}"# ext=npz|parquet; stable naming for DVC
+
+# --------------------------
+# Integrity / atomicity
+# --------------------------
+atomic_writes:
+  enable: true                                   # write to tmp, fsync, rename
+  retries: 3
+  backoff_sec: 0.2
+
+integrity:
+  checksum:
+    enable: true                                 # compute sha256 per file
+    algo: "sha256"
+  fsync:
+    enable: true                                 # ensure bytes hit disk
+
+permissions:
+  chmod: "0644"                                  # set file perms after write (posix)
+  chown: null                                    # optional "uid:gid"
+
+# --------------------------
+# Schema / validation
+# --------------------------
+validate:
+  shapes:
+    enforce: true
+    bins: ${preprocess.shapes.bins}              # e.g., 283
+    time: ${preprocess.shapes.time_len}
+  dtypes:
+    fgs1: "float32"
+    airs: "float32"
+    masks: "bool"
+    pe_time: "float32"
+    pe_spec: "float32"
+    y: "float32"
+  nonfinite:
+    forbid_inf: true
+    forbid_nan: true
+  masks:
+    require_consistent: true                     # mask==0 where values were imputed/dropped
+  fail_fast: true
+
+# --------------------------
+# Manifest / provenance
+# --------------------------
 manifest:
   enable: true
-  filename: manifest.json
+  filename: "manifest.json"
   include:
     - preset
     - seed
@@ -19,5 +85,52 @@ manifest:
     - normalize.strategy
     - normalize.scope
     - runtime.num_workers
+    - paths.root
+    - shards
+  per_split:
+    enable: true                                 # write split manifests (train/val/test)
+    filename: "_manifest.json"
+  write_hashes: true                              # record sha256 for each artifact
+  write_counts: true                              # N samples, windows, shards per split
+  extra:
+    git_commit: ${oc.env:GIT_COMMIT, null}
+    env_name: ${env.name}
+    data_profile: ${data.profile}
+
+# Sidecar index (append-only, useful for DVC/CI table views)
+index:
+  enable: true
+  fields:
+    - sample_id
+    - split
+    - shard
+    - path
+    - checksum
+    - num_records
+  # JSONL lines, one per file written, alongside each split dir
+
+# --------------------------
+# Runtime / reliability
+# --------------------------
 flush_secs: 5
-overwrite: ${io.overwrite}
+overwrite: ${io.overwrite}                        # true => drop existing split dir before write
+deterministic_names: true                         # stable shard order & file names
+progress:
+  enable: true
+  every_n: 1000                                   # print status every N records
+
+# --------------------------
+# Post-write hooks
+# --------------------------
+post_write:
+  touch_done_file: true                           # write _SUCCESS/DONE marker per split
+  done_filename: "_SUCCESS"
+  sync_manifest: true                             # fsync manifests after write
+
+# --------------------------
+# Backward-compat aliases (no code changes needed)
+# --------------------------
+compat_aliases:
+  format: ${format}                               # old: format
+  compress.npz: ${compress.npz.codec}            # old: compress.npz
+  compress.parquet: ${compress.parquet.codec}    # old: compress.parquet
