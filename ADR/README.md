@@ -71,12 +71,12 @@ Each ADR documents context, decision, consequences, and compliance gates.
 graph TD
   A[ADR-0001 Hydra + DVC] --> B[ADR-0005 CLI-First Orchestration]
   B --> C[ADR-0006 Reproducibility Standards]
-  C --> D[ADR-0007 Submission Schema & Validation]
+  C --> D[ADR-0007 Submission Schema and Validation]
 
   A --> E[ADR-0002 Physics-Informed Losses]
   E --> F[ADR-0004 Dual Encoder Fusion]
 
-  A --> G[ADR-0003 CI <-> CUDA Parity]
+  A --> G[ADR-0003 CI to CUDA Parity]
   G --> C
 ````
 
