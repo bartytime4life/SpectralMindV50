@@ -20,6 +20,11 @@ on:
       - '.github/workflows/release.yml'
       - '.github/workflows/kaggle_notebook_ci.yml'
   workflow_dispatch:
+    inputs:
+      min_coverage:
+        description: 'Fail if coverage % below this (empty=off)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -39,6 +44,8 @@ env:
   MPLBACKEND: "Agg"   # headless-safe matplotlib
   PYTHONWARNINGS: "error::DeprecationWarning,ignore:::pkg_resources"
   ARTIFACT_RETENTION_DAYS: "14"
+  # Optional coverage gate; overridable via workflow_dispatch input
+  MIN_COVERAGE: ${{ github.event.inputs.min_coverage }}
 
 jobs:
   lint-test-typecheck:
@@ -88,11 +95,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.python-version }}-lintcache-
 
-      - name: 📦 Install dependencies
+      - name: 📦 Install dependencies (fast path + wheelhouse)
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip wheel
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if ls requirements-dev.txt >/dev/null 2>&1; then
+            # Pre-build wheels to speed repeated CI (uses cached .venv-wheelhouse)
+            python -m pip wheel -r requirements-dev.txt -w .venv-wheelhouse || true
+            pip install --no-index --find-links .venv-wheelhouse -r requirements-dev.txt || pip install -r requirements-dev.txt
+          fi
+          if ls requirements.txt >/dev/null 2>&1; then
+            python -m pip wheel -r requirements.txt -w .venv-wheelhouse || true
+            pip install --no-index --find-links .venv-wheelhouse -r requirements.txt || pip install -r requirements.txt
+          fi
           # Tooling (pin majors; allow patch updates)
           python -m pip install \
             "ruff>=0.5,<1.0" "flake8>=7,<8" "mypy>=1.10,<2" \
@@ -131,6 +147,26 @@ jobs:
             --cov=src --cov-branch --cov-report=xml:reports/coverage.xml \
             --durations=25 \
             --junitxml=reports/tests-junit.xml
+
+      - name: ✅ Optional coverage gate
+        if: ${{ env.MIN_COVERAGE != '' }}
+        shell: bash
+        run: |
+          want="${MIN_COVERAGE}"
+          have="$(python - <<'PY'
+          import xml.etree.ElementTree as ET
+          t=ET.parse('reports/coverage.xml').getroot()
+          print(next(iter(t.iter('coverage'))).attrib.get('line-rate', 0))  # coverage.py v5 schema
+          PY
+          )"
+          # Convert fraction→percent if needed
+          if [[ "$have" == 0.* ]]; then have=$(python - <<PY; print(round(float("$have")*100,2)); PY); fi
+          have_int=${have%.*}
+          echo "Coverage: ${have}% (minimum ${want}%)"
+          if (( have_int < MIN_COVERAGE )); then
+            echo "::error::Coverage ${have}% is below threshold ${MIN_COVERAGE}%"
+            exit 1
+          fi
 
       - name: 📤 Upload artifacts
         if: always()
