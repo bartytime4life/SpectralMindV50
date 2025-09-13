@@ -1,31 +1,53 @@
+# ==============================================================================
 # SpectraMind V50 — Preprocess preset: fast (Kaggle/CI budget)
+# File: configs/preprocess/presets/fast.yaml
+# ------------------------------------------------------------------------------
+# Goals:
+# • Minimal wall-clock + stable output for CI/Kaggle T4s
+# • Zero network writes; deterministic seed; compact NPZ export
+# • Skips expensive steps (detrend/binning/augment) but keeps robust normalize
+# • All paths/types routed via Hydra (no hard-coded paths in code)
+# ==============================================================================
 
 preset: fast
+version: 1
 seed: 123
 
+# ------------------------------------------------------------------------------ 
+# I/O — paths are delegated to the active data profile (configs/data/*.yaml)
+# ------------------------------------------------------------------------------
 io:
   calibrated_root: ${data.exports.calibrated_root}
   features_root:   ${data.exports.features_root}
   overwrite: true
-  format: "npz"
+  format: "npz"                  # 'npz' | 'parquet'
 
+# ------------------------------------------------------------------------------
+# Runtime — tuned for Kaggle/CI; allow env overrides without editing YAML
+# ------------------------------------------------------------------------------
 runtime:
-  num_workers: 2
-  pin_memory: false
+  num_workers: ${oc.env:SM_NUM_WORKERS,2}
+  pin_memory:  ${oc.env:SM_PIN_MEMORY,false}
   log_every_n: 200
 
+# ------------------------------------------------------------------------------
+# Step toggles — keep the pipeline lean for time-boxed runs
+# ------------------------------------------------------------------------------
 enable:
   load: true
   mask: true
-  detrend: false          # skip to save time (leave robust normalize on)
+  detrend: false                 # skip to save time (normalize is robust)
   normalize: true
-  binning: false          # rely on calibration alignment
+  binning: false                 # rely on calibration alignment
   window: true
   pack: true
   tokenize: true
-  augment: false         # keep off in time-boxed runs
+  augment: false                 # keep off in time-boxed runs
   export: true
 
+# ------------------------------------------------------------------------------
+# Method routing — keep behavior centralized in preprocess.method.*
+# ------------------------------------------------------------------------------
 load:        ${preprocess.method.load}
 mask:        ${preprocess.method.mask}
 detrend:     ${preprocess.method.detrend}
@@ -37,10 +59,93 @@ tokenize:    ${preprocess.method.tokenize}
 augment:     ${preprocess.method.augment}
 export:      ${preprocess.method.export}
 
+# ------------------------------------------------------------------------------
+# Shapes / sampling — shortened sequence for CI/Kaggle budgets
+# ------------------------------------------------------------------------------
 shapes:
-  time_len: 384           # shorter sequence
-  stride:   384
+  time_len: 384                  # shorter sequence
+  stride:   384                  # non-overlapping windows
   bins: ${data.channels.airs.bins}
 
+# ------------------------------------------------------------------------------
+# Light, robust defaults for the selected methods (overridable per profile)
+# ------------------------------------------------------------------------------
+mask:
+  strategy: "nan|inf|range"      # basic sanitization
+  range:
+    min: -1e6
+    max:  1e6
+
+normalize:
+  strategy: "robust"             # median/MAD (detrend is off)
+  scope: "per-channel"           # per-sensor/channel scaling
+  clip:
+    enable: true
+    low_q: 0.5                   # percentile clipping (q0.5–99.5)
+    high_q: 99.5
+  eps: 1.0e-8
+
+window:
+  kind: "rect"                   # cheap: equivalent to simple slicing
+  size: ${shapes.time_len}
+  hop:  ${shapes.stride}
+  center: false
+  pad: false
+
+pack:
+  layout: "fgs1+airs"            # concatenated feature pack
+  dtype: "float32"
+  order: "C"
+  squeeze_time: false
+
+tokenize:
+  scheme: "none"                 # keep tensors continuous for fast runs
+  # Example (opt-in later): "mu_law_8bit" / "kmeans_256"
+
+augment:
+  enable: ${enable.augment}
+  # Placeholders (kept OFF here)
+  noise_std: 0.0
+  jitter_prob: 0.0
+
+# ------------------------------------------------------------------------------
+# Export — compact NPZ + manifest for reproducibility
+# ------------------------------------------------------------------------------
+export:
+  format: ${io.format}           # 'npz'|'parquet'
+  compress:
+    npz: "zip"                   # 'zip'|'none'
+    parquet: "snappy"
+  paths:
+    root: ${io.features_root}
+    train_dir: ${io.features_root}/train
+    val_dir:   ${io.features_root}/val
+    test_dir:  ${io.features_root}/test
+  manifest:
+    enable: true
+    filename: manifest.json
+    include:
+      - preset
+      - version
+      - seed
+      - shapes
+      - normalize.strategy
+      - normalize.scope
+      - runtime.num_workers
+  flush_secs: 5
+  overwrite: ${io.overwrite}
+
+# ------------------------------------------------------------------------------
+# Splits — delegated to data profile (so CI/Local/Kaggle can swap cleanly)
+# ------------------------------------------------------------------------------
 splits:
   source: ${data.splits.config}
+
+# ------------------------------------------------------------------------------
+# Safety checks (cheap assertions; can be read by the runner)
+# ------------------------------------------------------------------------------
+assertions:
+  require_calibrated_root: true
+  require_features_root:   true
+  expect_bins: ${shapes.bins}
+  fail_fast: true
