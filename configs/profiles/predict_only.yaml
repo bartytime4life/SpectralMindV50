@@ -1,13 +1,48 @@
-# Inference-only runs (no training), disable checkpoints/early-stop
+# ==============================================================================
+# SpectraMind V50 — Profile: Predict Only (no training/checkpoints)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind predict +defaults='[/profiles/predict_only]'
+#   # or
+#   python -m spectramind test    +defaults='[/profiles/predict_only]'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/dataloader: dataloader
 
+# Lightning trainer for inference-only workflows
 trainer:
-  max_epochs: 0
-  enable_checkpointing: false
+  max_epochs: 0                    # no training epochs
+  enable_checkpointing: false      # don't write checkpoints
+  enable_progress_bar: true
+  log_every_n_steps: 50
+  deterministic: true              # repeatable predictions
+  benchmark: false                 # predictable startup
+  num_sanity_val_steps: 0          # skip sanity checks
+  detect_anomaly: false            # not useful for inference
+  enable_model_summary: false
 
+# Disable all training-time callbacks (early stop, ckpt, etc.)
 callbacks: {}
 
+# Conservative DataLoader defaults for prediction
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 2}
+  persistent_workers: false
+  prefetch_factor: 2
+  pin_memory: true
+  pin_memory_device: "cuda"
+
+# Optional: set precision explicitly for stable numerics in inference
+# (inherit repo defaults if you prefer)
+#precision:
+#  mode: ${oc.env:SM_PRECISION, "32-true"}
+#  tf32:
+#    allow: false
+#    cudnn_allow: false
+
+# Make run IDs and artifacts easy to filter
 experiment:
-  tags: ["profile:predict_only"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "predict-only"}
+  tags: ${oc.env:SM_TAGS, ["profile:predict_only","inference"]}
