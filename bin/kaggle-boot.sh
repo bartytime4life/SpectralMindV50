@@ -23,13 +23,13 @@
 # =============================================================================
 set -euo pipefail
 set -o errtrace
+shopt -s extglob
 
-# --- nice error messages ------------------------------------------------------
 _on_err() {
   local exit_code=$?
   local line_no=${BASH_LINENO[0]:-?}
-  echo -e "\033[1;31m[ERR] Bootstrap failed at line ${line_no}.\
- Last command: '${BASH_COMMAND}' (exit ${exit_code})\033[0m" >&2
+  printf "\033[1;31m[ERR] Bootstrap failed at line %s. Last: '%s' (exit %s)\033[0m\n" \
+    "${line_no}" "${BASH_COMMAND}" "${exit_code}" >&2
   exit $exit_code
 }
 trap _on_err ERR
@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
     --cpu-only) FORCE_CPU=true; shift ;;
     --torch) TARGET_TORCH="${2:-}"; shift 2 ;;
     --quiet) QUIET=true; shift ;;
-    *) echo "[BOOT] Unknown option: $1" >&2; exit 2 ;;
+    *) printf "[BOOT] Unknown option: %s\n" "$1" >&2; exit 2 ;;
   esac
 done
 
@@ -63,10 +63,10 @@ banner "SpectraMind V50 — Kaggle Bootstrap"
 
 # --------------------------- KAGGLE CONTEXT -----------------------------------
 IS_KAGGLE=0
-if [[ -d /kaggle && -d /kaggle/working ]]; then IS_KAGGLE=1; fi
+[[ -d /kaggle && -d /kaggle/working ]] && IS_KAGGLE=1
 note "Kaggle runtime detected: ${IS_KAGGLE}"
 
-# Enforce a local pip/cache/tmp on Kaggle to speed restarts & avoid /tmp limits
+# Local caches (Kaggle-safe)
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/kaggle/working/.cache/pip}"
 export TMPDIR="${TMPDIR:-/kaggle/working/.tmp}"
 mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
@@ -76,9 +76,9 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PIP_NO_PYTHON_VERSION_WARNING=1
 export PYTHONUTF8=1
 
-# Simple internet check (Kaggle often runs with internet disabled)
+# Internet check (DNS to pypi)
 INTERNET_OK=0
-if python - <<'PY' >/dev/null 2>&1; then
+python - <<'PY' >/dev/null 2>&1 || true
 import socket, sys
 try:
     socket.gethostbyname("pypi.org")
@@ -86,11 +86,8 @@ try:
 except Exception:
     sys.exit(1)
 PY
-then INTERNET_OK=1; else INTERNET_OK=0; fi
-
-if [[ $INTERNET_OK -eq 0 ]]; then
-  note "Internet appears disabled. Will verify existing installs and exit if satisfied."
-fi
+[[ $? -eq 0 ]] && INTERNET_OK=1
+[[ $INTERNET_OK -eq 0 ]] && note "Internet appears disabled. Will verify existing installs and exit if satisfied."
 
 # ---------------------------- HELPERS ----------------------------------------
 PIP_QUIET=()
@@ -98,11 +95,11 @@ $QUIET && PIP_QUIET+=(-q)
 
 pip_retry() {
   # pip_retry <args...>
-  local n=0; local max=3
+  local n=0 max=3
   until python -m pip install "${PIP_QUIET[@]}" "$@"; do
     n=$((n+1))
     if [[ $n -ge $max ]]; then err "pip install failed after ${max} attempts: $*"; return 1; fi
-    note "pip retry $n/$max for: $*"; sleep 2
+    note "pip retry $n/$max: $*"; sleep 2
   done
 }
 
@@ -127,10 +124,10 @@ PY
 
 pyg_needed() {
   python - <<'PY'
-import importlib, sys
+import importlib
 mods = ["torch_geometric","torch_scatter","torch_sparse","torch_cluster","torch_spline_conv"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
-sys.exit(0 if not missing else 1)
+raise SystemExit(0 if not missing else 1)
 PY
 }
 
@@ -142,7 +139,6 @@ else
   note "Offline: skipping pip bootstrap"
 fi
 
-# Install repo-pinned Kaggle requirements if present
 REQ_FILE="$REPO_DIR/requirements-kaggle.txt"
 if [[ -f "$REQ_FILE" ]]; then
   banner "Installing requirements-kaggle.txt"
@@ -181,6 +177,13 @@ PY
   fi
 fi
 
+maybe_match_tv_ta() {
+  # Emits extra args to co-install torchvision/torchaudio matching torch version (best-effort)
+  local ver="$1"
+  [[ -z "$ver" ]] && return 0
+  printf " torchvision==%s torchaudio==%s" "$ver" "$ver"
+}
+
 if $KEEP_EXISTING; then
   ok "Torch already satisfies requested mode; not reinstalling."
 else
@@ -191,7 +194,10 @@ else
   if $FORCE_CPU; then
     note "Installing CPU-only torch ${TARGET_TORCH:+(target $TARGET_TORCH)}"
     if [[ -n "$TARGET_TORCH" ]]; then
-      pip_retry "torch==${TARGET_TORCH}" torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+      # Try matching TV/TA first, then fall back unpinned
+      if ! eval pip_retry "\"torch==${TARGET_TORCH}\"$(maybe_match_tv_ta "$TARGET_TORCH")" --index-url https://download.pytorch.org/whl/cpu; then
+        pip_retry "torch==${TARGET_TORCH}" torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+      fi
     else
       pip_retry torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
     fi
@@ -206,10 +212,11 @@ else
     fi
     note "Installing CUDA-enabled torch ${TARGET_TORCH:+(target $TARGET_TORCH)} via ${CUDA_URL}"
     if [[ -n "$TARGET_TORCH" ]]; then
-      pip_retry "torch==${TARGET_TORCH}" torchvision torchaudio --index-url "$CUDA_URL" || {
+      if ! eval pip_retry "\"torch==${TARGET_TORCH}\"$(maybe_match_tv_ta "$TARGET_TORCH")" --index-url "$CUDA_URL"; then
         note "cu121 failed; falling back to cu118"
+        eval pip_retry "\"torch==${TARGET_TORCH}\"$(maybe_match_tv_ta "$TARGET_TORCH")" --index-url https://download.pytorch.org/whl/cu118 || \
         pip_retry "torch==${TARGET_TORCH}" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-      }
+      fi
     else
       pip_retry torch torchvision torchaudio --index-url "$CUDA_URL" || {
         note "cu121 failed; falling back to cu118"
@@ -226,6 +233,7 @@ if $INSTALL_PYG; then
     if [[ $INTERNET_OK -eq 0 ]]; then
       err "Offline and PyG not installed — skipping."; INSTALL_PYG=false
     else
+      # Compute correct PyG wheel index (fix: include 'cu' prefix when CUDA present)
       TORCH_BASE="$(python - <<'PY'
 import torch; print(torch.__version__.split('+')[0], end="")
 PY
@@ -234,10 +242,14 @@ PY
 import torch; print(torch.version.cuda or "cpu", end="")
 PY
 )"
-      CUDA_TAG="${CUDA_VER//./}"
-      [[ "$CUDA_VER" == "cpu" ]] && CUDA_TAG="cpu"
+      if [[ "$CUDA_VER" == "cpu" ]]; then
+        CUDA_TAG="cpu"
+      else
+        CUDA_TAG="cu${CUDA_VER//./}"
+      fi
       WHEEL_INDEX="https://data.pyg.org/whl/torch-${TORCH_BASE}+${CUDA_TAG}.html"
       note "Resolved PyG wheel index: ${WHEEL_INDEX}"
+      # Install compiled ops first, then metapkg
       pip_retry torch-scatter torch-sparse torch-cluster torch-spline-conv -f "$WHEEL_INDEX"
       pip_retry torch-geometric
       ok "PyG installed."
@@ -270,8 +282,9 @@ try:
     import torch
     tver = safe(getattr(torch, "__version__", None))
     tcuda = safe(getattr(getattr(torch, "version", None), "cuda", None)) or ("cuda" if torch.cuda.is_available() else "cpu")
+    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
 except Exception:
-    tver, tcuda = "n/a", "n/a"
+    tver, tcuda, gpu = "n/a", "n/a", "n/a"
 def has(m):
     try: importlib.import_module(m); return "yes"
     except Exception: return "no"
@@ -280,7 +293,7 @@ try:
     dver = safe(dvc.__version__)
 except Exception:
     dver = "n/a"
-print(f"Torch: {tver} (CUDA {tcuda})")
+print(f"Torch: {tver} (CUDA {tcuda}) device={gpu}")
 print(f"DVC:   {dver}")
 print("PyG:   tg:", has("torch_geometric"), " tsct:", has("torch_scatter"), " tspr:", has("torch_sparse"),
       " tclu:", has("torch_cluster"), " tspl:", has("torch_spline_conv"))
