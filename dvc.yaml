@@ -2,13 +2,15 @@
 # dvc.yaml — SpectraMind V50 (reproducible pipeline, hardened)
 # ------------------------------------------------------------------------------
 # Stages: calibrate → preprocess → train → predict → diagnose → submit
+#
 # Notes:
-#   • Use `params:` to trigger stage reproduction; avoid ${params.*} in `cmd`.
-#   • Switch profiles with DVC Experiments / Hydra overrides, e.g.:
+#   • We keep outputs deterministic (no timestamps) to make DVC caching effective.
+#   • Hydra's run dir is overridden explicitly to fixed locations per stage.
+#   • Use DVC Experiments to switch Hydra groups/params, e.g.:
 #       dvc exp run \
 #         -S hydra.env=kaggle \
 #         -S hydra.model=v50 \
-#         -S hydra.config_name_train=train
+#         -S hydra.training=fast_ci
 #   • Persist calibrated/processed data for reuse & Kaggle packaging.
 #   • Keep heavy logs out of cache; track small JSON metrics.
 # ==============================================================================
@@ -17,7 +19,10 @@ stages:
   calibrate:
     desc: "Raw → CALIBRATED tensors (FGS1 + AIRS); physics-based calibration only"
     cmd: >
-      spectramind calibrate run data/raw
+      python -m spectramind calibrate
+      --in data/raw
+      --out data/calibrated
+      hydra.run.dir=artifacts/_hydra/calibrate
     deps:
       - data/raw
       - configs
@@ -34,7 +39,10 @@ stages:
   preprocess:
     desc: "CALIBRATED → PROCESSED; mask/detrend/normalize/bin/window/pack/tokenize/export"
     cmd: >
-      spectramind preprocess run data/calibrated
+      python -m spectramind preprocess
+      --in data/calibrated
+      --out data/processed
+      hydra.run.dir=artifacts/_hydra/preprocess
     deps:
       - data/calibrated
       - configs
@@ -51,7 +59,9 @@ stages:
   train:
     desc: "Train dual-channel encoders + heteroscedastic decoder (μ,σ)"
     cmd: >
-      spectramind train run
+      python -m spectramind train
+      paths.run_dir=artifacts/train
+      hydra.run.dir=artifacts/train/_hydra
     deps:
       - data/processed
       - configs
@@ -65,24 +75,29 @@ stages:
       - hydra.loss
       - hydra.logger
     outs:
-      - path: artifacts/ckpt.pt        # checkpointed model for iterative runs
+      # keep binary ckpt in a deterministic place for downstream stages
+      - path: artifacts/train/ckpt.pt
         checkpoint: true
-      - path: artifacts/metrics.json   # tiny metrics blob (kept in cache for diffs)
+      # keep textual metrics small and cacheable
+      - path: artifacts/train/metrics.json
         cache: true
     outs_no_cache:
       - logs/train
     metrics:
-      - artifacts/metrics.json:
+      - artifacts/train/metrics.json:
           type: json
           xpath: .
-          cache: false   # metrics tracked by DVC; no need to also cache
+          cache: false
 
   predict:
     desc: "Inference on processed data → predictions CSV"
     cmd: >
-      spectramind predict run artifacts/ckpt.pt --out-csv artifacts/predictions/preds.csv
+      python -m spectramind predict
+      --ckpt artifacts/train/ckpt.pt
+      --out-csv artifacts/predictions/preds.csv
+      hydra.run.dir=artifacts/predictions/_hydra
     deps:
-      - artifacts/ckpt.pt
+      - artifacts/train/ckpt.pt
       - data/processed
       - configs
       - src
@@ -97,7 +112,10 @@ stages:
   diagnose:
     desc: "Diagnostics: GLL/MAE/RMSE/coverage + plots + report"
     cmd: >
-      spectramind diagnose run artifacts/predictions/preds.csv --out-dir artifacts/diagnostics
+      python -m spectramind diagnose
+      --pred-csv artifacts/predictions/preds.csv
+      --out-dir artifacts/diagnostics
+      hydra.run.dir=artifacts/diagnostics/_hydra
     deps:
       - artifacts/predictions/preds.csv
       - configs
@@ -119,7 +137,7 @@ stages:
           type: json
           xpath: .
           cache: false
-    # Optional DVC live logging (enable in CLI if desired)
+    # Optional: live logging (enable in CLI if desired)
     # live:
     #   artifacts/diagnostics/live:
     #     summary: true
@@ -128,13 +146,18 @@ stages:
   submit:
     desc: "Package submission artifacts (ZIP with MANIFEST); schema-validate"
     cmd: >
-      spectramind submit package artifacts/predictions/preds.csv --out-zip dist/submission.zip
+      bin/sm_submit.sh --skip-predict
     deps:
       - artifacts/predictions/preds.csv
-      - configs
+      - schemas/submission.tableschema.sample_id.json
+      - schemas/submission_header.csv
+      - bin/sm_submit.sh
       - src
+      - configs
     outs:
-      - path: dist/submission.zip
+      - path: outputs/submission/submission.zip
+        cache: true
+      - path: outputs/submission/submission.csv
         cache: true
     # If the bundle embeds timestamps and you want forced rebuilds:
     # always_changed: true
