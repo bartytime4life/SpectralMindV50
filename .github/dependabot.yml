@@ -1,13 +1,3 @@
-# .github/dependabot.yml
-# SpectraMind V50 — Dependabot configuration
-# Docs:
-#   • Configuration: https://docs.github.com/code-security/dependabot/dependabot-version-updates
-#   • Ecosystems:    https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-# Notes:
-#   • Use UTC everywhere for deterministic scheduling in CI.
-#   • Prefer grouping to reduce PR noise.
-#   • Keep PR caps sane; allow direct deps first; bump version only when needed.
-
 version: 2
 
 updates:
@@ -21,9 +11,7 @@ updates:
       day: "sunday"
       time: "03:00"
       timezone: "UTC"
-    # Only bump when necessary (avoid premature major bumps)
     versioning-strategy: increase-if-necessary
-    # Prefer direct dependencies to keep review scope tight
     allow:
       - dependency-type: "direct"
     open-pull-requests-limit: 10
@@ -64,12 +52,15 @@ updates:
           - "mlflow*"
           - "hydra*"
           - "omegaconf*"
-    # Ignore families that frequently churn platforms or require manual CUDA alignment
     ignore:
+      # Avoid surprise CUDA/ABI jumps; we align these manually with base images
       - dependency-name: "torch*"
         update-types: ["version-update:semver-major"]
       - dependency-name: "pytorch*"
         update-types: ["version-update:semver-major"]
+    # Resolver / index hygiene (speeds PR CI and avoids flaky mirrors)
+    registries: []            # add self-hosted index if used
+    insecure-external-code-execution: deny
 
   # ────────────────────────────────
   # GitHub Actions
@@ -86,7 +77,6 @@ updates:
       prefix: "deps(actions)"
       include: "scope"
     labels: [dependencies, ci]
-    # Group common action vendors to cut PR noise
     groups:
       github:
         patterns:
@@ -105,6 +95,10 @@ updates:
         patterns:
           - "actions/setup-python*"
           - "pypa/*"
+    # extra guardrails for supply-chain safety
+    allow:
+      - dependency-type: "direct"
+    rebase-strategy: "auto"
 
   # ────────────────────────────────
   # Dockerfile base images
@@ -121,8 +115,8 @@ updates:
       include: "scope"
     labels: [dependencies, docker]
     open-pull-requests-limit: 5
-    # Avoid constant major jumps for CUDA / base images
     ignore:
+      # CUDA majors are curated manually to stay in lockstep with PyTorch wheels
       - dependency-name: "*cuda*"
         update-types: ["version-update:semver-major"]
 
@@ -143,6 +137,7 @@ updates:
   #   labels: [dependencies, docs]
 
 # Tips:
-# • Consider enabling repo-level “auto-merge” for Dependabot PRs with passing checks (patch/minor),
-#   or gate via CODEOWNERS for safety-critical libs (torch, CUDA, code scanning actions).
+# • Consider enabling repo-level auto-merge for Dependabot PRs with passing checks (patch/minor),
+#   and gate majors via CODEOWNERS (torch/CUDA/CodeQL).
 # • Keep PR caps aligned with reviewer bandwidth; tighten groups if noise increases.
+# • Prefer pinning critical build actions (setup-python, docker/login-action) to SHAs in workflows.
