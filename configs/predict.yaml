@@ -4,7 +4,7 @@
 #
 # Examples:
 #   python -m spectramind predict checkpoint.path=artifacts/checkpoints/last.ckpt
-#   python -m spectramind predict precision=16-mixed submission.format=wide_csv
+#   python -m spectramind predict precision.mode=16-mixed submission.format=wide_csv
 #   python -m spectramind predict tta.enabled=true tta.n=8 postprocess.smooth_mu.enabled=true
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -39,9 +39,17 @@ runtime:
   deterministic: ${env.reproducibility.deterministic}
   allow_tf32: false                 # enable only after validating numerics on your GPU
   device: ${env.device}             # "cuda" | "cpu" (from env)
-  precision: "32-true"              # "32-true" | "16-mixed" | "bf16-mixed"
   inference_mode: true
   cudnn_benchmark: false
+
+# Precision (Hydra-structured, like train)
+precision:
+  mode: "32-true"                   # "32-true" | "16-mixed" | "bf16-mixed"
+  tf32:
+    allow: ${runtime.allow_tf32}
+    cudnn_allow: ${runtime.allow_tf32}
+  grad_scaler:
+    enabled: false                  # inference only; keep off
 
 # DataLoader (uses env defaults)
 dataloader:
@@ -54,13 +62,14 @@ dataloader:
 
 # Checkpoint selection & loading
 checkpoint:
-  path: ${paths.checkpoints}/last.ckpt
+  path: ${oc.env:SM_MODEL_CKPT, ${paths.checkpoints}/last.ckpt}
   strict: true
   fail_if_missing: true
   fallback_glob:
     enabled: true
     pattern: "${paths.checkpoints}/**/*.ckpt"
     recursive: true
+  rank_zero_only: true              # avoid double logs in DDP
 
 # Test-time augmentation (TTA)
 tta:
@@ -116,12 +125,16 @@ submission:
     digits: 6
     include_header: true
     enforce_column_order: true
+    # keep a predictable column order for deterministic zips
+    order_strategy: "lexicographic"  # "lexicographic" | "schema" (repo-specific)
 
 # Optional offline metrics (when holdout labels exist)
 metrics:
   compute_offline: false
   gll:
     enabled: true
+    # add FGS1 upweight if you score offline like the leaderboard
+    fgs1_weight: ${oc.env:SM_GLL_W_FGS1, 58.0}
   summary:
     save_json: true
     path: ${paths.outputs}/metrics.json
@@ -150,6 +163,7 @@ logger:
     mode: disabled
     tags: ${experiment.tags}
     notes: ${experiment.notes}
+    rank_zero_only: true
 
 # Hydra runtime (under env.artifacts_root)
 hydra:
