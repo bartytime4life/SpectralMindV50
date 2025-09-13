@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write  # needed for SARIF upload
+  security-events: write  # for SARIF upload
   actions: read
 
 concurrency:
@@ -30,22 +30,25 @@ jobs:
     steps:
       - name: 📥 Checkout repository (full history for provenance)
         uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            **/requirements*.txt
+            pyproject.toml
+            setup.cfg
+            setup.py
 
-      - name: 📦 Install SBOM/validation tooling (CycloneDX, CLI, jq)
+      - name: 📦 Install SBOM/validation tooling
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          # cyclonedx-bom: creates SBOMs from Python projects and environments
-          pip install --upgrade cyclonedx-bom
-          # cyclonedx-cli: validate/transform CycloneDX docs
-          pip install --upgrade cyclonedx-cli
+          pip install --upgrade cyclonedx-bom cyclonedx-cli
           sudo apt-get update -y
           sudo apt-get install -y jq
 
@@ -59,15 +62,16 @@ jobs:
           shopt -s nullglob
           ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-          # requirements*.txt
-          for req in requirements.txt requirements-dev.txt requirements/*.txt; do
+          # requirements*.txt (top-level + folder)
+          for req in requirements.txt requirements-dev.txt requirements/*.txt **/requirements*.txt; do
+            [ -f "$req" ] || continue
             base="${req%.*}"
-            out_json="${ARTIFACTS_DIR}/python-$(basename "$base").cdx.json"
+            out_json="${ARTIFACTS_DIR}/python-$(echo "$base" | tr '/ ' '__').cdx.json"
             echo "Generating CycloneDX from $req -> $out_json"
             cyclonedx-bom -i "$req" -o "$out_json" -F json
           done
 
-          # pyproject / setup.cfg / setup.py (project metadata)
+          # Project metadata
           if [[ -f pyproject.toml || -f setup.cfg || -f setup.py ]]; then
             echo "Generating CycloneDX for project metadata -> ${ARTIFACTS_DIR}/python-project.cdx.json"
             cyclonedx-bom -o "${ARTIFACTS_DIR}/python-project.cdx.json" -F json
@@ -77,7 +81,7 @@ jobs:
           echo "Generating CycloneDX for installed env -> ${ARTIFACTS_DIR}/python-installed.cdx.json"
           cyclonedx-bom -o "${ARTIFACTS_DIR}/python-installed.cdx.json" -F json -e || true
 
-          # Annotate repo provenance in a lightweight manifest
+          # Lightweight provenance note
           cat > "${ARTIFACTS_DIR}/provenance.json" <<EOF
           {
             "repository": "${{ github.repository }}",
@@ -102,9 +106,8 @@ jobs:
           format: spdx-json
           output-file: ${{ env.ARTIFACTS_DIR }}/repo.spdx.json
 
-      - name: 🔄 Transform CycloneDX → tag:value (readable snapshot)
+      - name: 🔄 CycloneDX → SPDX tag:value (readable snapshot)
         run: |
-          # Produce a human-scannable SPDX tag:value from CycloneDX
           cyclonedx-cli convert \
             --input-format json \
             --output-format spdx-tag-value \
@@ -115,12 +118,12 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          shopt -s nullglob
           for f in "${ARTIFACTS_DIR}"/*.cdx.json; do
             echo "Validating $f"
             cyclonedx-cli validate --input-file "$f"
           done
 
-      # Optional: If a Dockerfile exists, inventory the build context too.
       - name: 🐳 Generate Docker context SBOM (CycloneDX) if Dockerfile exists
         if: hashFiles('Dockerfile') != ''
         uses: anchore/sbom-action@5c043a5065ad9009a4633986c724c8da7b34fd55 # v0
@@ -158,16 +161,16 @@ jobs:
         run: |
           {
             echo "## SBOM Refresh Summary"
-            echo ""
+            echo
             echo "**Repository:** \`${{ github.repository }}\`"
             echo "**Ref:** \`${{ github.ref }}\`"
             echo "**Commit:** \`${{ github.sha }}\`"
-            echo ""
+            echo
             echo "### Files"
             ls -1 "${ARTIFACTS_DIR}" | sed 's/^/- /'
-            echo ""
+            echo
             echo "### Notes"
             echo "- CycloneDX documents validated with \`cyclonedx-cli validate\`"
-            echo "- SARIF uploaded to **Code Scanning** (Severity cutoff: low)"
+            echo "- SARIF uploaded to **Code Scanning** (severity cutoff: low)"
             echo "- Artifacts retained for ${ARTIFACT_RETENTION_DAYS} days"
           } >> "$GITHUB_STEP_SUMMARY"
