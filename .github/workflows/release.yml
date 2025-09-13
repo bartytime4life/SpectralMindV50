@@ -27,7 +27,7 @@ env:
 
 jobs:
   validate:
-    name: Validate tag & VERSION
+    name: Validate tag, VERSION, and pyproject
     runs-on: ubuntu-latest
     permissions: { contents: read }
     outputs:
@@ -49,7 +49,6 @@ jobs:
           test -f "${{ env.VERSION_FILE }}" || { echo "::error::Missing ${{ env.VERSION_FILE }}"; exit 1; }
           VER="$(tr -d ' \n' < "${{ env.VERSION_FILE }}")"
           test -n "$VER" || { echo "::error::VERSION is empty"; exit 1; }
-          # Simple PEP 440-ish sanity for 1.2.3[.postN][.devN][-rc.N]
           if ! echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.](rc\.[0-9]+|post[0-9]+|dev[0-9]+))?$'; then
             echo "::warning::VERSION may not conform to expected semver/pre-release pattern: $VER"
           fi
@@ -64,6 +63,26 @@ jobs:
             echo "::error title=Tag/Version mismatch::Tag $TAG != v$VER"; exit 1;
           fi
           echo "✅ Tag $TAG matches VERSION v$VER"
+
+      - name: Cross-check pyproject.toml version
+        run: |
+          if [ -f pyproject.toml ]; then
+            PVER=$(python - <<'PY'
+from pathlib import Path
+import re
+t = Path("pyproject.toml").read_text()
+m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"\s*$', t)
+print(m.group(1) if m else "")
+PY
+)
+            if [ -n "$PVER" ] && [ "$PVER" != "${{ steps.version.outputs.version }}" ]; then
+              echo "::error::pyproject version ($PVER) != VERSION (${{ steps.version.outputs.version }})"
+              exit 1
+            fi
+            echo "✅ pyproject version matches"
+          else
+            echo "::notice::No pyproject.toml present — skipping version cross-check."
+          fi
 
       - name: Determine pre-release (hyphen means prerelease)
         id: prerelease
@@ -83,6 +102,7 @@ jobs:
     outputs:
       ver: ${{ steps.v.outputs.ver }}
       image_digest: ${{ steps.buildx.outputs.digest }}
+      built_image: ${{ steps.guard.outputs.built_image }}
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
@@ -177,8 +197,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
-      # ---------- Container build & push (GHCR) ----------
+      # ---------- Guard & Container build/push ----------
+      - name: Guard: is Dockerfile present?
+        id: guard
+        shell: bash
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "built_image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No Dockerfile found — skipping container build/push."
+            echo "built_image=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Docker login (GHCR)
+        if: steps.guard.outputs.built_image == 'true'
         uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ghcr.io
@@ -186,14 +218,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker metadata
+        if: steps.guard.outputs.built_image == 'true'
         id: meta
         uses: docker/metadata-action@8e5442c4ef9f78752691e2a88c2ef49dc42b97de # v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
+            type=ref,event=tag
             type=raw,value=latest
-            type=raw,value=${{ needs.validate.outputs.tag }}
-            type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=SpectraMind V50
@@ -203,13 +235,15 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Set up Buildx
+        if: steps.guard.outputs.built_image == 'true'
         uses: docker/setup-buildx-action@2b51285047da1547ffb1b2203d8be4c0af6b1f20 # v3
 
       - name: (Optional) Enable QEMU for multi-arch
-        if: contains(env.RELEASE_PLATFORMS, 'arm64')
+        if: steps.guard.outputs.built_image == 'true' && contains(env.RELEASE_PLATFORMS, 'arm64')
         uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
 
       - name: Build & Push (with SBOM + provenance)
+        if: steps.guard.outputs.built_image == 'true'
         id: buildx
         uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6
         with:
@@ -229,6 +263,7 @@ jobs:
         run: echo "ver=$(tr -d ' \n' < "${{ env.VERSION_FILE }}")" >> "$GITHUB_OUTPUT"
 
       - name: Sign images (keyless default)
+        if: steps.guard.outputs.built_image == 'true'
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
@@ -236,6 +271,7 @@ jobs:
           cosign sign --yes "${{ env.IMAGE_NAME }}:latest"
 
       - name: Attest build provenance (GitHub attestation)
+        if: steps.guard.outputs.built_image == 'true'
         uses: actions/attest-build-provenance@bdd51370d99a66c718e0de0492932ad2c8c24a73 # v1
         with:
           subject-name: ${{ env.IMAGE_NAME }}
@@ -265,6 +301,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Run Trivy (image)
+        if: needs.build.outputs.built_image == 'true'
         uses: aquasecurity/trivy-action@f95f286e1f986924f5d54f71c606a05743ee69ac # 0.28.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.ver }}
@@ -278,13 +315,13 @@ jobs:
         uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy-fs.sarif
-          category: trivy-fs
+        # category omitted to let GitHub dedupe cleanly
 
       - name: Upload Trivy SARIF (Image)
+        if: needs.build.outputs.built_image == 'true'
         uses: github/codeql-action/upload-sarif@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
           sarif_file: trivy-image.sarif
-          category: trivy-image
 
   sbom:
     name: Generate SBOMs
@@ -312,6 +349,7 @@ jobs:
           cyclonedx-bom -o sbom-python.cdx.json || true
 
       - name: Image SBOM (Syft → CycloneDX)
+        if: needs.build.outputs.built_image == 'true'
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v1.16.0
           syft "${{ env.IMAGE_NAME }}:${{ needs.build.outputs.ver }}" -o cyclonedx-json > sbom-image.cdx.json || true
@@ -324,6 +362,7 @@ jobs:
             sbom-repo.cdx.json
             sbom-python.cdx.json
             sbom-image.cdx.json
+          if-no-files-found: ignore
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   release:
@@ -345,7 +384,9 @@ jobs:
           mkdir -p assets
           shopt -s globstar nullglob
           for f in release-assets/**/*; do [ -f "$f" ] && cp -v "$f" assets/; done
-          echo "${{ needs.build.outputs.image_digest }}" > assets/image-digest.txt
+          if [ "${{ needs.build.outputs.built_image }}" = "true" ]; then
+            echo "${{ needs.build.outputs.image_digest }}" > assets/image-digest.txt
+          fi
           echo "count=$(ls -1 assets | wc -l)" >> "$GITHUB_OUTPUT"
           ls -l assets || true
 
