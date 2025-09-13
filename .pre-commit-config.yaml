@@ -14,10 +14,12 @@ default_stages: [commit, push]
 default_language_version:
   python: python3.11
 
-# Global excludes (keep hooks fast; artifacts live in DVC)
+# Global excludes (keep hooks fast; artifacts & data live in DVC/Kaggle)
 exclude: >
   (?x)(
     ^.*/\.venv/|
+    ^.*/venv/|
+    ^.*/env/|
     ^.*/\.mypy_cache/|
     ^.*/\.ruff_cache/|
     ^.*/\.pytest_cache/|
@@ -27,6 +29,13 @@ exclude: >
     ^assets/|
     ^docs/_build/|
     ^.*/data/|
+    ^outputs/|
+    ^artifacts/|
+    ^multirun/|
+    ^\.hydra/|
+    ^\.dvc/cache/|
+    ^\.dvc/tmp/|
+    ^.*/logs/|
     \.svg$
   )
 
@@ -38,7 +47,7 @@ repos:
     rev: v4.6.0
     hooks:
       - id: check-added-large-files
-        args: [--maxkb=500]   # keep repo lean; use DVC for artifacts
+        args: [--maxkb=500]     # keep repo lean; use DVC for artifacts
       - id: check-merge-conflict
       - id: check-case-conflict
       - id: check-symlinks
@@ -62,7 +71,7 @@ repos:
         exclude: ^(poetry\.lock|package-lock\.json)$
 
   # --------------------------------------------------------------------
-  # Upgrade syntax where safe (pre-lint quick win)
+  # Safe syntax upgrades (pre-lint quick win)
   # --------------------------------------------------------------------
   - repo: https://github.com/asottile/pyupgrade
     rev: v3.19.1
@@ -98,7 +107,7 @@ repos:
       # Keep Black canonical; enable ruff-format only if you drop Black.
 
   # --------------------------------------------------------------------
-  # Static typing
+  # Static typing (matches setup.cfg config)
   # --------------------------------------------------------------------
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.11.2
@@ -117,7 +126,7 @@ repos:
         files: ^(src/|spectramind\.py)
 
   # --------------------------------------------------------------------
-  # Security
+  # Security (static + secret scanning)
   # --------------------------------------------------------------------
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.9
@@ -137,7 +146,7 @@ repos:
           - .secrets.baseline
           - --all-files
         exclude: >
-          (^|/)(\.git|\.hg|\.svn|\.tox|\.venv|venv|env|node_modules|dist|build|site|htmlcov|coverage|reports|logs|artifacts|__pycache__|\.mypy_cache|\.pytest_cache|\.dvc/cache|data/raw|data/interim|data/external|notebooks/.+\.ipynb_checkpoints|\.idea|\.vscode|.*\.egg-info)(/|$)
+          (^|/)(\.git|\.hg|\.svn|\.tox|\.venv|venv|env|node_modules|dist|build|site|htmlcov|coverage|reports|logs|artifacts|outputs|__pycache__|\.mypy_cache|\.pytest_cache|\.ruff_cache|\.dvc/cache|\.dvc/tmp|data/raw|data/interim|data/external|notebooks/.+\.ipynb_checkpoints|\.idea|\.vscode|.*\.egg-info)(/|$)
 
   # --------------------------------------------------------------------
   # DVC guardrails (keep data/models out of Git)
@@ -160,7 +169,7 @@ repos:
         files: \.ipynb$
         args: [--keep-count, --keep-output=false]
 
-  # Optional: run ruff/black on .ipynb via nbqa (disabled by default)
+  # # Optional: run ruff/black on .ipynb via nbqa (disabled by default)
   # - repo: https://github.com/nbQA-dev/nbQA
   #   rev: 1.9.1
   #   hooks:
@@ -235,6 +244,7 @@ repos:
         entry: bash -c 'if git diff --cached --name-only | xargs -r grep -nP "\t" -- || true; then echo "Tabs found. Use spaces."; exit 1; fi'
         language: system
         files: ^(src/|tests/|configs/|scripts/|tools/|docs/|spectramind\.py|Makefile)$
+
       - id: yaml-lint-fast
         name: yaml sanity (no tabs, valid UTF-8)
         entry: bash -c 'git diff --cached --name-only -- "*.yaml" "*.yml" | xargs -r -n1 python -c "import sys,yaml;yaml.safe_load(open(sys.argv[1],encoding=\"utf-8\"))"'
