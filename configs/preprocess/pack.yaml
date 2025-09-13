@@ -1,17 +1,137 @@
-# PACK — assemble model-ready tensors (+ masks/meta)
+# ==============================================================================
+# SpectraMind V50 — Preprocess Method: PACK
+# File: configs/preprocess/method/pack.yaml
+# ------------------------------------------------------------------------------
+# Assemble model-ready tensors (+ masks/meta) with strict shape/bin validation.
+# Works after window/normalize/binning. Train/val may include labels; test won’t.
+# ==============================================================================
 
+# Output dtype for all float tensors
 dtype: "float32"
+
+# What to assemble
 assemble:
-  fgs1: true
-  airs: true
-  masks: true
-  labels: true            # only for train/val
+  fgs1:   true
+  airs:   true
+  masks:  true             # pack per-channel masks and a combined mask
+  labels: true             # only for train/val; auto-skipped for test
+
+# ------------------------------------------------------------------------------ 
+# Layout / keys
+# ------------------------------------------------------------------------------
+layout:
+  # Order of channels in the model input tensor when fused
+  order: ["fgs1", "airs"]         # change to ["airs","fgs1"] if decoder expects it
+  # Whether to also emit per-sensor tensors in addition to fused tensor
+  emit_per_sensor: true
+  # Fused tensor key name
+  fused_key: "x"
+  # Mask packing
+  masks:
+    emit_per_sensor: true         # fgs1_mask / airs_mask
+    emit_union: true              # "mask" = boolean OR over all submasks
+    union_key: "mask"
+    dtype: "bool"
+  # Labels and their expected key
+  labels:
+    key: "y"
+    dtype: "float32"
+
+# ------------------------------------------------------------------------------ 
+# Ragged handling / padding (should be no-op if windowing is consistent)
+# ------------------------------------------------------------------------------
+padding:
+  enable: true
+  target_time: ${preprocess.shapes.time_len}
+  target_bins: ${preprocess.shapes.bins}
+  pad_value: 0.0                  # masked regions remain masked after pad
+  pad_mode: "right"               # 'right'|'left' (affects time dimension only)
+  propagate_mask: true
+
+# ------------------------------------------------------------------------------ 
+# Metadata passthrough (kept lightweight and JSON-serializable)
+# ------------------------------------------------------------------------------
 meta:
   keep:
     - sample_id
     - star_id
     - exposure_time
     - split
+  rename: {}                      # e.g., {"target_id": "star_id"}
+  # Optional extra computed fields
+  computed:
+    enable: true
+    items:
+      # Example: simple coverage metrics recorded into meta
+      - key: "mask_coverage.fgs1"
+        source: "fgs1_mask"
+        op: "mean_bool"           # fraction masked
+      - key: "mask_coverage.airs"
+        source: "airs_mask"
+        op: "mean_bool"
+
+# ------------------------------------------------------------------------------ 
+# Validation gates (fail fast; prevent silent drift)
+# ------------------------------------------------------------------------------
 validate:
   enforce_shapes: true
+  expect_time: ${preprocess.shapes.time_len}
   enforce_bins: ${preprocess.shapes.bins}
+  finite_after_pack: true         # ensure no NaN/Inf in packed floats (masked OK)
+  require_channels:
+    - "fgs1"
+    - "airs"
+  require_when_train:
+    - "y"
+  allow_test_without_labels: true
+  # Tolerances for small off-by-one bin issues (should be 0 in production)
+  tolerances:
+    time: 0
+    bins: 0
+
+# ------------------------------------------------------------------------------ 
+# Collation hints for DataLoader (batch assembly)
+# ------------------------------------------------------------------------------
+collate:
+  batch_dim: 0
+  pad_to_max_time_in_batch: false # we use fixed windows; keep false for speed
+  keep_meta_as:
+    format: "dict"                # 'dict' | 'json'
+    flatten: false
+  # Keys to stack (others are carried as lists or dicts)
+  stack_keys: ["x", "fgs1", "airs", "mask", "fgs1_mask", "airs_mask", "y"]
+
+# ------------------------------------------------------------------------------ 
+# Export preview (small sample to help debug packing)
+# ------------------------------------------------------------------------------
+preview:
+  enable: false
+  limit: 4
+  out_dir: ${io.features_root}/_preview/pack
+  overwrite: ${io.overwrite}
+
+# ------------------------------------------------------------------------------ 
+# Reporting / diagnostics
+# ------------------------------------------------------------------------------
+report:
+  enable: true
+  log_every_n: ${runtime.log_every_n}
+  include:
+    - "shapes"                    # (T, B) per sensor and fused
+    - "mask_coverage"             # % masked per sensor and union
+    - "dtype"                     # dtype checks
+  sample_limit: ${oc.env:SM_PACK_REPORT_SAMPLES,64}
+
+# ------------------------------------------------------------------------------ 
+# Assertions (cheap runtime invariants)
+# ------------------------------------------------------------------------------
+assertions:
+  nonempty_after_mask: true       # require at least one unmasked sample/time
+  max_mask_coverage:
+    enable: true
+    fgs1: 0.80
+    airs: 0.80
+  # If both sensors exist, require time alignment
+  require_time_alignment: true
+  require_bin_alignment: true
+  fail_fast: true
