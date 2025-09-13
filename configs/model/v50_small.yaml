@@ -1,0 +1,49 @@
+# SpectraMind V50 — Small footprint (CI/Kaggle-safe)
+
+name: v50_small
+bins: ${data.channels.airs.bins}
+fgs1_index: 0
+
+fgs1:
+  _target_: spectramind.models.fgs1.SSMEncoder
+  d_model: 96
+  n_layers: 2
+  ssm:
+    step_rank: 16
+    conv_kernel: 5
+  dropout: 0.10
+  norm: "layernorm"
+  positional_encoding: "learned"
+
+airs:
+  _target_: spectramind.models.airs.SpectralConvEncoder
+  d_model: 128
+  n_blocks: 3
+  conv:
+    kernel: 5
+    dilation: [1, 2, 4]
+  spectral_pe: "sinusoid"
+  dropout: 0.10
+  norm: "layernorm"
+
+fusion:
+  _target_: spectramind.models.fusion.CrossAttentionFusion
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  mlp_ratio: 2.0
+  dropout: 0.10
+  norm: "layernorm"
+  gate_fgs1: true
+
+decoder:
+  _target_: spectramind.models.decode.HeteroSpectralDecoder
+  d_model: 128
+  hidden: [256, 128]
+  activation: "gelu"
+  dropout: 0.10
+  spectral_norm: false
+  sigma:
+    activation: "softplus"
+    eps: 1.0e-6
+  project_bins: ${model.bins}
