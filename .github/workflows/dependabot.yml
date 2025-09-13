@@ -1,14 +1,3 @@
-# .github/dependabot.yml
-# =============================================================================
-# SpectraMind V50 — Dependabot Config (Upgraded)
-# -----------------------------------------------------------------------------
-# • Weekly checks for Python (pip & Poetry) and GitHub Actions
-# • Smart groups to cut PR noise (ML core, testing, linting, docs, security/SBOM)
-# • Safer defaults: rebase, scoped commit messages, PR limits, selective ignores
-# • Timezone-aware scheduling aligned to repo cadence (America/Chicago)
-# • Optional reviewers/assignees (commented) for triage routing
-# =============================================================================
-
 version: 2
 
 updates:
@@ -16,7 +5,7 @@ updates:
   # Python — pip (requirements*.txt)
   # ----------------------------
   - package-ecosystem: "pip"
-    directory: "/"                   # Dependabot scans requirements*.txt here
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -26,8 +15,8 @@ updates:
     target-branch: "develop"
     rebase-strategy: "auto"
     labels: ["dependencies", "security", "pip"]
-    # reviewers: [ "your-org/sec-reviewers" ]
-    # assignees: [ "andybarta" ]
+    # reviewers: ["your-org/sec-reviewers"]
+    # assignees: ["andybarta"]
     commit-message:
       prefix: "deps(pip)"
       include: "scope"
@@ -44,7 +33,7 @@ updates:
           - "numpy*"
           - "scipy*"
           - "pandas*"
-          - "umap*"
+          - "umap-learn*"
       testing:
         patterns:
           - "pytest*"
@@ -72,11 +61,14 @@ updates:
           - "syft*"
           - "trivy*"
     ignore:
-      # Avoid churn on heavyweight stacks you likely don’t use directly
+      # Reduce churn on heavyweight stacks you don’t vendor directly
       - dependency-name: "opencv-python*"
         update-types: ["version-update:semver-patch", "version-update:semver-minor"]
       - dependency-name: "tensorflow*"
       - dependency-name: "pygobject*"
+      # Example: avoid surprise major for core torch; let you opt-in manually
+      # - dependency-name: "torch*"
+      #   update-types: ["version-update:semver-major"]
 
   # ----------------------------
   # Python — Poetry (pyproject.toml / poetry.lock)
@@ -91,9 +83,9 @@ updates:
     open-pull-requests-limit: 5
     target-branch: "develop"
     rebase-strategy: "auto"
-    versioning-strategy: "increase"   # sensible semver increases
+    versioning-strategy: "increase"
     labels: ["dependencies", "security", "poetry"]
-    # reviewers: [ "your-org/sec-reviewers" ]
+    # reviewers: ["your-org/sec-reviewers"]
     commit-message:
       prefix: "deps(poetry)"
       include: "scope"
@@ -108,7 +100,7 @@ updates:
   # GitHub Actions (CI/CD)
   # ----------------------------
   - package-ecosystem: "github-actions"
-    directory: "/"                   # scans .github/workflows/**
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -117,7 +109,7 @@ updates:
     open-pull-requests-limit: 10
     rebase-strategy: "auto"
     labels: ["dependencies", "security", "ci"]
-    # reviewers: [ "your-org/ci-admins" ]
+    # reviewers: ["your-org/ci-admins"]
     commit-message:
       prefix: "deps(actions)"
       include: "scope"
@@ -138,8 +130,3 @@ updates:
           - "actions/upload-artifact*"
           - "actions/download-artifact*"
           - "actions/cache*"
-
-# Notes:
-# • Auto-merge is enforced via branch protection/merge rules (not here).
-# • `target-branch: develop` funnels bumps through dev; set to `main` if you prefer.
-# • Tweak ignore patterns for heavyweight stacks you don’t vendor directly.
