@@ -44,19 +44,12 @@ jobs:
       security-events: write
 
     env:
-      # Stability/perf knobs (tune as needed)
-      CODEQL_THREADS: "2"     # or "0" for auto; 2 reduces OOM risk on GH runners
+      # Stability/perf knobs (tune if needed)
+      CODEQL_THREADS: "2"     # "0" = auto; 2 lowers OOM risk on GH-hosted runners
       CODEQL_RAM: "6144"      # MB cap
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_PYTHON_VERSION_WARNING: "1"
       PYTHONUTF8: "1"
-      # Optional: reduce noise from transient site-packages
-      # CODEQL_EXTRACTOR_PYTHON_DONT_BUILD_UNNAMED_MODULES: "true"
-
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [ python ]
 
     steps:
       - name: 📥 Checkout
@@ -75,39 +68,41 @@ jobs:
             setup.cfg
             setup.py
 
-      - name: 📦 Install dependencies (optional but improves CodeQL precision)
+      - name: 📦 Install dependencies (improves extractor precision)
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          # Best-effort editable install for extras/namespace resolution
           if [ -f pyproject.toml ] || [ -f setup.cfg ] || [ -f setup.py ]; then
-            pip install -e . || true   # best-effort for extras/entrypoints
+            pip install -e . || true
           fi
 
       - name: 🔎 Initialize CodeQL
         uses: github/codeql-action/init@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
-          languages: ${{ matrix.language }}
+          languages: python
           queries: +security-extended,+security-and-quality
           tools: latest
-          # If you maintain a policy/config, enable this:
-          # config-file: .github/codeql/codeql-config.yml
+          # config-file: .github/codeql/codeql-config.yml  # (optional)
 
-      - name: 🏗️ Autobuild (no-op for pure Python; safe to keep)
+      - name: 🏗️ Autobuild (no-op for pure Python; safe)
         uses: github/codeql-action/autobuild@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
 
       - name: 🧪 Analyze
         id: analyze
         uses: github/codeql-action/analyze@2e96272c09e5f38e4f0e2e2e7c0cf9c3fb9d0d82 # v3
         with:
-          category: "/language:${{ matrix.language }}"
-          # Fork-safe: analyze but skip SARIF upload for PRs from forks
+          category: "/language:python"
+          # Skip SARIF upload for fork PRs (token is read-only there)
           upload: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true }}
 
-      - name: 📤 Upload CodeQL database (for local triage)
+      - name: 📤 Upload CodeQL database (local triage aid)
         if: always()
         uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
-          name: codeql-db-${{ matrix.language }}
+          name: codeql-db-python
           path: ${{ steps.analyze.outputs.database-path }}
           retention-days: 7
