@@ -1,6 +1,52 @@
-# GitHub/Kaggle CI: 2 epochs FP32, tiny slices, deterministic
-defaults:
-  - /training/fast_ci: fast_ci
+# ==============================================================================
+# SpectraMind V50 — Profile: CI Fast (FP32, tiny slices, deterministic)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/ci_fast_fp32]'
+#
+# Purpose:
+#   - Fast smoke test in CI/Kaggle: ~minutes, not hours
+#   - Force FP32 everywhere (no AMP/TF32) to rule out numeric quirks
+#   - Deterministic loader/runtime for reproducible signals
+# ==============================================================================
 
+defaults:
+  - /training/fast_ci: fast_ci   # tiny dataset + short loop + quiet logger
+
+# Trainer overrides
+trainer:
+  precision: "32-true"     # force full FP32 (no AMP)
+  max_epochs: 2            # exactly 2 epochs as requested
+  deterministic: true      # Lightning determinism guard
+  benchmark: false         # disable cuDNN autotune for reproducibility
+  enable_progress_bar: false
+  log_every_n_steps: 10
+
+# Global precision / backend controls (redundant but explicit)
+precision:
+  mode: "32-true"
+  tf32:
+    allow: false           # no TF32 matmul on Ampere
+    cudnn_allow: false     # no TF32 in cuDNN
+
+# DataLoader: fully deterministic & lightweight
+data_loader:
+  num_workers: 0           # single-threaded to avoid nondeterministic forks
+  persistent_workers: false
+  prefetch_factor: 2
+  pin_memory: false        # avoid page-pinning variability in CI
+  # If your fast_ci base exposes size limits, they stay active here
+
+# Seed snap (helps when fast_ci doesn’t pin it)
+seed: 123
+
+# Optional: cap batches further if needed (uncomment to force tiny slices)
+#limits:
+#  train_batches: 16
+#  val_batches: 8
+#  test_batches: 8
+
+# Experiment identity for filtering dashboards/logs
 experiment:
-  tags: ${oc.env:SM_TAGS, ["profile:ci_fast"]}
+  name: ${oc.env:SM_EXPERIMENT_NAME, "ci-fast-fp32"}
+  tags: ${oc.env:SM_TAGS, ["profile:ci_fast","precision=fp32","deterministic","epochs=2"]}
