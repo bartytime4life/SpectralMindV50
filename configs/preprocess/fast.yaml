@@ -1,0 +1,46 @@
+# SpectraMind V50 — Preprocess preset: fast (Kaggle/CI budget)
+
+preset: fast
+seed: 123
+
+io:
+  calibrated_root: ${data.exports.calibrated_root}
+  features_root:   ${data.exports.features_root}
+  overwrite: true
+  format: "npz"
+
+runtime:
+  num_workers: 2
+  pin_memory: false
+  log_every_n: 200
+
+enable:
+  load: true
+  mask: true
+  detrend: false          # skip to save time (leave robust normalize on)
+  normalize: true
+  binning: false          # rely on calibration alignment
+  window: true
+  pack: true
+  tokenize: true
+  augment: false         # keep off in time-boxed runs
+  export: true
+
+load:        ${preprocess.method.load}
+mask:        ${preprocess.method.mask}
+detrend:     ${preprocess.method.detrend}
+normalize:   ${preprocess.method.normalize}
+binning:     ${preprocess.method.binning}
+window:      ${preprocess.method.window}
+pack:        ${preprocess.method.pack}
+tokenize:    ${preprocess.method.tokenize}
+augment:     ${preprocess.method.augment}
+export:      ${preprocess.method.export}
+
+shapes:
+  time_len: 384           # shorter sequence
+  stride:   384
+  bins: ${data.channels.airs.bins}
+
+splits:
+  source: ${data.splits.config}
