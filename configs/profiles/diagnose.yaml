@@ -1,15 +1,68 @@
-# Run training briefly and then force diagnostics step(s)
+# ==============================================================================
+# SpectraMind V50 — Profile: Diagnose (short train → force diagnostics)
+# ------------------------------------------------------------------------------
+# Usage (callbacks-based, single command):
+#   python -m spectramind train +defaults='[/profiles/diagnose_quick]'
+#
+# Usage (two-step chain, if you prefer explicit diagnose stage):
+#   python -m spectramind train   +defaults='[/profiles/diagnose_quick]'
+#   python -m spectramind diagnose +experiment.tags='["profile:diagnose"]'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
   - /training/dataloader: dataloader
   - /training/logger: logger
   - /training/callbacks: callbacks
+  # (optimizer/scheduler inherited from your base; add here if your stack requires)
 
+# Keep it short, but run a full validation pass each epoch
 trainer:
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 3}
   log_every_n_steps: 10
-  val_check_interval: 1.0
+  val_check_interval: 1.0          # validate at end of each epoch
+  enable_progress_bar: true
+  deterministic: false
+  benchmark: true                  # speed over strict reproducibility for quick runs
+
+# Optional caps to make it snappy; override via env if needed
+# (leave commented if your fast_ci already enforces tiny slices)
+#limit:
+#  train_batches: ${oc.env:SM_LIMIT_TRAIN, 0.25}
+#  val_batches:   ${oc.env:SM_LIMIT_VAL,   1.0}
+
+# Diagnostics trigger (via callback hook; repo-safe no-op if not wired)
+diagnostics:
+  enable: true
+  run_after_train: true            # fire on_fit_end
+  subsets: ["val"]                 # run on validation set
+  artifacts:
+    save_predictions: true
+    save_residuals: true
+    plots: ["gll","fft","umap","shap"]  # whatever your diagnose stage supports
+  report:
+    format: "html"
+    out_dir: "${paths.outputs}/diagnostics"
+
+# Loader: sensible defaults, not maximal determinism
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 4}
+  persistent_workers: true
+  prefetch_factor: 4
+  pin_memory: true
+  pin_memory_device: "cuda"
+
+# Precision: inherit repo default; force FP32 here if you want strict comparability
+#precision:
+#  mode: "32-true"
+#  tf32:
+#    allow: false
+#    cudnn_allow: false
+
+# Seed for repeatable diagnostics (optional)
+#seed: ${oc.env:SM_SEED, 123}
 
 experiment:
-  tags: ["profile:diagnose"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "diagnose-quick"}
+  tags: ${oc.env:SM_TAGS, ["profile:diagnose","short-train","diagnostics"]}
