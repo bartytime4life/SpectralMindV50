@@ -1,16 +1,52 @@
-# MLflow tracking (local or remote)
+# ==============================================================================
+# SpectraMind V50 — Profile: MLflow Tracking (local or remote)
+# ------------------------------------------------------------------------------
+# Usage:
+#   # Local file-based MLflow (default): logs under ${paths.outputs}/mlruns
+#   python -m spectramind train +defaults='[/profiles/logger_mlflow]'
+#
+#   # Remote MLflow server:
+#   MLFLOW_TRACKING_URI=http://mlflow.your.domain:5000 \
+#   python -m spectramind train +defaults='[/profiles/logger_mlflow]'
+#
+#   # S3/minio artifact store (example):
+#   export MLFLOW_S3_ENDPOINT_URL=http://minio.local:9000
+#   export AWS_ACCESS_KEY_ID=...
+#   export AWS_SECRET_ACCESS_KEY=...
+#   MLFLOW_TRACKING_URI=http://mlflow.your.domain:5000 \
+#   python -m spectramind train +defaults='[/profiles/logger_mlflow]'
+# ==============================================================================
+
 defaults:
-  - /training/logger: logger
+  - /training/logger: logger   # keep your base logger schema (enables easy switch)
 
 training:
   logger:
-    offline: false
+    # Make CI-safe togglable: offline True falls back to local file logging
+    offline: ${oc.env:MLFLOW_OFFLINE,false}
     backend:
       name: "mlflow"
       passthrough:
+        # If empty → use local `${paths.outputs}/mlruns` (your logger should handle)
         tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,""}
+        # Optional explicit artifact store (leave empty to let MLflow/server decide)
+        artifact_uri: ${oc.env:MLFLOW_ARTIFACT_URI,""}
+
+        # Naming
         experiment_name: ${experiment.name}
         run_name: "${experiment.name}-${now:%Y%m%d-%H%M%S}${training.logger.uuid_suffix}"
 
+        # Extras (optional, respected if your logger supports them)
+        # Enable MLflow autologging? (model/metrics/params automatic capture)
+        autolog: ${oc.env:MLFLOW_AUTOLOG,true}
+        # Tag the run with host/user etc. if your logger backend supports it
+        add_default_tags: ${oc.env:MLFLOW_DEFAULT_TAGS,true}
+
+        # Network timeouts/retries (helpful when remote)
+        request_timeout_s: ${oc.env:MLFLOW_TIMEOUT,30}
+        max_retries: ${oc.env:MLFLOW_MAX_RETRIES,3}
+
+# Keep experiment identity simple; MLflow uses experiment.name/run_name above
 experiment:
-  tags: ["profile:mlflow"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "mlflow-run"}
+  tags: ${oc.env:SM_TAGS, ["profile:mlflow"]}
