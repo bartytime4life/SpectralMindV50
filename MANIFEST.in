@@ -13,25 +13,26 @@ include pyproject.toml
 include setup.cfg
 include .editorconfig
 include .pre-commit-config.yaml
-# If you intend to publish these, keep them; otherwise remove:
+# If you publish these, keep them; otherwise remove:
 # include .cz.toml
 # include .secrets.baseline
 
 # --- GitHub Actions (for consumers who mirror CI) ------------------------------
 recursive-include .github/workflows *.yml *.yaml
 
-# --- Root-level example/config trees (if you ship external profiles) -----------
-# Keep a single graft + broad include patterns to avoid missing new files.
+# --- Root-level Hydra config trees (external profiles) -------------------------
+# Keep broad patterns to avoid missing new files.
 graft configs
 global-include configs/*.yaml configs/*.yml
 
 # --- Package runtime assets (inside src/) -------------------------------------
-# Mirror package_data from pyproject: configs/schemas/assets/templates, etc.
+# Mirrors [tool.setuptools.package-data] in pyproject.toml
 graft src/spectramind/configs
 graft src/spectramind/schemas
 graft src/spectramind/validators
 graft src/spectramind/diagnostics/templates
 graft src/spectramind/assets
+
 global-include src/spectramind/**/*.yaml src/spectramind/**/*.yml
 global-include src/spectramind/**/*.json
 global-include src/spectramind/**/*.j2 src/spectramind/**/*.jinja
@@ -52,9 +53,8 @@ global-include bin/*.sh bin/*.py
 
 # --- Docs site & ADRs ----------------------------------------------------------
 graft docs
-global-include docs/**/*.md docs/**/*.yml docs/**/*.yaml docs/**/*.svg docs/**/*.png
 graft docs/adr
-global-include docs/adr/*.md
+global-include docs/**/*.md docs/**/*.yml docs/**/*.yaml docs/**/*.svg docs/**/*.png
 
 # --- Examples / notebooks ------------------------------------------------------
 graft notebooks
@@ -85,3 +85,21 @@ prune artifacts
 prune data
 prune .dvc
 prune .git
+```
+
+Quick sanity:
+
+```bash
+# Build sdist + wheel and inspect
+python -m build
+python - <<'PY'
+import tarfile, zipfile, sys, pathlib
+sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+wheel = next(pathlib.Path("dist").glob("*.whl"))
+print("SDIST:", sdist); print("WHEEL:", wheel)
+with tarfile.open(sdist, "r:gz") as t: s = {m.name for m in t.getmembers() if m.isfile()}
+with zipfile.ZipFile(wheel) as z: w = set(z.namelist())
+print("configs/ in sdist?", any(p.endswith("/configs/config.yaml") for p in s))
+print("spectramind assets in wheel?", any("spectramind/assets" in p for p in w))
+PY
+```
