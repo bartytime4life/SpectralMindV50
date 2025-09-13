@@ -1,4 +1,15 @@
-# Local development: faster feedback, rich UI, partial epochs
+# ==============================================================================
+# SpectraMind V50 — Profile: Local Development (fast feedback, rich UI)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/local_dev]'
+#
+# Intent:
+#   - Short runs, partial epochs, frequent logs
+#   - Rich progress UI, optional lightweight profiling
+#   - FP32 by default to simplify debugging (override via env)
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -10,24 +21,36 @@ defaults:
   - /training/accumulate: accumulate
 
 trainer:
-  accelerator: ${oc.env:SM_ACCELERATOR,"auto"}
-  devices: ${oc.env:SM_DEVICES,1}
+  accelerator: ${oc.env:SM_ACCELERATOR, "auto"}     # "gpu"|"cpu"|"auto"
+  devices: ${oc.env:SM_DEVICES, 1}
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 10}
-  limit_train_batches: ${oc.env:SM_LIMIT_TRAIN,0.25}
-  limit_val_batches: ${oc.env:SM_LIMIT_VAL,0.5}
-  log_every_n_steps: ${oc.env:SM_LOG_EVERY,10}
-  profiler: ${oc.env:SM_PROFILER,null}
+  limit_train_batches: ${oc.env:SM_LIMIT_TRAIN, 0.25}
+  limit_val_batches: ${oc.env:SM_LIMIT_VAL, 0.5}
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 10}
+  enable_progress_bar: true
+  profiler: ${oc.env:SM_PROFILER, null}             # e.g. "simple"|"advanced"|null
+  deterministic: false                               # faster by default
+  benchmark: true                                    # cuDNN autotune for speed
 
 precision:
-  mode: ${oc.env:SM_PRECISION,"32-true"}  # keep debugging simple
+  mode: ${oc.env:SM_PRECISION, "32-true"}            # keep debugging simple
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, false}
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, false}
   safety:
-    detect_anomaly: ${oc.env:SM_DETECT_ANOMALY,false}
+    detect_anomaly: ${oc.env:SM_DETECT_ANOMALY, false}
 
 data_loader:
-  num_workers: ${oc.env:SM_WORKERS,4}
+  num_workers: ${oc.env:SM_WORKERS, 4}
   persistent_workers: false
-  pin_memory: true
   prefetch_factor: 2
+  pin_memory: true
+  pin_memory_device: "cuda"
+
+# Optional: modest grad accumulation (uncomment if you want smoother steps)
+#accumulate:
+#  grad_batches: ${oc.env:SM_ACCUM, 1}
 
 experiment:
-  tags: ${oc.env:SM_TAGS, ["profile:local_dev"]}
+  name: ${oc.env:SM_EXPERIMENT_NAME, "local-dev"}
+  tags: ${oc.env:SM_TAGS, ["profile:local_dev","fast-feedback","rich-ui"]}
