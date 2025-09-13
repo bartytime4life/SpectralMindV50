@@ -8,15 +8,23 @@
 # • Lean apt footprint, non-root user, proper signal handling via tini
 # ==============================================================================
 
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+# IMPORTANT: use CUDA 12.1 runtime to match cu121 wheels (torch/cuDNN parity)
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-# ---- Build args (flip PYVER to 3.10 if you want Kaggle-Notebook parity) ----
+# ---- Build args (flip PYVER to 3.10 for Kaggle parity) ------------------------
 ARG PYVER=3.11
+
+# Optional Torch versions (keep in sync with your pins)
+ARG TORCH_VER=2.3.1
+ARG TVISION_VER=0.18.1
+ARG TAUDIO_VER=2.3.1
 
 # ---- Base env ----------------------------------------------------------------
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
     LC_ALL=C.UTF-8 \
     LANG=C.UTF-8 \
     VIRTUAL_ENV=/opt/venv \
@@ -26,7 +34,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NCCL_P2P_DISABLE=0 \
     NCCL_IB_DISABLE=1
 
-# Use bash for conditional RUNs
 SHELL ["/bin/bash", "-lc"]
 
 # ---- System deps (pinned & minimal) ------------------------------------------
@@ -37,7 +44,7 @@ RUN set -euxo pipefail \
       software-properties-common \
  && rm -rf /var/lib/apt/lists/*
 
-# ---- Python install (3.11 default via deadsnakes; 3.10 uses system python) ---
+# ---- Python install (3.11 default via deadsnakes; 3.10 via system python) ----
 RUN set -euxo pipefail; \
  if [[ "${PYVER}" == "3.10" ]]; then \
    apt-get update && apt-get install -y --no-install-recommends \
@@ -52,24 +59,24 @@ RUN set -euxo pipefail; \
    PYBIN="python${PYVER}"; \
  fi; \
  "${PYBIN}" -m venv "${VIRTUAL_ENV}" && \
- "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade --no-cache-dir pip==24.2 setuptools==72.2.0 wheel==0.44.0
+ "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade --no-cache-dir \
+   pip==24.2 setuptools==72.2.0 wheel==0.44.0
 
-# ---- Torch stack (CUDA 12.1 channel) -----------------------------------------
-# Note: cu121 index implies CUDA 12.1 wheels — do not append +cu121 to versions.
-ARG TORCH_VER=2.3.1
-ARG TVISION_VER=0.18.1
-ARG TAUDIO_VER=2.3.1
+# ---- Torch stack (CUDA 12.1 wheels) ------------------------------------------
+# NOTE: The cu121 index serves the correct CUDA build; do NOT append +cu121.
 RUN set -euxo pipefail \
- && pip install --upgrade --no-cache-dir \
+ && python -m pip install --upgrade --no-cache-dir \
       --index-url https://download.pytorch.org/whl/cu121 \
-      "torch==${TORCH_VER}" "torchvision==${TVISION_VER}" "torchaudio==${TAUDIO_VER}"
+      "torch==${TORCH_VER}" \
+      "torchvision==${TVISION_VER}" \
+      "torchaudio==${TAUDIO_VER}"
 
 # ---- Optional runtime dependencies -------------------------------------------
 # Keep non-fatal if the requirements file isn't present at build-time.
 COPY requirements-kaggle.txt /tmp/requirements-kaggle.txt
 RUN set -euxo pipefail; \
  if [[ -s /tmp/requirements-kaggle.txt ]]; then \
-   pip install --no-cache-dir -r /tmp/requirements-kaggle.txt; \
+   python -m pip install --no-cache-dir -r /tmp/requirements-kaggle.txt; \
  else \
    echo "No requirements-kaggle.txt found; skipping."; \
  fi
@@ -82,8 +89,8 @@ WORKDIR /workspace
 # ---- Labels for provenance ----------------------------------------------------
 LABEL org.opencontainers.image.title="SpectraMind V50 CI CUDA Image" \
       org.opencontainers.image.description="CUDA 12.1 + cuDNN 8, Python ${PYVER}, Torch cu121" \
-      org.opencontainers.image.source="https://github.com/bartytime4life/SpectralMindV50" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.source="https://github.com/your-org/spectramind-v50" \
+      org.opencontainers.image.licenses="MIT"
 
 # ---- Entry & health-friendly defaults ----------------------------------------
 # tini ensures signals reach Python, preventing zombie processes in CI.
