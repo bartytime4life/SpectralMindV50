@@ -1,4 +1,16 @@
-# Sensible defaults for Hydra multirun sweeps (grid/random handled via CLI)
+# ==============================================================================
+# SpectraMind V50 — Profile: Hyper Sweep (Hydra multirun defaults)
+# ------------------------------------------------------------------------------
+# Usage examples:
+#   # grid
+#   python -m spectramind train -m +defaults='[/profiles/hyper_sweep]' \
+#     optimizer.lr=1e-4,3e-4,1e-3 scheduler.warmup.steps=500,1000
+#
+#   # random (via CLI or launcher plugin)
+#   python -m spectramind train -m +defaults='[/profiles/hyper_sweep]' \
+#     'optimizer.lr=random.uniform(1e-5,1e-3)' 'optimizer.weight_decay=random.uniform(1e-4,1e-2)'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -8,14 +20,52 @@ defaults:
   - /training/optimizer: optimizer
   - /training/scheduler: scheduler
 
+# Trainer: moderate horizon w/ mid-epoch validation & frequent logging
 trainer:
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 40}
-  log_every_n_steps: 25
   val_check_interval: 0.5
+  log_every_n_steps: 25
+  enable_progress_bar: true
+  benchmark: true
+  deterministic: false
 
+# Precision: inherit repo defaults; override via env in sweeps if needed
+# precision.mode: "16-mixed" | "bf16-mixed" | "32-true"
+precision:
+  mode: ${oc.env:SM_PRECISION, "16-mixed"}
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, false}
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, false}
+
+# DataLoader: practical defaults; tune via env per runner
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 8}
+  persistent_workers: true
+  prefetch_factor: 4
+  pin_memory: true
+  pin_memory_device: "cuda"
+
+# Logging: offline by default for CI; flip off for online tracking
 training:
   logger:
-    offline: true   # safe for CI; flip off if you want W&B online
+    offline: true
 
+# (Optional) seed; in sweeps you may vary it or keep a fixed one for comparability
+# seed: ${oc.env:SM_SEED, 123}
+
+# Hydra multirun defaults — grid/random selection handled via CLI expressions or launcher plugins
+hydra:
+  mode: MULTIRUN
+  verbose: false
+  job:
+    chdir: true
+  sweep:
+    dir: ${paths.outputs}/sweeps
+    subdir: ${experiment.name}/${now:%Y%m%d-%H%M%S}/${hydra.job.num}_${hydra.job.id}
+  run:
+    dir: ${paths.outputs}/runs/${experiment.name}/${now:%Y%m%d-%H%M%S}
+
+# Experiment identity (kept generic for sweeps; tag set aids filtering)
 experiment:
-  tags: ["profile:hyper_sweep"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "hyper-sweep"}
+  tags: ${oc.env:SM_TAGS, ["profile:hyper_sweep"]}
