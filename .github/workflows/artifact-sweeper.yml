@@ -39,7 +39,7 @@ on:
         default: 'false'
 
 permissions:
-  actions: write   # required to delete artifacts/runs
+  actions: write   # required to list/delete artifacts and runs
   contents: read
 
 concurrency:
@@ -52,21 +52,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
-      sweepruns: ${{ steps.cfg.outputs.sweepruns }}   # <-- expose for downstream job
+      sweepruns: ${{ steps.cfg.outputs.sweepruns }}
     steps:
       - name: Resolve inputs
         id: cfg
         shell: bash
         run: |
-          # Defaults for scheduled runs (inputs are empty in cron)
-          DAYS_TO_KEEP="${{ github.event.inputs.days_to_keep || '14' }}"
-          GRACE_DAYS="${{ github.event.inputs.grace_days || '2' }}"
-          DRY_RUN="${{ github.event.inputs.dry_run || 'true' }}"
-          PROTECT_PATTERNS="${{ github.event.inputs.protect_patterns || 'release-*,sbom*' }}"
-          INCLUDE_PATTERNS="${{ github.event.inputs.include_patterns || '*' }}"
-          KEEP_LATEST_PER_NAME="${{ github.event.inputs.keep_latest_per_name || '2' }}"
-          MIN_SIZE_KB="${{ github.event.inputs.min_size_kb || '0' }}"
-          SWEEP_RUNS="${{ github.event.inputs.sweep_runs || 'false' }}"
+          # For cron: inputs are empty; use defaults
+          DAYS_TO_KEEP="${{ github.event_name == 'workflow_dispatch' && inputs.days_to_keep || '14' }}"
+          GRACE_DAYS="${{ github.event_name == 'workflow_dispatch' && inputs.grace_days   || '2'  }}"
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && inputs.dry_run        || 'true' }}"
+          PROTECT_PATTERNS="${{ github.event_name == 'workflow_dispatch' && inputs.protect_patterns || 'release-*,sbom*' }}"
+          INCLUDE_PATTERNS="${{ github.event_name == 'workflow_dispatch' && inputs.include_patterns || '*' }}"
+          KEEP_LATEST_PER_NAME="${{ github.event_name == 'workflow_dispatch' && inputs.keep_latest_per_name || '2' }}"
+          MIN_SIZE_KB="${{ github.event_name == 'workflow_dispatch' && inputs.min_size_kb || '0' }}"
+          SWEEP_RUNS="${{ github.event_name == 'workflow_dispatch' && inputs.sweep_runs   || 'false' }}"
 
           echo "days=${DAYS_TO_KEEP}" >> "$GITHUB_OUTPUT"
           echo "grace=${GRACE_DAYS}" >> "$GITHUB_OUTPUT"
@@ -90,8 +90,8 @@ jobs:
           keep_latest_per_name: ${{ steps.cfg.outputs.keepn }}
           min_size_kb: ${{ steps.cfg.outputs.minsiz }}
           script: |
-            const daysToKeep = parseInt(core.getInput('days_to_keep') || '14', 10);
-            const graceDays  = Math.max(0, parseInt(core.getInput('grace_days') || '0', 10));
+            const daysToKeep = Math.max(0, parseInt(core.getInput('days_to_keep') || '14', 10));
+            const graceDays  = Math.max(0, parseInt(core.getInput('grace_days')  || '2',  10));
             const dryRun = (core.getInput('dry_run') || 'true').toLowerCase() === 'true';
             const keepLatestPerName = Math.max(0, parseInt(core.getInput('keep_latest_per_name') || '2', 10));
             const minSizeKB = Math.max(0, parseInt(core.getInput('min_size_kb') || '0', 10));
@@ -138,11 +138,13 @@ jobs:
             core.info(`Include patterns: ${includeList.join(', ') || '(all)'}`);
             core.info(`Min size to delete: ${minSizeKB} KB`);
 
+            // List all artifacts (repo scope)
             const allArtifacts = await github.paginate(
               github.rest.actions.listArtifactsForRepo,
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
             );
 
+            // Group artifacts by name; keep newest first
             const byName = new Map();
             for (const a of allArtifacts) {
               const n = a.name || `artifact-${a.id}`;
@@ -164,27 +166,39 @@ jobs:
               const size = Number(art.size_in_bytes || 0);
               bytesScanned += size;
 
-              if (art.expired || art.archive_download_url == null) {
-                expired++;
+              // Exclude by include-patterns early
+              if (!matchesAny(name, includeRegexes)) { kept++; continue; }
+
+              // Protected names are always kept
+              if (protectRegexes.length && protectRegexes.some(rx => rx.test(name))) { protectedCount++; continue; }
+
+              // Keep newest N per name
+              const siblings = byName.get(art.name || '') ?? [];
+              const idx = siblings.findIndex(x => x.id === art.id);
+              if (idx > -1 && idx < keepLatestPerName) { kept++; continue; }
+
+              // Skip if newer than cutoff
+              if (createdAt > cutoffMs) { kept++; continue; }
+
+              // Size floor
+              if (minSizeKB > 0 && size < minSizeKB * 1024) { tooSmall++; kept++; continue; }
+
+              // From here on, it's "considered" for deletion
+              considered++;
+
+              // Auto-delete expired
+              if (art.expired) {
                 if (dryRun) {
                   core.warning(`EXPIRED (would delete): ${name} (#${art.id})`);
                 } else {
                   const ok = await delWithRetry(art.id);
                   if (ok) { deleted++; bytesDeleted += size; } else { errors++; }
                 }
+                expired++;
                 continue;
               }
 
-              if (!matchesAny(name, includeRegexes)) { kept++; continue; }
-              if (protectRegexes.length && protectRegexes.some(rx => rx.test(name))) { protectedCount++; continue; }
-
-              const siblings = byName.get(art.name || '') ?? [];
-              const idx = siblings.findIndex(x => x.id === art.id);
-              if (idx > -1 && idx < keepLatestPerName) { kept++; continue; }
-
-              if (createdAt > cutoffMs) { kept++; continue; }
-              if (minSizeKB > 0 && size < minSizeKB*1024) { tooSmall++; kept++; continue; }
-
+              // Normal deletion path
               if (dryRun) {
                 core.warning(`WOULD DELETE: ${name} (#${art.id}) [age=${ageDays}d, size=${size}B]`);
               } else {
@@ -193,7 +207,10 @@ jobs:
               }
             }
 
-            const fmtBytes = (n) => { const u=['B','KB','MB','GB','TB']; let i=0,x=n; while(x>=1024&&i<u.length-1){x/=1024;i++;} return `${x.toFixed(2)} ${u[i]}`; };
+            const fmtBytes = (n) => {
+              const u=['B','KB','MB','GB','TB']; let i=0,x=n;
+              while(x>=1024&&i<u.length-1){x/=1024;i++;} return `${x.toFixed(2)} ${u[i]}`;
+            };
 
             core.summary
               .addHeading('Artifact Sweeper Report')
@@ -201,7 +218,7 @@ jobs:
               .addTable([
                 [{data: 'Metric', header: true}, {data: 'Value', header: true}],
                 ['Total scanned', String(total)],
-                ['Considered (after filters)', String(considered)],
+                ['Considered (eligible)', String(considered)],
                 ['Deleted', String(deleted)],
                 ['Expired auto-deleted', String(expired)],
                 ['Protected kept', String(protectedCount)],
@@ -248,7 +265,7 @@ jobs:
     name: Sweep old workflow runs (optional)
     runs-on: ubuntu-latest
     needs: sweep-artifacts
-    if: ${{ needs.sweep-artifacts.outputs.sweepruns == 'true' }}   # <-- fixed reference
+    if: ${{ needs.sweep-artifacts.outputs.sweepruns == 'true' }}
     timeout-minutes: 15
     steps:
       - name: Delete completed runs older than 30 days (keep latest 20)
@@ -271,8 +288,8 @@ jobs:
             const survivors = new Set(sorted.slice(0, keepLatest).map(r => r.id));
 
             for (const run of runs) {
-              const createdAt = new Date(run.created_at).getTime();
               if (survivors.has(run.id)) continue;
+              const createdAt = new Date(run.created_at).getTime();
               if (createdAt > cutoff) continue;
               try {
                 await github.rest.actions.deleteWorkflowRun({
