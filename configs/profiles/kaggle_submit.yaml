@@ -1,10 +1,69 @@
-# Safe settings for producing a Kaggle submission artifact
+# ==============================================================================
+# SpectraMind V50 — Profile: Kaggle Submit (safe defaults)
+# ------------------------------------------------------------------------------
+# Usage:
+#   # train (if your notebook trains)
+#   python -m spectramind train +defaults='[/profiles/kaggle_submit]'
+#
+#   # submit (if you have a dedicated submit stage)
+#   python -m spectramind submit +defaults='[/profiles/kaggle_submit]'
+#
+# Notes:
+#   - Assumes /profiles/kaggle handles Kaggle paths (inputs/outputs) & offline env.
+#   - Prioritizes stability (FP32, conservative DataLoader) to avoid subtle runtime issues.
+# ==============================================================================
+
 defaults:
   - /profiles/kaggle: kaggle
+  - /training/lightning: lightning
+  - /training/precision: precision
+  - /training/dataloader: dataloader
+  - /training/logger: logger
+  - /training/callbacks: callbacks
+  - /training/optimizer: optimizer
+  - /training/scheduler: scheduler
 
+# Trainer: long-ish but Kaggle-safe; tweak via env if needed
 trainer:
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 60}
+  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.25}
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 50}
+  enable_progress_bar: true
+  benchmark: false           # deterministic > autotune in Kaggle
+  deterministic: true        # reproducible behavior across re-runs
+  # Lightning will set proper samplers under DDP; keep dataset shuffle=True
 
-# If your CLI has `submit` stage, the same profile can be reused.
+# Precision: stable FP32 on Kaggle T4s (avoids mixed-precision flakiness)
+precision:
+  mode: ${oc.env:SM_PRECISION, "32-true"}
+  tf32:
+    allow: false
+    cudnn_allow: false
+
+# DataLoader: conservative to avoid worker/exhaustion issues on Kaggle
+data_loader:
+  num_workers: ${oc.env:SM_WORKERS, 2}
+  persistent_workers: false
+  prefetch_factor: 2
+  pin_memory: true
+  pin_memory_device: "cuda"
+
+# Optional: warmup & cosine if you do in-notebook training
+scheduler:
+  warmup:
+    enabled: ${oc.env:SM_WARMUP, true}
+    steps: ${oc.env:SM_WARMUP_STEPS, 1000}
+
+# Optional: scale LR by effective global batch if your stack supports it
+optimizer:
+  lr_scaling:
+    enabled: ${oc.env:SM_LR_SCALE, true}
+    reference_batch_size: ${oc.env:SM_REF_BS, 256}
+
+# Seed to make submissions reproducible
+seed: ${oc.env:SM_SEED, 123}
+
+# Experiment identity (also works for submit stage reuse)
 experiment:
-  tags: ["profile:kaggle_submit"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "kaggle-submit"}
+  tags: ${oc.env:SM_TAGS, ["profile:kaggle_submit","precision=fp32","deterministic"]}
