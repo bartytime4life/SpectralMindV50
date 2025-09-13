@@ -92,16 +92,28 @@ jobs:
             const includeGlobs = toList(core.getInput('include') || '*');
 
             // ---------- helpers ----------
-            const globToRegex = (g) => new RegExp('^' + g
-              .replace(/[.+^${}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*').replace(/\?/g,'.') + '$','i');
+            function globToRegex(glob) {
+              // support **, *, ? (path-aware)
+              const ESC = /[.+^${}()|[\]\\]/g;
+              const s = glob
+                .replace(ESC, '\\$&')
+                .replace(/\*\*/g, '§§DOUBLE§§')
+                .replace(/\*/g, '[^/]*')
+                .replace(/§§DOUBLE§§/g, '.*')
+                .replace(/\?/g, '.');
+              return new RegExp('^' + s + '$', 'i');
+            }
             const protectRx = protectGlobs.map(globToRegex);
             const includeRx = includeGlobs.map(globToRegex);
             const matchesAny = (n, rx) => rx.length === 0 || rx.some(r => r.test(n));
             const cutoff = Date.now() - (daysToKeep + graceDays)*24*60*60*1000;
+
             const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             async function delWithRetry(id, attempt=1) {
               try {
-                await github.rest.actions.deleteArtifact({ owner: context.repo.owner, repo: context.repo.repo, artifact_id: id });
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner, repo: context.repo.repo, artifact_id: id
+                });
                 return true;
               } catch (e) {
                 const s = e.status || 0;
@@ -187,7 +199,7 @@ jobs:
                 ['Protected patterns', protectGlobs.join(', ') || '(none)'],
                 ['Included patterns', includeGlobs.join(', ') || '(all)'],
                 ['Total scanned', String(total)],
-                ['Considered', String(considered)],
+                ['Considered (eligible)', String(considered)],
                 ['Deleted', String(deleted)],
                 ['Expired auto-deleted', String(expired)],
                 ['Too small kept', String(tooSmall)],
