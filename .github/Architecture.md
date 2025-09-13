@@ -20,22 +20,24 @@ Physics-informed, neuro-symbolic pipeline for **dual-sensor fusion** (FGS1 photo
 ## 🔄 High-Level Pipeline
 
 ```mermaid
-graph TD
-  Raw_Inputs[Raw Inputs: FGS1 + AIRS] --> Calibrate[Calibrate: ADC, dark, flat, trace, phase]
-  Calibrate --> Preprocess[Preprocess: tensor packs, binning, splits]
-  Preprocess --> Train[Train: dual encoders + physics loss]
-  Train --> Predict[Predict: mu, sigma (283 bins)]
-  Predict --> Diagnose[Diagnose: FFT, UMAP, SHAP]
-  Predict --> Submit[Submit: CSV + ZIP]
+flowchart TD
+  A["Raw inputs<br/>FGS1 + AIRS"] --> B["Calibrate<br/>ADC, dark, flat, trace, phase"]
+  B --> C["Preprocess<br/>tensor packs, binning, splits"]
+  C --> D["Train<br/>dual encoders + physics loss"]
+  D --> E["Predict<br/>μ, σ (283 bins)"]
+  E --> F["Diagnose<br/>FFT, UMAP, SHAP"]
+  E --> G["Submit<br/>CSV + ZIP"]
 
-  Calibrate --> DVC[DVC cache and remotes]
-  Preprocess --> DVC
-  Train --> DVC
-  Predict --> DVC
-  Diagnose --> DVC
+  %% DVC fan-in
+  B --> H["DVC cache / remotes"]
+  C --> H
+  D --> H
+  E --> H
+  F --> H
 
-  Train --> Hydra[Hydra config snapshots]
-  Predict --> Manifests[Run manifests (JSONL)]
+  %% Lineage
+  D --> I["Hydra<br/>config snapshots"]
+  E --> J["Run manifests<br/>(JSONL)"]
 ```
 
 **Stages (DVC):** `calibrate → preprocess → train → predict → diagnose → submit`.
