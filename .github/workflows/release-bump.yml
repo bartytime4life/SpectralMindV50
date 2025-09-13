@@ -1,0 +1,55 @@
+name: release-bump
+on:
+  workflow_dispatch:
+    inputs:
+      increment:
+        description: "Version bump: patch | minor | major | prerelease"
+        required: true
+        default: "patch"
+        type: choice
+        options: [patch, minor, major, prerelease]
+      prerelease_tag:
+        description: "Prerelease tag (rc/a/b) if increment=prerelease"
+        required: false
+        default: "rc"
+
+permissions:
+  contents: write    # push tag & commit
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Commitizen
+        run: |
+          python -m pip install --upgrade pip
+          pip install commitizen
+
+      - name: Configure Git bot identity
+        run: |
+          git config user.name  "spectramind-bot"
+          git config user.email "bot@spectramind.v50"
+
+      - name: Bump version with Commitizen
+        env:
+          CZ_PRE: ${{ inputs.prerelease_tag }}
+        run: |
+          if [[ "${{ inputs.increment }}" == "prerelease" ]]; then
+            cz bump --increment prerelease --prerelease $CZ_PRE --yes
+          else
+            cz bump --increment "${{ inputs.increment }}" --yes
+          fi
+
+      - name: Push changes and tags
+        run: |
+          git push --follow-tags
