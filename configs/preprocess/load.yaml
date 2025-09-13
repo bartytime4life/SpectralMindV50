@@ -1,15 +1,96 @@
-# LOAD — collect calibrated artifacts for a split
+# ==============================================================================
+# SpectraMind V50 — Preprocess Method: LOAD (Kaggle/CI-safe)
+# File: configs/preprocess/method/load.yaml
+# ------------------------------------------------------------------------------
+# • Resolves split membership from data.splits.*
+# • Accepts Parquet or NPZ for FGS1/AIRS/Y
+# • Deterministic shuffling; strict missing-file handling (tunable)
+# • Lightweight validation + dtype coercion for stable downstream math
+# ==============================================================================
 
+# (If you use a Hydra-instantiated class, keep _target_ here; else ignore.)
+# _target_: spectramind.preprocess.load.Loader
+
+# ------------------------------------------------------------------------------ 
+# Sources (delegated to active data profile)
+# ------------------------------------------------------------------------------
 sources:
-  # The dataloader resolves split members (train/val/test) from data.splits
   calibrated_manifest: ${io.calibrated_root}/manifest.json
-  train_dir: ${io.calibrated_root}/train
-  val_dir:   ${io.calibrated_root}/val
-  test_dir:  ${io.calibrated_root}/test
+  dir:
+    train: ${io.calibrated_root}/train
+    val:   ${io.calibrated_root}/val
+    test:  ${io.calibrated_root}/test}
 
-expect:
-  fgs1: "fgs1_*.parquet"     # or .npz; your loader should accept both
-  airs: "airs_*.parquet"
-  y:    "y_*.parquet"        # only for train/val
-fail_on_missing: true
+# ------------------------------------------------------------------------------ 
+# Split resolution — use data.splits to enumerate members (train/val/test)
+# ------------------------------------------------------------------------------
+splits:
+  # A JSON/CSV/Parquet index listing sample membership (optional; your loader
+  # can also read from ${sources.dir.*} if this is null).
+  index: ${data.splits.index,null}
+  # Which split to load for this run (trainer sets this via CLI or parent config)
+  select: ${oc.select:split,train}
+
+# ------------------------------------------------------------------------------ 
+# File patterns — allow either Parquet or NPZ
+# ------------------------------------------------------------------------------
+patterns:
+  fgs1: ["fgs1_*.parquet", "fgs1_*.npz"]
+  airs: ["airs_*.parquet", "airs_*.npz"]
+  y:    ["y_*.parquet",    "y_*.npz"]     # labels only for train/val
+
+ignore_globs: ["*_tmp.*", ".*", "*~"]     # robustness vs. editor/temp files
+fail_on_missing: true                      # set false to skip samples instead
 shuffle_seed: ${preprocess.seed}
+
+# ------------------------------------------------------------------------------ 
+# Readers — fast defaults for Kaggle/CI
+# ------------------------------------------------------------------------------
+reader:
+  parquet:
+    engine: "pyarrow"
+    columns: null            # optionally restrict (e.g., ["fgs1","airs","y"])
+    memory_map: true
+    use_threads: true
+  npz:
+    allow_pickle: false
+    mmap_mode: null          # set "r" if you want mem-mapped reads
+
+# ------------------------------------------------------------------------------ 
+# Coercion & validation — light but protective
+# ------------------------------------------------------------------------------
+coerce:
+  float_dtype: "float32"
+  int_dtype:   "int32"
+  time_dtype:  "int64"
+
+validate:
+  # Optional schema path; if null, perform lightweight structural checks only.
+  schema: null
+  strict: false
+  # Ensure paired channels exist per sample id
+  require_pairs:
+    - ["fgs1", "airs"]
+
+# ------------------------------------------------------------------------------ 
+# Limits & filtering — handy for CI or debug slices
+# ------------------------------------------------------------------------------
+limits:
+  max_samples: ${oc.env:SM_LOAD_MAX_SAMPLES,}   # e.g., export SM_LOAD_MAX_SAMPLES=2048
+  drop_empty: true
+  require_columns:
+    fgs1: null
+    airs: null
+    y:    ["y"]     # only enforced when split == train/val
+
+# ------------------------------------------------------------------------------ 
+# Caching & retries — cheap resiliency
+# ------------------------------------------------------------------------------
+cache:
+  enable: false
+  dir: ${paths.cache}/load
+
+retries:
+  attempts: 2
+  backoff_sec: 0.25
+  jitter_sec: 0.10
