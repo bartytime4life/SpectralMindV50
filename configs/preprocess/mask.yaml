@@ -1,0 +1,15 @@
+# MASK — build boolean masks & apply hard masks to tensors
+
+nan:
+  action: "mask"             # 'mask'|'drop' (drop removes frames; risky)
+  fill: 0.0
+
+saturation:
+  enable: true
+  threshold: 0.98            # fraction of full-scale (post-ADC)
+  action: "mask"
+
+cosmic:
+  enable: true
+  sigma: 7.0
+  max_iter: 1
