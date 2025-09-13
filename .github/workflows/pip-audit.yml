@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write  # for SARIF upload
+  security-events: write  # SARIF upload
 
 concurrency:
   group: pip-audit-${{ github.ref }}
@@ -19,7 +19,7 @@ concurrency:
 env:
   # Gate: "none" (default) never fails CI; else one of: critical | high | medium | low
   AUDIT_FAIL_ON: "none"
-  # Reproducibility: pin pip-audit (update periodically)
+  # Reproducibility: pin pip-audit (periodically bump)
   PIP_AUDIT_VERSION: "2.7.3"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_PYTHON_VERSION_WARNING: "1"
@@ -51,9 +51,13 @@ jobs:
             setup.py
 
       - name: 🔧 Install tools
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install "pip-audit==${PIP_AUDIT_VERSION}" jq
+          python -m pip install "pip-audit==${PIP_AUDIT_VERSION}"
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
       - name: 🔎 Discover requirement files
         id: discover
@@ -62,11 +66,12 @@ jobs:
           set -euo pipefail
           mapfile -t REQS < <(git ls-files \
             ':!:**/.venv/**' ':!:**/venv/**' ':!:**/env/**' ':!:**/site-packages/**' \
-            '**/requirements*.txt' 'requirements.txt' \
-            'requirements-dev.txt' 'requirements-kaggle.txt' 2>/dev/null | sort -u || true)
+            'requirements.txt' '**/requirements*.txt' 'requirements-dev.txt' 'requirements-kaggle.txt' \
+            2>/dev/null | sort -u || true)
           if [ "${#REQS[@]}" -gt 0 ]; then
             printf 'reqs=%s\n' "$(printf '%s ' "${REQS[@]}")" >> "$GITHUB_OUTPUT"
           else
+            echo "reqs=" >> "$GITHUB_OUTPUT"
             echo "No requirements*.txt files found."
           fi
 
@@ -116,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(.audit/*.sarif)
+          files=(.audit/*${{ matrix.python-version }}*.sarif)
           if [ ${#files[@]} -eq 0 ]; then
             echo '{}' > ".audit/empty_${{ matrix.python-version }}.sarif"
           fi
@@ -170,7 +175,7 @@ jobs:
           set -euo pipefail
           lvl="${AUDIT_FAIL_ON,,}"
           [[ "$lvl" == "none" || -z "$lvl" ]] && { echo "Gate disabled (AUDIT_FAIL_ON=$lvl)."; exit 0; }
-          function rank() { case "$1" in critical) echo 4;; high) echo 3;; medium) echo 2;; low|warning) echo 1;; *) echo 0;; esac; }
+          rank() { case "$1" in critical) echo 4;; high) echo 3;; medium) echo 2;; low|warning) echo 1;; *) echo 0;; esac; }
           thr=$(rank "$lvl")
           total=0
           shopt -s nullglob
