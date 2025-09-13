@@ -13,15 +13,22 @@ include pyproject.toml
 include setup.cfg
 include .editorconfig
 include .pre-commit-config.yaml
-# If you publish these, keep them; otherwise remove:
-# include .cz.toml
-# include .secrets.baseline
+include SECURITY.md
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+include Makefile
+include dvc.yaml
+include params.yaml
+include .dvcignore
+include mkdocs.yml
+include requirements*.txt
 
-# --- GitHub Actions (for consumers who mirror CI) ------------------------------
+# --- GitHub (CI + templates) ---------------------------------------------------
 recursive-include .github/workflows *.yml *.yaml
+recursive-include .github/ISSUE_TEMPLATE *.md *.yml
+include .github/CODEOWNERS
 
 # --- Root-level Hydra config trees (external profiles) -------------------------
-# Keep broad patterns to avoid missing new files.
 graft configs
 global-include configs/*.yaml configs/*.yml
 
@@ -35,13 +42,14 @@ graft src/spectramind/assets
 
 global-include src/spectramind/**/*.yaml src/spectramind/**/*.yml
 global-include src/spectramind/**/*.json
+global-include src/spectramind/**/*.csv
 global-include src/spectramind/**/*.j2 src/spectramind/**/*.jinja
 global-include src/spectramind/**/*.html src/spectramind/**/*.css
 global-include src/spectramind/**/*.png src/spectramind/**/*.svg src/spectramind/**/*.js
+global-include src/spectramind/**/*.woff src/spectramind/**/*.woff2 src/spectramind/**/*.ttf
 global-include src/spectramind/**/*.mmd
 
 # --- Kaggle assets -------------------------------------------------------------
-# Notebooks/templates and pinned requirements for Kaggle runtime.
 graft kaggle
 global-include kaggle/*.md kaggle/*.txt kaggle/*.ipynb kaggle/*.py
 
@@ -85,21 +93,3 @@ prune artifacts
 prune data
 prune .dvc
 prune .git
-```
-
-Quick sanity:
-
-```bash
-# Build sdist + wheel and inspect
-python -m build
-python - <<'PY'
-import tarfile, zipfile, sys, pathlib
-sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
-wheel = next(pathlib.Path("dist").glob("*.whl"))
-print("SDIST:", sdist); print("WHEEL:", wheel)
-with tarfile.open(sdist, "r:gz") as t: s = {m.name for m in t.getmembers() if m.isfile()}
-with zipfile.ZipFile(wheel) as z: w = set(z.namelist())
-print("configs/ in sdist?", any(p.endswith("/configs/config.yaml") for p in s))
-print("spectramind assets in wheel?", any("spectramind/assets" in p for p in w))
-PY
-```
