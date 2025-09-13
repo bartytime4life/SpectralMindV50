@@ -1,9 +1,32 @@
-# configs/profiles/ablation_priors_off.yaml
-# Priors OFF (GLL-only) — use the ablation overlay and tag the run
-defaults:
-  - /training/ablation: ablation
+# ==============================================================================
+# SpectraMind V50 — Profile: Ablation (Priors OFF, GLL-only)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/ablation_priors_off]'
+#
+# Description:
+#   - Disables physics/symbolic priors, retaining only the Gaussian Log-Likelihood.
+#   - Used for ablation experiments to isolate the effect of priors.
+#   - Run tagged for easy filtering in CI, Kaggle, and experiment tracking.
+# ==============================================================================
 
-# Optional: add/merge a run name for easier filtering
+defaults:
+  - /training/ablation: ablation    # base ablation settings
+
+# Experiment identity (mergeable with CLI/env overrides)
 experiment:
   name: ${oc.env:SM_EXPERIMENT_NAME, "ablation-priors-off"}
-  tags: ${oc.env:SM_TAGS, ["profile:ablation_priors_off", "gll=on"]}
+  tags: ${oc.env:SM_TAGS, ["profile:ablation_priors_off", "priors=off", "gll=on"]}
+
+# Explicitly disable priors (overrides loss config if needed)
+loss:
+  composite:
+    use_smoothness: false
+    use_nonneg: false
+    use_band_coherence: false
+    use_calibration: false
+    # Only Gaussian Log-Likelihood (GLL) remains active
+
+# Optional: CI/Kaggle-friendly settings (small tweaks, reproducibility focus)
+seed: 123
+precision: "32-true"    # avoid AMP instability on shared GPUs
