@@ -1,4 +1,10 @@
-# Hydra-compliant: groups live at root; Hydra settings stay in hydra: block.
+# ==============================================================================
+# SpectraMind V50 — Root Config (Hydra-compliant, hardened)
+# ------------------------------------------------------------------------------
+# • Groups live at root; Hydra settings live ONLY under `hydra:`
+# • Env-first knobs via oc.env + oc.decode (correct typing from strings)
+# • Reproducible run dirs; compact override dirnames for artifact hygiene
+# ==============================================================================
 
 # -----------------------------------------------------------------------------
 # Composition from config groups
@@ -25,32 +31,32 @@ precision: ${oc.decode:${oc.env:SM_TRAIN_PRECISION,32}}       # 16|bf16|32
 
 # Canonical path surface (env-first, safe defaults)
 paths:
-  data_dir: ${oc.env:SM_DATA_DIR,./data}
-  outputs_dir: ${oc.env:SM_OUTPUTS_DIR,./outputs}
+  data_dir:      ${oc.env:SM_DATA_DIR,./data}
+  outputs_dir:   ${oc.env:SM_OUTPUTS_DIR,./outputs}
   artifacts_dir: ${oc.env:SM_ARTIFACTS_DIR,./artifacts}
-  cache_dir: ${oc.env:SM_CACHE_DIR,./.cache}
+  cache_dir:     ${oc.env:SM_CACHE_DIR,./.cache}
 
 # Echo of active selections (for logging/diagnostics)
 selections:
-  env: local
-  data: default
-  calib: default
-  preprocess: default
-  model: v50
-  training: default
-  loss: composite
-  logger: jsonl
+  env:         local
+  data:        default
+  calib:       default
+  preprocess:  default
+  model:       v50
+  training:    default
+  loss:        composite
+  logger:      jsonl
 
 # Canonical names for CLI subcommands (read by app, not Hydra)
-config_name_calibrate: calibrate
+config_name_calibrate:  calibrate
 config_name_preprocess: preprocess
-config_name_train: train
-config_name_predict: predict
-config_name_diagnose: diagnose
-config_name_submit: submit
+config_name_train:      train
+config_name_predict:    predict
+config_name_diagnose:   diagnose
+config_name_submit:     submit
 
 # -----------------------------------------------------------------------------
-# Hydra settings
+# Hydra settings (keep all Hydra options in this block)
 # -----------------------------------------------------------------------------
 hydra:
   # Reproducible, tidy run directories. Include job name and optional tag.
@@ -70,7 +76,7 @@ hydra:
         item_sep: ","
         exclude_keys: [seed, num_workers, precision]
 
-  # Tighten unknown-key handling (only if supported by your Hydra version)
+  # Tighten unknown-key handling (supported in Hydra ≥1.3)
   strict: true
 
   # Allow disabling .hydra in CI: set HYDRA_OUTPUT_SUBDIR='.'
@@ -96,3 +102,12 @@ hydra:
   # (Optional) add packaged config search paths if you ship configs in-wheel
   # searchpath:
   #   - pkg://spectramind.configs
+
+# -----------------------------------------------------------------------------
+# Sanity assertions (cheap, app-read)
+# -----------------------------------------------------------------------------
+assertions:
+  paths_exist:
+    data_dir: true
+    outputs_dir: true
+  fail_fast: true
