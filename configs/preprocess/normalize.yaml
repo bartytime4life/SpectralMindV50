@@ -1,19 +1,119 @@
-# NORMALIZE — scale features and persist stats
+# ==============================================================================
+# SpectraMind V50 — Preprocess Method: NORMALIZE
+# File: configs/preprocess/method/normalize.yaml
+# ------------------------------------------------------------------------------
+# Scales features and persists statistics for reproducible inference.
+# • Train/val/test consistency (fit on train; apply everywhere)
+# • Mask-aware fitting (ignores masked samples)
+# • Per-channel vs global scope per sensor
+# • Exports compact stats (npz + json manifest)
+# ==============================================================================
 
-strategy: "zscore"           # 'zscore'|'robust'|'minmax'
+# ------------------------------------------------------------------------------
+# Strategy
+#   'zscore'  : x' = (x - mean) / (std + eps)
+#   'robust'  : x' = (x - median) / (1.4826 * MAD + eps)
+#   'minmax'  : x' = (x - min) / (max - min + eps)  → optionally clipped
+# ------------------------------------------------------------------------------
+strategy: "zscore"                 # 'zscore'|'robust'|'minmax'
+
 zscore:
+  center: true
+  scale:  true
   eps: 1.0e-6
+
 robust:
-  q_low: 0.01
+  center: true
+  scale:  true
+  q_low:  0.01                    # used only if fallback to percentiles is needed
   q_high: 0.99
+  k_mad: 1.4826                   # Gaussian-consistent MAD scale
+  eps: 1.0e-6
+
 minmax:
-  min: 0.0
+  mode: "percentile"              # 'percentile'|'absolute'
+  q_low:  0.01                    # only when mode='percentile'
+  q_high: 0.99
+  min: 0.0                        # only when mode='absolute'
   max: 1.0
+  eps: 1.0e-6
+
+# ------------------------------------------------------------------------------
+# Scope — where stats are computed/applied
+#   'global'      : one set across all channels for the sensor
+#   'per_channel' : independent stats for each channel of the sensor
+# ------------------------------------------------------------------------------
 scope:
-  fgs1: "per_channel"        # 'global'|'per_channel'
+  fgs1: "per_channel"             # 'global'|'per_channel'
   airs: "per_channel"
+
+# ------------------------------------------------------------------------------
+# Fitting policy — ensures split safety and determinism
+# ------------------------------------------------------------------------------
+fit:
+  split: "train"                  # fit stats on this split only
+  use_cache: true                 # reuse existing stats if present
+  ignore_masked: true             # exclude masked values from stat computation
+  min_unmasked_frac: 0.2          # require 20% unmasked to accept stats
+  fallback:
+    enable: true
+    to: "global"                  # fallback scope if per_channel fails coverage
+    reason_in_manifest: true
+
+# ------------------------------------------------------------------------------
+# Application policy — how to apply stats to tensors
+# ------------------------------------------------------------------------------
+apply:
+  to:
+    fgs1: true
+    airs: true
+  dtype_out: "float32"
+  clip:
+    enable: true
+    low: -6.0                     # post-normalization clamp (e.g., Z in [-6,6])
+    high: 6.0
+  preserve_mask: true             # keep boolean mask; do not unmask during scaling
+
+# ------------------------------------------------------------------------------
+# Export / persistence — stats live under features_root/scaler
+# ------------------------------------------------------------------------------
 export_stats: true
 stats_dir: ${io.features_root}/scaler
-apply_to:
-  fgs1: true
-  airs: true
+stats_format: "npz"               # 'npz'|'json' (npz is compact & fast)
+manifest:
+  enable: true
+  filename: manifest.json
+  include:
+    - strategy
+    - scope
+    - fit.split
+    - fit.ignore_masked
+    - zscore.eps
+    - robust.k_mad
+    - minmax.mode
+    - apply.clip
+  # file naming: <sensor>.<scope>.<strategy>.npz  (e.g., airs.per_channel.zscore.npz)
+
+# ------------------------------------------------------------------------------
+# Assertions — fail fast on pathological situations
+# ------------------------------------------------------------------------------
+assertions:
+  require_stats_on_apply: true
+  nan_ok_in_input: true           # allowed pre-normalization (will be masked)
+  nan_ok_in_output: false         # normalized output should be finite (post-mask)
+  max_abs_after: 15.0             # sanity guard for runaway scales (debug logs)
+  fail_fast: true
+
+# ------------------------------------------------------------------------------
+# Logging / diagnostics
+# ------------------------------------------------------------------------------
+report:
+  enable: true
+  log_every_n: ${runtime.log_every_n}
+  histograms: false               # turn on in research profiles
+  sample_limit: ${oc.env:SM_NORM_REPORT_SAMPLES,128}
+
+# ------------------------------------------------------------------------------
+# Determinism
+# ------------------------------------------------------------------------------
+seed: ${preprocess.seed}
