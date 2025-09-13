@@ -1,0 +1,3 @@
+# No-Op Logger — disables all logging (max throughput)
+
+_target_: spectramind.train.callbacks.NoopLogger
