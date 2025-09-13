@@ -1,7 +1,113 @@
-# WINDOW — segment streams into fixed-length examples
+# ==============================================================================
+# SpectraMind V50 — Preprocess Method: WINDOW
+# File: configs/preprocess/method/window.yaml
+# ------------------------------------------------------------------------------
+# Segments time series into fixed-length examples with optional transit-phase
+# alignment. Plays nice with masks/labels and supports overlapping windows.
+# ==============================================================================
 
-length: ${preprocess.shapes.time_len}    # T
-stride: ${preprocess.shapes.stride}
-align_to_phase: true                     # snap windows to transit phase if available
-center_transit: true                     # prefer windows centered around transit
-drop_remainder: true
+# ---- Core geometry ------------------------------------------------------------
+length: ${preprocess.shapes.time_len}      # window size (T)
+stride: ${preprocess.shapes.stride}        # hop; may be < length for overlap
+drop_remainder: true                       # drop trailing partials unless padded
+
+# ---- Phase alignment (Ariel-specific) ----------------------------------------
+phase:
+  enable: ${oc.select:align_to_phase,true} # top-level convenience switch
+  # Where to pull phase information from
+  source:
+    kind: "meta"                           # 'meta'|'trace'|'file'
+    meta_key: "phase_center"               # e.g., mid-transit timestamp/idx
+    file: null                             # optional path for per-sample phases
+  # If true, pick windows whose center is closest to phase center
+  center_transit: ${oc.select:center_transit,true}
+  # Allowed displacement (in frames) from exact center to accept a window
+  tolerance_frames: 16
+  # If no phase info: 'fallback' = "sliding" or "reject"
+  on_missing: "sliding"
+
+# ---- Tapering / weighting (edge effects) -------------------------------------
+taper:
+  kind: "hann"                              # 'hann'|'rect'
+  apply: true                               # multiply window weights into data?
+  export_weights: false                     # optionally emit weights for the model
+
+# ---- Mask interaction ---------------------------------------------------------
+mask:
+  propagate: true                           # carry per-channel & union masks
+  # Require at least this fraction of unmasked samples to keep a window
+  min_unmasked_frac:
+    fgs1: 0.40
+    airs: 0.40
+  # Dilate masks at boundaries to avoid optimistic edges when overlapping
+  boundary_dilate:
+    enable: true
+    radius: 1
+
+# ---- Padding policy (only applied when drop_remainder=false) ------------------
+pad:
+  enable: false                             # default off in research/CI
+  mode: "constant"                          # 'constant'|'reflect'
+  value: 0.0
+  propagate_mask: true
+
+# ---- Label alignment (train/val only) ----------------------------------------
+labels:
+  align_to_window: true                     # slice y to the same [t0:t0+T)
+  require_inside: "any"                     # 'any'|'center'|'full'
+  # If labels are events, choose policy for windows without events
+  empty_policy: "keep"                      # 'keep'|'drop'
+
+# ---- Selection policy when both phase & sliding are possible ------------------
+selection:
+  policy: "phase_then_fill"                 # 'phase_only'|'sliding_only'|'phase_then_fill'
+  # When overlapping, avoid near-duplicates:
+  min_center_separation: 0.25               # fraction of length (e.g., 0.25*T)
+
+# ---- Output bookkeeping -------------------------------------------------------
+emit:
+  keys:
+    windows: "windows"                      # optional metadata index
+    centers: "window_centers"               # center indices relative to sample
+    phase_delta: "phase_center_delta"       # center - phase_center (frames)
+  meta:
+    keep:
+      - sample_id
+      - split
+      - exposure_time
+    add:
+      - name: "window_id"
+        kind: "sequence"                    # 0..N-1 within each sample
+
+# ---- Validation / assertions --------------------------------------------------
+validate:
+  enforce_shapes: true
+  expect_time: ${preprocess.shapes.time_len}
+  # Ensure time alignment between sensors after slicing
+  require_time_alignment: true
+  # Ensure spectral bins remain unchanged by windowing
+  require_bin_alignment: true
+  # Guardrail against pathological masking
+  max_mask_coverage:
+    fgs1: 0.80
+    airs: 0.80
+  # Fail if phase.required but missing (only when policy demands it)
+  require_phase_when_phase_only: true
+  fail_fast: true
+
+# ---- Diagnostics --------------------------------------------------------------
+report:
+  enable: true
+  log_every_n: ${runtime.log_every_n}
+  include:
+    - "num_windows"
+    - "overlap_ratio"                       # 1 - stride/length
+    - "mask_coverage.fgs1"
+    - "mask_coverage.airs"
+    - "phase_aligned_fraction"
+    - "dropped.windows_by_mask"
+    - "dropped.windows_by_phase"
+  sample_limit: ${oc.env:SM_WIN_REPORT_SAMPLES,128}
+
+# ---- Determinism --------------------------------------------------------------
+seed: ${preprocess.seed}
