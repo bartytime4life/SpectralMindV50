@@ -76,7 +76,7 @@ flowchart TD
   A --> E["ADR-0002 Physics-Informed Losses"]
   E --> F["ADR-0004 Dual Encoder Fusion"]
 
-  A --> G["ADR-0003 CI ↔ CUDA Parity"]
+  A --> G["ADR-0003 CI <-> CUDA Parity"]
   G --> C
 ````
 
