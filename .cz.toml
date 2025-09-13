@@ -7,58 +7,39 @@
 # ==============================================================================
 
 [tool.commitizen]
-name = "cz_conventional_commits"
+name                 = "cz_conventional_commits"
 
 # ---- Canonical version source (avoid drift) ----------------------------------
-version_provider    = "pep621"          # read from pyproject.toml [project].version
-version_scheme      = "pep440"
-major_version_zero  = true              # under 1.0.0: feat -> MINOR, fix -> PATCH
+version_provider     = "pep621"          # read from pyproject.toml [project].version
+version_scheme       = "pep440"
+major_version_zero   = true              # under 1.0.0: feat -> MINOR, fix -> PATCH
 
 # ---- Tags --------------------------------------------------------------------
-tag_format          = "v$version"       # e.g., v0.1.0
-annotated_tag       = true
-tag_message         = "release: v$version"
+tag_format           = "v$version"       # e.g., v0.1.0
+annotated_tag        = true
+tag_message          = "release: v$version"
 
 # ---- Commit message & bump ---------------------------------------------------
-bump_message        = "chore(release): v$current_version → v$new_version"
+bump_message         = "chore(release): v$current_version → v$new_version"
 
 # Files to keep in lockstep with pyproject (pyproject is handled by version_provider)
 version_files = [
   "VERSION",
+  # keep __version__ in sync for libraries and simple runtime introspection
   "src/spectramind/__init__.py:^__version__\\s*=\\s*\"(?P<version>.*)\"",
 ]
 
 # ---- Changelog generation ----------------------------------------------------
 update_changelog_on_bump = true
-changelog_file           = "CHANGELOG.md"
-changelog_incremental    = true
+changelog_file            = "CHANGELOG.md"
+changelog_incremental     = true
 # If you want the first generated notes to start after an initial tag:
-# changelog_start_rev   = "v0.1.0"
+# changelog_start_rev    = "v0.1.0"
 
 # Order sections in CHANGELOG (top to bottom)
 change_type_order = [
   "feat", "fix", "perf", "refactor", "build", "ci", "test", "docs", "style", "chore", "revert"
 ]
-
-# Optional: customize how types map to CHANGELOG titles
-# (Commitizen defaults are reasonable; uncomment to override)
-# [tool.commitizen.change_type_map]
-# feat = "🚀 Added"
-# fix  = "🛠️ Fixed"
-# perf = "🧪 Performance"
-# docs = "📝 Docs"
-# ci   = "🧱 CI"
-# build= "🏗️ Build"
-# test = "✅ Tests"
-# style= "💅 Style"
-# chore= "🧹 Chore"
-# refactor = "♻️ Refactor"
-# revert   = "⏪ Revert"
-
-# ---- (Optional) prereleases/devreleases --------------------------------------
-# prerelease     = true
-# prerelease_tag = "rc"                  # or "a"/"b"
-# devrelease     = false                 # .devN suffixes
 
 # ---- Advisory: message template & allowed types/scopes -----------------------
 [tool.commitizen.customize]
