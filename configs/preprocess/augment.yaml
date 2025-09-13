@@ -1,0 +1,22 @@
+# AUGMENT — train-only physics-friendly augs
+
+enable: true
+when: "train"
+ops:
+  time_shift:
+    enable: true
+    max_shift: 4
+  gauss_noise:
+    enable: true
+    std_fgs1: 0.002
+    std_airs: 0.002
+  dropout_time:
+    enable: false
+    p: 0.02
+  jitter_amp:
+    enable: false
+    scale: 0.01
+guardrails:
+  never_on_eval: true
+  never_on_test: true
+  preserve_fgs1_anchor: true
