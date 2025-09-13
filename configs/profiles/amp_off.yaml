@@ -1,16 +1,33 @@
-# Force FP32 everywhere to rule out AMP-related issues
+# ==============================================================================
+# SpectraMind V50 — Profile: AMP OFF (Force FP32 everywhere)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/amp_off]'
+#
+# Purpose:
+#   - Disables Automatic Mixed Precision (AMP).
+#   - Forces true FP32 for all computations.
+#   - Ensures reproducibility and rules out AMP-related instabilities.
+# ==============================================================================
+
 defaults:
-  - /training/lightning: lightning
-  - /training/precision: precision
+  - /training/lightning: lightning   # base trainer setup
+  - /training/precision: precision   # precision schema/overrides
 
+# Trainer-level overrides (PyTorch Lightning integration)
 trainer:
-  precision: "32-true"
+  precision: "32-true"   # enforce full FP32
+  detect_anomaly: false  # keep safe defaults
+  benchmark: false       # reproducibility > speed
 
+# Precision config (Hydra schema override)
 precision:
-  mode: "32-true"
+  mode: "32-true"        # force true FP32
   tf32:
-    allow: false
-    cudnn_allow: false
+    allow: false         # disable TF32 matrix math
+    cudnn_allow: false   # disable TF32 in cuDNN
 
+# Experiment metadata for filtering/tracking
 experiment:
-  tags: ["profile:amp_off"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "amp-off"}
+  tags: ${oc.env:SM_TAGS, ["profile:amp_off", "precision=fp32", "amp=off"]}
