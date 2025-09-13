@@ -44,25 +44,13 @@ graph TD
 
 ## 📂 Repository Topography
 
-flowchart TD
-  A["Raw inputs<br/>FGS1 + AIRS"] --> B["Calibrate<br/>ADC, dark, flat, trace, phase"]
-  B --> C["Preprocess<br/>tensor packs, binning, splits"]
-  C --> D["Train<br/>dual encoders + physics loss"]
-  D --> E["Predict<br/>μ, σ (283 bins)"]
-  E --> F["Diagnose<br/>FFT, UMAP, SHAP"]
-  E --> G["Submit<br/>CSV + ZIP"]
-
-  %% DVC fan-in
-  B --> H["DVC cache/remotes"]
-  C --> H
-  D --> H
-  E --> H
-  F --> H
-
-  %% Lineage
-  D --> I["Hydra<br/>config snapshots"]
-  E --> J["Run manifests<br/>(JSONL)"]
-
+flowchart LR
+  A["PR / branch"] --> B["CI<br/>lint, tests, smoke"]
+  B -->|pass| C["main"]
+  C --> D["Release CI"]
+  D --> E["Archive<br/>DVC push + tag"]
+  C --> F["Kaggle CI"]
+  F --> G["Submission OK"]
 ```
 
 ---
