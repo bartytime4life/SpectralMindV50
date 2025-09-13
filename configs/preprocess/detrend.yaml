@@ -1,13 +1,94 @@
-# DETREND — remove slow trends in time for each channel
+# DETREND — remove slow trends in time for each channel (upgraded)
 
-mode: "poly"                 # 'poly'|'savgol'|'none'
+# Core selector (kept for backward-compat)
+mode: "poly"                   # 'poly'|'savgol'|'rolling'|'none'
+
+# Polynomial fit (per time-series)
 poly:
-  order: 1
+  order: 1                     # old: poly.order
+  robust:
+    enable: true               # Huber-style robust regression on residuals
+    delta: 1.0                 # Huber delta (stability vs. sensitivity)
+    max_iter: 3
+    tol: 1.0e-5
+
+# Savitzky–Golay smoother (per time-series)
 savgol:
-  window: 31
-  polyorder: 2
+  window: 31                   # old: savgol.window (must be odd)
+  polyorder: 2                 # old: savgol.polyorder  (polyorder < window)
+  # Optional: do a pre-median before SavGol for spike suppression
+  pre_median_window: 0         # 0 disables
+
+# Rolling (local polynomial / moving-average) — new option
+rolling:
+  enable: false
+  window: 129                  # odd; larger -> smoother
+  mode: "mean"                 # 'mean'|'median'
+  pad_mode: "reflect"          # 'reflect'|'edge'|'constant'
+  constant_value: 0.0
+
+# What to detrend
 apply_to:
-  fgs1: true
-  airs: false                # usually detrend AIRS later via model/priors
-preserve_mean: true
-per_sample: true
+  fgs1: true                   # old: apply_to.fgs1
+  airs: false                  # old: apply_to.airs (often discouraged; see ADR-0002/0004)
+
+# Phase / transit guardrails: do not distort astrophysical dips
+phase_guard:
+  enable: true
+  # Exclude a window around transit center from trend fitting (fit on OOT only)
+  # Use whichever metadata you have (sec or fractional phase); code should pick available.
+  exclude:
+    by: "phase"                # 'phase'|'seconds'|'none'
+    half_width_phase: 0.08     # ±width around phase=0 excluded from fit
+    half_width_sec: null
+  # When excluding transit, bridge the excluded region with an interpolation for subtraction
+  bridge_mode: "linear"        # 'linear'|'savgol'|'hold'
+  # Always preserve white-light baseline statistics (FGS1 is anchor)
+  preserve_fgs1_anchor: true
+
+# Pre-cleaning / outliers
+preclean:
+  sigma_clip:
+    enable: true
+    sigma: 5.0                 # clip gross outliers (cosmics, spikes) before fitting trend
+    max_iter: 1
+
+# Mean/variance handling
+preserve_mean: true            # old: preserve_mean  (subtract trend but re-add mean)
+preserve_variance: false       # keep variance unchanged after detrend (rarely needed)
+
+# Per-sample vs batchwise trend
+per_sample: true               # old: per_sample (fit per series)
+batchwise:
+  enable: false                # fit one shared trend across a cohort (e.g., per star_id)
+  group_key: "star_id"
+
+# Masks & NaNs
+mask_handling:
+  treat_masked_as_nan: true    # masked samples not used in fit
+  propagate_mask: true         # keep mask after detrend
+  fill_value: 0.0              # if you must fill for stable ops (never for fit)
+
+# Edges & padding (applies to smoothing-based modes)
+edges:
+  pad_mode: "reflect"          # 'reflect'|'edge'|'constant'
+  constant_value: 0.0
+
+# Export fitted trends for audit/repro
+export_trend:
+  enable: true
+  dir: ${io.features_root}/trend
+  keep_fraction: 0.05          # save a small fraction to limit I/O (0..1); set 1.0 to save all
+  include_meta: true
+
+# Sanity checks after detrend
+validate:
+  # bound fractional change to avoid physics damage (esp. near transit)
+  max_rel_change: 0.25         # ||x_detrended - x|| / ||x|| ≤ this (per series)
+  fail_fast: true
+
+# Debug / tracing
+debug:
+  log_every_n: 0               # 0 disables; otherwise integer
+  dump_examples: 0             # number of series to dump per split (0 disables)
+  dump_dir: ${paths.outputs}/debug/detrend
