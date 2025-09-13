@@ -2,9 +2,10 @@ name: sbom
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, develop ]
     paths:
       - 'requirements*.txt'
+      - '**/requirements*.txt'
       - 'pyproject.toml'
       - 'poetry.lock'
       - '.github/workflows/sbom.yml'
@@ -14,7 +15,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write        # keyless cosign for SBOMs
+  id-token: write        # for keyless cosign
   packages: read         # needed if OCI_IMAGE points to GHCR
 
 concurrency:
@@ -36,12 +37,12 @@ jobs:
     timeout-minutes: 18
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - name: 📥 Checkout repo
+        uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
       # ---------- Python deps SBOM (CycloneDX) ----------
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -52,7 +53,7 @@ jobs:
             **/setup.cfg
             **/setup.py
 
-      - name: Detect Python dependency manifests
+      - name: 🔎 Detect Python dependency manifests
         id: detect
         shell: bash
         run: |
@@ -66,55 +67,67 @@ jobs:
             echo "No Python manifests found."
           fi
 
-      - name: Install CycloneDX tool
-        if: ${{ steps.detect.outputs.has_python == 'true' }}
+      - name: 📦 Install tools (CycloneDX + helpers)
         run: |
           python -m pip install --upgrade pip
-          pip install cyclonedx-bom pipdeptree
+          pip install cyclonedx-bom pipdeptree cyclonedx-cli
 
-      - name: Generate Python SBOM (CycloneDX JSON)
+      - name: 🧪 Generate Python SBOM (CycloneDX JSON)
         if: ${{ steps.detect.outputs.has_python == 'true' }}
         run: |
           mkdir -p reports
+          # Project/resolution mode prefers pyproject/lock/requirements automatically
           cyclonedx-bom -r -o reports/sbom-python.cdx.json || true
           [ -s reports/sbom-python.cdx.json ] && echo "Python SBOM created." || echo "No Python SBOM (no deps detected)."
-          # Dependency tree snapshot for auditors
           pipdeptree --freeze > reports/pipdeptree.txt || true
 
       # ---------- Repo SBOMs (CycloneDX + SPDX) via Syft ----------
-      - name: Install Syft
-        uses: anchore/sbom-action/download-syft@v0.20.5
+      - name: 📥 Install Syft
+        uses: anchore/sbom-action/download-syft@0a56d7a2fa6060d0b4f2b2d1a2dcd71b2f6a3fd1 # v0.20.5 pinned
 
-      - name: Repo SBOM (CycloneDX JSON)
+      - name: 📄 Repo SBOM (CycloneDX JSON)
         run: |
           mkdir -p reports
           syft dir:. -o cyclonedx-json > reports/sbom-repo.cdx.json
           test -s reports/sbom-repo.cdx.json
 
-      - name: Repo SBOM (SPDX JSON)
+      - name: 📄 Repo SBOM (SPDX JSON)
         run: |
           syft dir:. -o spdx-json > reports/sbom-repo.spdx.json
           test -s reports/sbom-repo.spdx.json
 
+      - name: 🔄 CycloneDX → SPDX tag:value (readable snapshot)
+        run: |
+          cyclonedx-cli convert \
+            --input-format json \
+            --output-format spdx-tag-value \
+            --input-file reports/sbom-repo.cdx.json \
+            --output-file reports/sbom-repo.spdx.tag
+
       # ---------- Optional: Container Image SBOM (CycloneDX) ----------
-      - name: Image SBOM (CycloneDX) if OCI_IMAGE is set
+      - name: 🐳 Image SBOM (CycloneDX) if OCI_IMAGE is set
         if: ${{ env.OCI_IMAGE != '' }}
         run: |
           syft "${{ env.OCI_IMAGE }}" -o cyclonedx-json > reports/sbom-image.cdx.json || true
           [ -s reports/sbom-image.cdx.json ] && echo "Image SBOM created." || echo "Image SBOM not generated."
 
       # ---------- Validate & summarize ----------
-      - name: Validate JSON structure (jq)
+      - name: ✅ Validate JSON structure (jq) + CycloneDX validation
         run: |
           set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y jq
           ok=0
           for f in reports/*.json; do
             [ -f "$f" ] || continue
             jq empty "$f" && echo "✅ JSON valid: $f" && ok=1 || echo "❌ Invalid JSON: $f"
+            # Validate CycloneDX docs if applicable
+            case "$f" in
+              *sbom-*.cdx.json) cyclonedx-cli validate --input-file "$f" || true ;;
+            esac
           done
           [ "$ok" = "1" ] || echo "No JSON SBOMs to validate (ok if no deps)."
 
-      - name: Summarize components & licenses
+      - name: 🧾 Summarize components & licenses
         if: always()
         run: |
           echo "### SBOM summary" >> $GITHUB_STEP_SUMMARY
@@ -133,10 +146,10 @@ jobs:
           summarize reports/sbom-image.cdx.json
 
       # ---------- Sign SBOM artifacts (keyless via OIDC) ----------
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.7.0
+      - name: 🔐 Install Cosign
+        uses: sigstore/cosign-installer@1f9f5f017ca3f4f5a82bb2fc77a70b82e40601f1 # v3.7.0 pinned
 
-      - name: Sign SBOM JSONs (produce .sig + .cert)
+      - name: ✍️ Sign SBOM JSONs (produce .sig + .cert)
         env: { COSIGN_EXPERIMENTAL: "true" }
         run: |
           set -euo pipefail
@@ -147,7 +160,7 @@ jobs:
               --output-certificate "$f.cert"
           done
 
-      - name: Verify SBOM signatures (OIDC, repo subject)
+      - name: ✅ Verify SBOM signatures (OIDC, repo subject)
         env: { COSIGN_EXPERIMENTAL: "true" }
         run: |
           set -euo pipefail
@@ -163,7 +176,7 @@ jobs:
           done
 
       # ---------- Optional license allow-list gate ----------
-      - name: Enforce license allow-list (optional)
+      - name: 📜 Enforce license allow-list (optional)
         if: ${{ env.LICENSE_ALLOWLIST != '' }}
         shell: bash
         run: |
@@ -184,14 +197,15 @@ jobs:
           done
           [[ ${bad:-0} -eq 0 ]] || { echo "License gate failed."; exit 1; }
 
-      - name: Upload SBOM bundle
-        uses: actions/upload-artifact@v4
+      - name: 📦 Upload SBOM bundle
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: sbom-bundle
           path: |
             reports/sbom-python.cdx.json
             reports/sbom-repo.cdx.json
             reports/sbom-repo.spdx.json
+            reports/sbom-repo.spdx.tag
             reports/sbom-image.cdx.json
             reports/*.sig
             reports/*.cert
