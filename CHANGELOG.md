@@ -10,7 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Added
 - **Submission Table Schema**
-  - `schemas/submission.tableschema.sample_id.json` — Frictionless Table Schema with `sample_id` as canonical key; `mu_000..mu_282` and `sigma_000..sigma_282` required (with `minimum: 0`); strict `dialect` and `encoding` for reproducible CSV I/O.
+  - `schemas/submission.tableschema.sample_id.json` — Frictionless Table Schema with `sample_id` as canonical key; `mu_000..mu_282` and `sigma_000..sigma_282` required (`sigma_* ≥ 0`); strict `dialect` and `encoding` for reproducible CSV I/O.
   - `schemas/submission_header.csv` — one-line header template enforcing column order for Kaggle submissions.
 - **Preprocess presets** (Hydra)
   - `configs/preprocess/presets/fast.yaml` — CI/Kaggle budget; robust normalize; no detrend/binning/augment; NPZ export.
@@ -92,15 +92,34 @@ Initial public baseline of **SpectraMind V50** with CLI-first pipeline, Hydra co
 [ADR-0004]: docs/adr/0004-dual-encoder-fusion-fgs1-airs.md
 ```
 
-**Optional guardrail (nice-to-have):** add a pre-commit “changelog has release links” check:
+### Guardrail (pre-commit): ensure compare links point to the right repo + exist
+
+Append to `.pre-commit-config.yaml`:
 
 ```yaml
-# .pre-commit-config.yaml (append)
 - repo: local
   hooks:
-    - id: changelog-links
-      name: changelog links present
+    - id: changelog-compare-links
+      name: changelog compare links (owner/repo + Unreleased anchor present)
       language: system
-      entry: bash -c 'grep -qE "^\[Unreleased\]:" CHANGELOG.md && grep -qE "^\[0\.[0-9]+\.[0-9]+\]:" CHANGELOG.md'
+      entry: bash -lc '
+        set -euo pipefail;
+        test -f CHANGELOG.md || exit 0;
+        OWNER_REPO="bartytime4life/SpectralMindV50";
+        grep -qE "^\[Unreleased\]:" CHANGELOG.md;
+        awk -v or="$OWNER_REPO" "
+          /^\[/ && /]: https:\/\/github\.com\// {
+            if (\$0 !~ or) { print \"Wrong repo in link: \" \$0 > \"/dev/stderr\"; exit 1 }
+          }" CHANGELOG.md
+      '
       files: ^CHANGELOG\.md$
+```
+
+### Tip (when you cut v0.1.1)
+
+After tagging `v0.1.1`, add a link:
+
+```
+[0.1.1]: https://github.com/bartytime4life/SpectralMindV50/releases/tag/v0.1.1
+[Unreleased]: https://github.com/bartytime4life/SpectralMindV50/compare/v0.1.1...HEAD
 ```
