@@ -14,10 +14,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spectramind-v50"
-version = "0.1.0"  # kept static; Makefile syncs this from VERSION
+version = "0.1.0"  # Makefile syncs from VERSION; keep static here
 description = "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge pipeline"
 readme = "README.md"
-requires-python = ">=3.11"       # align with setup.cfg (mypy/pytest target = 3.11)
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "SpectraMind V50 Team" }]
 keywords = [
@@ -47,7 +47,7 @@ dependencies = [
   "packaging==24.2",
 
   # Core scientific stack
-  "numpy==1.26.4",         # stable on Kaggle base images
+  "numpy==1.26.4",
   "scipy==1.11.4",
   "pandas==2.2.3",
   "polars==1.5.0",
@@ -60,6 +60,9 @@ dependencies = [
   "seaborn==0.13.2",
   "umap-learn==0.5.6",
   "networkx==3.2.1",
+
+  # Package data loading helpers (py311+: stdlib importlib.resources)
+  "importlib-resources; python_version < '3.9'",
 ]
 
 [project.optional-dependencies]
@@ -79,7 +82,7 @@ analysis = [
   "statsmodels==0.14.2",
   "sympy==1.13.1",
   "numba==0.59.1",
-  "llvmlite==0.42.0",      # pinned pair for numba 0.59.x
+  "llvmlite==0.42.0",
 ]
 
 # Dev/test/typing/linting (tool configs live in setup.cfg).
