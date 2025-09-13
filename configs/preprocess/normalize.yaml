@@ -1,0 +1,19 @@
+# NORMALIZE — scale features and persist stats
+
+strategy: "zscore"           # 'zscore'|'robust'|'minmax'
+zscore:
+  eps: 1.0e-6
+robust:
+  q_low: 0.01
+  q_high: 0.99
+minmax:
+  min: 0.0
+  max: 1.0
+scope:
+  fgs1: "per_channel"        # 'global'|'per_channel'
+  airs: "per_channel"
+export_stats: true
+stats_dir: ${io.features_root}/scaler
+apply_to:
+  fgs1: true
+  airs: true
