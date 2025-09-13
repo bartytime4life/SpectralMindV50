@@ -1,13 +1,13 @@
 # ==============================================================================
 # SpectraMind V50 — Root Config (Hydra-compliant, hardened)
 # ------------------------------------------------------------------------------
-# • Groups live at root; Hydra settings live ONLY under `hydra:`
-# • Env-first knobs via oc.env + oc.decode (correct typing from strings)
+# • Groups live at repo config root; Hydra options ONLY under `hydra:`
+# • Env-first knobs via oc.env + oc.decode (types decoded from strings)
 # • Reproducible run dirs; compact override dirnames for artifact hygiene
 # ==============================================================================
 
 # -----------------------------------------------------------------------------
-# Composition from config groups
+# Composition from config groups (all resolvable under configs/*)
 # -----------------------------------------------------------------------------
 defaults:
   - env: local
@@ -22,7 +22,7 @@ defaults:
 
 # -----------------------------------------------------------------------------
 # Run-level knobs (reproducibility & convenience)
-#   NOTE: oc.decode ensures types are parsed from env strings correctly.
+#   NOTE: oc.decode ensures booleans/ints parse correctly from env.
 # -----------------------------------------------------------------------------
 seed: ${oc.decode:${oc.env:SM_SEED,42}}
 deterministic: ${oc.decode:${oc.env:SM_DETERMINISTIC,true}}   # true|false
@@ -36,16 +36,16 @@ paths:
   artifacts_dir: ${oc.env:SM_ARTIFACTS_DIR,./artifacts}
   cache_dir:     ${oc.env:SM_CACHE_DIR,./.cache}
 
-# Echo of active selections (for logging/diagnostics)
+# Echo of active selections (quick to log/debug)
 selections:
-  env:         local
-  data:        default
-  calib:       default
-  preprocess:  default
-  model:       v50
-  training:    default
-  loss:        composite
-  logger:      jsonl
+  env:         ${defaults.0.env}
+  data:        ${defaults.1.data}
+  calib:       ${defaults.2.calib}
+  preprocess:  ${defaults.3.preprocess}
+  model:       ${defaults.4.model}
+  training:    ${defaults.5.training}
+  loss:        ${defaults.6.loss}
+  logger:      ${defaults.7.logger}
 
 # Canonical names for CLI subcommands (read by app, not Hydra)
 config_name_calibrate:  calibrate
@@ -59,30 +59,38 @@ config_name_submit:     submit
 # Hydra settings (keep all Hydra options in this block)
 # -----------------------------------------------------------------------------
 hydra:
-  # Reproducible, tidy run directories. Include job name and optional tag.
+  # Tag from env (empty by default to avoid stray separators)
+  # Example: export SM_RUN_TAG=_ablation1  → …/spectramind_ablation1
+  # Or choose your own convention (no leading underscore).
+  # If you prefer enforced leading underscore only when set, set SM_RUN_TAG to include it.
+  # e.g., SM_RUN_TAG="_note"
+  # (OmegaConf lacks a simple conditional concat)
+  run_tag: ${oc.env:SM_RUN_TAG,}
+
   run:
-    dir: ${paths.outputs_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.name}${oc.env:SM_RUN_TAG,}
+    dir: ${paths.outputs_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.name}${hydra.run_tag}
   sweep:
-    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.name}${oc.env:SM_RUN_TAG,}
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.name}${hydra.run_tag}
     subdir: ${hydra.job.num}
 
   job:
     chdir: true
     name: spectramind
     config:
-      # Make override dirnames compact & deterministic (nice for CI artifacts)
       override_dirname:
+        # Make override dirnames compact & deterministic (nice for CI artifacts/logs)
         kv_sep: "="
         item_sep: ","
+        # Keep noisy/volatile keys out of the dirname
         exclude_keys: [seed, num_workers, precision]
 
-  # Tighten unknown-key handling (supported in Hydra ≥1.3)
+  # Tighten unknown-key handling (Hydra ≥1.3)
   strict: true
 
-  # Allow disabling .hydra in CI: set HYDRA_OUTPUT_SUBDIR='.'
+  # Allow disabling .hydra in CI: export HYDRA_OUTPUT_SUBDIR='.'
   output_subdir: ${oc.env:HYDRA_OUTPUT_SUBDIR,.hydra}
 
-  # Quieter logging out of the box (can be overridden per-env)
+  # Quieter logging by default (override per env/logger group if needed)
   job_logging:
     version: 1
     disable_existing_loggers: false
@@ -99,12 +107,13 @@ hydra:
       level: INFO
       handlers: [console]
 
-  # (Optional) add packaged config search paths if you ship configs in-wheel
+  # If configs ship inside the wheel at `spectramind/configs/*`,
+  # uncomment to add a packaged search path.
   # searchpath:
   #   - pkg://spectramind.configs
 
 # -----------------------------------------------------------------------------
-# Sanity assertions (cheap, app-read)
+# Sanity assertions (cheap checks your app can enforce early)
 # -----------------------------------------------------------------------------
 assertions:
   paths_exist:
