@@ -1,0 +1,23 @@
+# EXPORT — write features + manifests
+
+format: ${io.format}       # 'npz'|'parquet'
+compress:
+  npz: "zip"               # 'zip'|'none'
+  parquet: "snappy"        # codec name (if parquet)
+paths:
+  root: ${io.features_root}
+  train_dir: ${io.features_root}/train
+  val_dir:   ${io.features_root}/val
+  test_dir:  ${io.features_root}/test
+manifest:
+  enable: true
+  filename: manifest.json
+  include:
+    - preset
+    - seed
+    - shapes
+    - normalize.strategy
+    - normalize.scope
+    - runtime.num_workers
+flush_secs: 5
+overwrite: ${io.overwrite}
