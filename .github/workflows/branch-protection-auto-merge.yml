@@ -55,8 +55,8 @@ on:
         default: 'true'
 
 permissions:
-  contents: write          # needed to enable native auto-merge & branch updates
-  pull-requests: write     # needed to comment / manage PR
+  contents: write          # enable native auto-merge & branch updates
+  pull-requests: write     # comment / manage PR
   checks: read
   statuses: read
 
@@ -115,11 +115,17 @@ jobs:
             const toList = (s) => (s ?? '').split(',').map(x => x.trim()).filter(Boolean);
             const isTrue = (s, d='false') => ((s ?? d).toString().toLowerCase() === 'true');
             const isBot = (u) => (u?.type || '').toLowerCase() === 'bot' || (u?.login || '').toLowerCase().endsWith('[bot]');
-            const globToRegex = (g) =>
-              new RegExp('^' + g
-                .replace(/[.+^${}()|[\\]\\\\]/g,'\\$&')
-                .replace(/\\\*\\\*/g, '.*')
-                .replace(/\\\*/g,'[^/]*') + '$', 'i');
+            function globToRegex(glob) {
+              if (!glob || glob === '*') return /.*/i;
+              const ESC = /[.+^${}()|[\]\\]/g;
+              const s = glob
+                .replace(ESC, '\\$&')
+                .replace(/\*\*/g, '§§DOUBLESTAR§§')
+                .replace(/\*/g, '[^/]*')
+                .replace(/§§DOUBLESTAR§§/g, '.*')
+                .replace(/\?/g, '.');
+              return new RegExp('^' + s + '$', 'i');
+            }
 
             // ---------- params ----------
             const requiredLabels = toList(`${{ steps.params.outputs.required_labels }}`);
@@ -169,7 +175,6 @@ jobs:
                     ? requiredLabels.every(l => labels.includes(l))
                     : requiredLabels.some(l => labels.includes(l)));
             if (!hasRequired) reasons.push(`Missing required label(s) (${labelMode.toUpperCase()}): ${requiredLabels.join(', ')}`);
-
             if (vetoLabels.length && vetoLabels.some(l => labels.includes(l))) {
               reasons.push(`Veto label present among: ${vetoLabels.join(', ')}`);
             }
@@ -233,7 +238,6 @@ jobs:
               if (prGql) {
                 const unresolved = (prGql.reviewThreads?.nodes || []).filter(t => t && t.isResolved === false).length;
                 if (unresolved > 0) reasons.push(`There are ${unresolved} unresolved review thread(s).`);
-                // reviewDecision can be APPROVED / REVIEW_REQUIRED / CHANGES_REQUESTED
                 const rd = prGql.reviewDecision || 'UNKNOWN';
                 if (rd === 'CHANGES_REQUESTED' || rd === 'REVIEW_REQUIRED') {
                   reasons.push(`Review decision: ${rd.replace('_',' ')}.`);
@@ -242,7 +246,6 @@ jobs:
             }
 
             // Up-to-date / mergeable state
-            // Values include: clean, has_hooks, dirty, unknown, unstable, blocked, behind
             if (requireUpToDate && pr.mergeable_state === 'behind') reasons.push('Branch is behind base; update required.');
             if (['dirty','blocked'].includes(pr.mergeable_state || '')) reasons.push(`Mergeable state: ${pr.mergeable_state}`);
 
