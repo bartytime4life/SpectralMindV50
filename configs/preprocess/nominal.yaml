@@ -1,20 +1,37 @@
+# ==============================================================================
 # SpectraMind V50 — Preprocess preset: nominal (balanced default)
+# File: configs/preprocess/presets/nominal.yaml
+# ------------------------------------------------------------------------------
+# Goals:
+# • Full-fidelity preprocessing for research & day-to-day training
+# • Enables detrend/binning/augment; robust normalize; safe defaults
+# • Hydra/Kaggle/CI friendly with env overrides; reproducible exports
+# ==============================================================================
 
 preset: nominal
+version: 1
 seed: 42
 
+# ------------------------------------------------------------------------------
+# I/O — delegated to active data profile (configs/data/*.yaml)
+# ------------------------------------------------------------------------------
 io:
   calibrated_root: ${data.exports.calibrated_root}
   features_root:   ${data.exports.features_root}
   overwrite: false
-  format: "npz"              # 'npz' | 'parquet'
+  format: "npz"                      # 'npz' | 'parquet'
 
+# ------------------------------------------------------------------------------
+# Runtime — sensible workstation defaults; overridable via env
+# ------------------------------------------------------------------------------
 runtime:
-  num_workers: 4
-  pin_memory: true
+  num_workers: ${oc.env:SM_NUM_WORKERS,4}
+  pin_memory:  ${oc.env:SM_PIN_MEMORY,true}
   log_every_n: 100
 
-# Stage selection
+# ------------------------------------------------------------------------------
+# Stage selection — full pipeline
+# ------------------------------------------------------------------------------
 enable:
   load: true
   mask: true
@@ -24,10 +41,12 @@ enable:
   window: true
   pack: true
   tokenize: true
-  augment: true             # train-only automatically enforced in code
+  augment: true                      # train-only enforced in code
   export: true
 
-# Stage configs
+# ------------------------------------------------------------------------------
+# Method routing — centralized in preprocess.method.*
+# ------------------------------------------------------------------------------
 load:        ${preprocess.method.load}
 mask:        ${preprocess.method.mask}
 detrend:     ${preprocess.method.detrend}
@@ -39,12 +58,119 @@ tokenize:    ${preprocess.method.tokenize}
 augment:     ${preprocess.method.augment}
 export:      ${preprocess.method.export}
 
-# Global shapes
+# ------------------------------------------------------------------------------
+# Global shapes — nominal sequence & spectral bins
+# ------------------------------------------------------------------------------
 shapes:
-  time_len: 512           # nominal T (after windowing)
-  stride:   512           # non-overlapping by default
+  time_len: 512
+  stride:   512                      # non-overlapping by default
   bins: ${data.channels.airs.bins}
 
-# Split policy (uses data.splits)
+# ------------------------------------------------------------------------------
+# Sensible defaults for this preset (kept overridable by profiles)
+# ------------------------------------------------------------------------------
+detrend:
+  mode: "poly"                       # 'poly'|'savgol'|'none'
+  poly:
+    order: 1
+  savgol:
+    window: 31
+    polyorder: 2
+  apply_to:
+    fgs1: true
+    airs: false                      # AIRS handled by normalize/model
+
+normalize:
+  strategy: "robust"                 # median/MAD
+  scope: "per-channel"
+  clip:
+    enable: true
+    low_q: 0.25
+    high_q: 99.75
+  eps: 1.0e-8
+
+binning:
+  # Use calibration alignment when available; else safe fixed bin map
+  strategy: "calib_or_fixed"
+  fixed:
+    bins: ${shapes.bins}            # honors AIRS bins from data profile
+  fgs1:
+    method: "phase_aware_sum"       # integrates within science windows
+    require_trace: true
+
+window:
+  kind: "hann"                       # smoother than 'rect' for nominal runs
+  size: ${shapes.time_len}
+  hop:  ${shapes.stride}
+  center: false
+  pad: false
+
+pack:
+  layout: "fgs1+airs"
+  dtype: "float32"
+  order: "C"
+  squeeze_time: false
+
+tokenize:
+  scheme: "none"                     # keep continuous tensors by default
+
+augment:
+  enable: ${enable.augment}
+  train_only: true                   # guard in runner; echoed here for clarity
+  # Light, physics-safe defaults
+  noise:
+    prob: 0.25
+    std: 0.01
+  jitter_time:
+    prob: 0.15
+    max_shift: 2                     # steps
+  dropout_time:
+    prob: 0.10
+    max_span: 6
+  spectral_smooth:
+    prob: 0.20
+    kernel: 5                        # bins (odd)
+
+# ------------------------------------------------------------------------------
+# Export — compact artifacts + provenance manifest
+# ------------------------------------------------------------------------------
+export:
+  format: ${io.format}
+  compress:
+    npz: "zip"
+    parquet: "snappy"
+  paths:
+    root: ${io.features_root}
+    train_dir: ${io.features_root}/train
+    val_dir:   ${io.features_root}/val
+    test_dir:  ${io.features_root}/test
+  manifest:
+    enable: true
+    filename: manifest.json
+    include:
+      - preset
+      - version
+      - seed
+      - shapes
+      - detrend.mode
+      - normalize.strategy
+      - normalize.scope
+      - binning.strategy
+      - runtime.num_workers
+  flush_secs: 5
+  overwrite: ${io.overwrite}
+
+# ------------------------------------------------------------------------------
+# Split policy — delegated to data profile
+# ------------------------------------------------------------------------------
 splits:
-  source: ${data.splits.config}   # or inline settings from data profile
+  source: ${data.splits.config}
+
+# ------------------------------------------------------------------------------
+# Safety checks — catch pathologies early
+# ------------------------------------------------------------------------------
+assertions:
+  require_calibrated_root: true
+  require_features_root:   true
+  expect_bins: ${shapes.bins}
+  fail_fast: true
