@@ -21,7 +21,7 @@ concurrency:
 env:
   # Optional failure gate: none | low | medium | high | critical
   TRIVY_FAIL_ON: "none"
-  # NOTE: We keep Trivy action on a tag here. If you want a SHA pin, say the word and I'll lock it.
+  # Using a tag for Trivy action; say the word and I’ll lock a SHA.
   TRIVY_ACTION_VERSION: "0.33.1"
 
 jobs:
@@ -98,6 +98,9 @@ jobs:
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
+
+      - name: 🧰 Install jq for summary
+        run: sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: 📝 Summarize results
         if: always()
@@ -243,6 +246,7 @@ jobs:
         if: always() && steps.detect.outputs.found == 'true'
         shell: bash
         run: |
+          sudo apt-get update -y && sudo apt-get install -y jq
           echo "### Trivy image summary" >> $GITHUB_STEP_SUMMARY
           read -r c h m l < <(jq -r '
             [ .runs[].results[]? |
