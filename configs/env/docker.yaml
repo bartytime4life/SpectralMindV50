@@ -1,0 +1,58 @@
+# SpectraMind V50 — Env: docker (containerized runners)
+name: docker
+
+paths:
+  repo: ${oc.env:SM_REPO_ROOT,${hydra:runtime.cwd}}
+  data: ${oc.env:SM_DATA_ROOT,${paths.repo}/data}
+  outputs: ${oc.env:SM_OUTPUTS_ROOT,${paths.repo}/outputs}
+  artifacts: ${oc.env:SM_ARTIFACTS_ROOT,${paths.repo}/artifacts}
+  logs: ${oc.env:SM_LOGS_ROOT,${paths.repo}/logs}
+  configs: ${paths.repo}/configs
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: ${paths.outputs}/runs/${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${paths.outputs}/multiruns/${now:%Y%m%d_%H%M%S}
+  verbose: false
+
+device:
+  prefer_gpu: ${oc.env:SM_GPU,True}
+  gpu_index: ${oc.env:SM_GPU_INDEX,0}
+  allow_tf32: true
+  precision: ${oc.env:SM_PRECISION,"32-true"}
+  deterministic: ${oc.env:SM_DETERMINISTIC,False}
+  benchmark: ${oc.env:SM_BENCHMARK,True}
+  threads:
+    omp_num_threads: ${oc.env:OMP_NUM_THREADS,0}
+    mkl_num_threads: ${oc.env:MKL_NUM_THREADS,0}
+    intraop: ${oc.env:SM_TORCH_INTRAOP,0}
+    interop: ${oc.env:SM_TORCH_INTEROP,0}
+  matmul:
+    precision: ${oc.env:SM_MATMUL_PRECISION,"high"}
+  cudnn:
+    workspace_limit_mb: ${oc.env:SM_CUDNN_WS_MB,512}
+
+runtime:
+  num_workers: ${oc.env:SM_NUM_WORKERS,4}
+  pin_memory: ${oc.env:SM_PIN_MEMORY,True}
+  persistent_workers: ${oc.env:SM_PERSISTENT_WORKERS,True}
+  prefetch_factor: ${oc.env:SM_PREFETCH_FACTOR,2}
+  timeout_sec: ${oc.env:SM_TIMEOUT_SEC,0}
+  rich:
+    color: ${oc.env:SM_RICH_COLOR,True}
+    timestamp: true
+
+repro:
+  seed: ${oc.env:SM_SEED,42}
+  enable_seed_everything: true
+  extra_hashes: ${oc.env:SM_EXTRA_HASHES,False}
+
+dvc:
+  enabled: ${oc.env:SM_DVC,True}
+  remote_ok: ${oc.env:SM_DVC_REMOTE,False}
+cache:
+  enable: ${oc.env:SM_CACHE,True}
+  dir: ${paths.data}/processed/cache
