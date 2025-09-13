@@ -1,48 +1,70 @@
 # SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge
 
-Mission-grade, **CLI-first**, **Hydra-driven**, **DVC-tracked**, **Kaggle-ready** repo.
-Physics-informed, neuro-symbolic pipeline for **multi-sensor fusion** (FGS1 photometry + AIRS spectroscopy) producing calibrated **μ/σ** over **283 spectral bins** (GLL-scored).
+Mission-grade, **CLI-first**, **Hydra-driven**, **DVC-tracked**, **Kaggle-ready** repo.  
+Physics-informed, neuro-symbolic pipeline for **multi-sensor fusion** (FGS1 photometry + AIRS spectroscopy) producing calibrated **μ/σ** over **283 spectral bins** (scored by Gaussian Log-Likelihood, GLL).
 
 ---
 
 ## ✨ Key Features
 
-* **Dual-channel encoders**
+- **Dual-channel encoders**
+  - FGS1 time-series → SSM/Mamba
+  - AIRS spectra → CNN/GNN
+  - Late fusion → **heteroscedastic** decoder (per-bin μ, σ)
 
-  * FGS1 time-series → SSM/Mamba
-  * AIRS spectra → CNN/GNN
-  * Late fusion → **heteroscedastic** decoder (per-bin μ, σ)
+- **Symbolic + physics constraints**  
+  Smoothness, non-negativity, and molecular band priors via a rules DSL.
 
-* **Symbolic + physics constraints**
-  Smoothness, non-negativity, molecular band priors via a rules DSL.
+- **Uncertainty calibration**  
+  Post-train temperature scaling for σ (validated on `val`).
 
-* **Uncertainty calibration**
-  Post-train temperature scaling on σ (val split).
+- **Diagnostics**  
+  Inject-and-recover tests (e.g., CO₂ bands, white-light drift) + HTML dashboard.
 
-* **Diagnostics**
-  Inject-and-recover tests (e.g., CO₂ bands, white-light drift) with an HTML dashboard.
+- **Reproducibility**  
+  Hydra snapshots, DVC lineage, deterministic seeds, artifact checksums.
 
-* **Reproducibility**
-  Hydra snapshots, DVC lineage, deterministic kernels, artifact checksums.
+- **Kaggle-safe**  
+  Slim deps, **no internet**, **≤9h** guardrails.
 
-* **Kaggle-safe**
-  Slim deps, **no internet**, ≤ **9h** wallclock guardrails.
+---
+
+## 🧩 Pipeline (high level)
+
+```mermaid
+flowchart LR
+  R[Raw inputs] --> C[Calibrate]
+  C --> P[Preprocess]
+  P --> T[Train]
+  T --> I[Predict]
+  I --> D[Diagnose]
+  I --> S[Submit]
+  classDef n fill:#0f766e,color:#fff,stroke:#0f766e,stroke-width:1px
+  class R,C,P,T,I,D,S n
+````
+
+* **Calibrate**: ADC/dark/flat/trace/phase/photometry
+* **Preprocess**: mask → detrend → normalize → bin/window → pack → tokenize → export
+* **Train**: dual encoders + fusion decoder (μ, σ)
+* **Predict**: submission-ready μ/σ
+* **Diagnose**: metrics, plots, HTML report; σ calibration
+* **Submit**: schema-checked ZIP + manifest
 
 ---
 
 ## 📦 Requirements
 
-* Python **3.10+**
-* Git, DVC (with a remote configured), Make
-* GPU recommended (CUDA 11.x+)
+* Python **3.11+**
+* Git, DVC (remote configured), Make
+* NVIDIA GPU recommended (CUDA 11.x+)
 
 ```bash
-# Dev environment (recommended)
-make dev            # installs dev deps, pre-commit, pytest
-pre-commit install  # optional, enable hooks on commit
+# Dev environment
+make dev            # venv + deps + hooks
+pre-commit install  # optional (enable hooks on commit)
 ```
 
-> Tip: For Kaggle notebooks, use `requirements-kaggle.txt` only.
+> Kaggle: use only `requirements-kaggle.txt` (no extras). Outputs write to `/kaggle/working`.
 
 ---
 
@@ -50,24 +72,25 @@ pre-commit install  # optional, enable hooks on commit
 
 ```
 .
-├─ configs/              # Hydra configs (env, data, model, loss, train, search, submit)
-├─ data/                 # DVC-tracked (raw/interim/processed)
-├─ artifacts/            # checkpoints, reports, predictions, config snapshots
+├─ configs/              # Hydra configs: env, data, preprocess, model, training, loss, logger
+├─ data/                 # DVC-tracked: raw/ calibrated/ processed/
+├─ artifacts/            # ckpt, predictions, diagnostics, scaler stats, manifests
 ├─ dist/                 # packaged submissions
-├─ scripts/              # helper scripts (validate, render_diagrams, submit, etc.)
-├─ src/                  # spectramind package (cli/, models/, pipeline/, diagnostics/)
-└─ dvc.yaml              # calibrate → preprocess → train → predict → diagnose → submit
+├─ scripts/              # helpers (render_diagrams, validate_submission, etc.)
+├─ src/                  # spectramind/ (cli, models, pipeline, diagnostics, validators)
+├─ dvc.yaml              # calibrate → preprocess → train → predict → diagnose → submit
+└─ Makefile              # mission-grade targets (incl. preset shortcuts)
 ```
 
 ---
 
 ## 🚀 Quickstart
 
-### 0) DVC remote
+### 0) Configure DVC remote
 
 ```bash
-# Example: local (adjust to your infra)
-dvc remote add -d localcache path/to/cache
+# Example local cache (adjust for S3/GDrive/…)
+dvc remote add -d localcache ./dvc-remote
 dvc push
 ```
 
@@ -75,81 +98,84 @@ dvc push
 
 ```bash
 dvc repro
-# Runs: calibrate → preprocess → train → predict → diagnose → (optional) submit
+# Runs: calibrate → preprocess → train → predict → diagnose (and you can run submit)
 ```
 
-### 2) Stage-by-stage (CLI)
+### 2) Preprocess presets (Hydra)
 
 ```bash
-spectramind calibrate --config-name calibrate +env=local +calib=nominal
-spectramind train     --config-name train     +model=v50 +data=kaggle
-spectramind predict   --config-name predict   ckpt=artifacts/checkpoints/model.ckpt
-spectramind diagnose report --out artifacts/reports/diagnostics_dashboard.html
-spectramind submit    --config-name submit    inputs.pred_path=artifacts/predictions/mu.csv
+# CI/Kaggle budget
+make preprocess.fast    SPLIT=train
+# Balanced default
+make preprocess.nominal SPLIT=val
+# Research-grade (Parquet+Zstd, overlap, stricter checks)
+make preprocess.strict  SPLIT=test
 ```
 
-### 3) Hydra overrides & sweeps
+### 3) Stage-by-stage (CLI)
+
+```bash
+spectramind calibrate  --config-name calibrate
+spectramind preprocess --config-name preprocess +defaults='[/preprocess/presets/nominal]' split=train
+spectramind train      --config-name train     +model=v50
+spectramind predict    --config-name predict   ckpt=artifacts/ckpt.pt
+spectramind diagnose   --config-name diagnose  inputs.pred_path=artifacts/predictions/preds.csv
+spectramind submit     --config-name submit    inputs.pred_path=artifacts/predictions/preds.csv
+```
+
+### 4) Hydra overrides & sweeps
 
 ```bash
 # One run with overrides
 spectramind train --config-name train \
-  +env=local +data=kaggle +model=v50 \
+  +env=local +data=default +model=v50 \
   loss.smoothness.lam=5e-4 loss.symbolic.enabled=true
 
-# Grid sweep (search defs in configs/search/)
+# Grid sweep (see configs/search/)
 spectramind train --multirun +search=encoder_depth,bins
 ```
 
-### 4) Uncertainty calibration (σ)
+### 5) Uncertainty calibration (σ)
 
 ```bash
-spectramind diagnose calibration \
-  --dataset val \
-  --ckpt artifacts/checkpoints/model.ckpt
-```
-
-### 5) Validate submission (CI gate)
-
-```bash
-bash scripts/validate_submission.sh dist/submission.json
+spectramind diagnose calibration --dataset val --ckpt artifacts/ckpt.pt
 ```
 
 ---
 
-## 🔄 Pipeline Stages
+## 🔄 DVC Stages & Outputs
 
-| Stage      | CLI                     | DVC out                                        |
-| ---------- | ----------------------- | ---------------------------------------------- |
-| calibrate  | `spectramind calibrate` | `data/interim/calibrated/`                     |
-| preprocess | *(internal)*            | `data/processed/tensors/`                      |
-| train      | `spectramind train`     | `artifacts/checkpoints/model.ckpt`             |
-| predict    | `spectramind predict`   | `artifacts/predictions/{mu.csv,sigma.csv}`     |
-| diagnose   | `spectramind diagnose`  | `artifacts/reports/diagnostics_dashboard.html` |
-| submit     | `spectramind submit`    | `dist/submission.{zip,json,csv}`               |
+| Stage      | CLI                      | DVC output                                     |
+| ---------- | ------------------------ | ---------------------------------------------- |
+| calibrate  | `spectramind calibrate`  | `data/calibrated/` (persist)                   |
+| preprocess | `spectramind preprocess` | `data/processed/` (persist)                    |
+| train      | `spectramind train`      | `artifacts/ckpt.pt` + `artifacts/metrics.json` |
+| predict    | `spectramind predict`    | `artifacts/predictions/preds.csv`              |
+| diagnose   | `spectramind diagnose`   | `artifacts/diagnostics/report.html` (+ plots)  |
+| submit     | `spectramind submit`     | `dist/submission.zip`                          |
 
 ---
 
 ## ⚙️ Configuration (Hydra)
 
-All runtime parameters live in `configs/` (env, data, model, training, loss, logger, search).
+* Root config: `configs/config.yaml` (groups at root, Hydra settings in `hydra:`).
+* Presets: `configs/preprocess/presets/{fast,nominal,strict}.yaml`
+* Methods: `configs/preprocess/method/*.yaml` (load, mask, detrend, normalize, binning, window, pack, tokenize, export)
 
 ```bash
-# Compose defaults + overrides
-spectramind train --config-name train +env=kaggle +data=kaggle +model=v50
-# Snapshot saved at: artifacts/configs/run.yaml
+spectramind train --config-name train +env=local +data=default +model=v50
+# Snapshot at: artifacts/configs/run.yaml
 ```
 
-**Determinism:** seeds, cudnn flags, and rank-safe samplers are set by default in `configs/env/*`.
+**Determinism:** seeds, cudnn flags, and rank-safe samplers are set in `configs/env/*`.
 
 ---
 
-## 📐 Losses & Physics Constraints
-
-Enable/scale via Hydra (`configs/loss/constraints.yaml`):
+## 📐 Losses & Physics Constraints (example)
 
 ```yaml
 loss:
-  smoothness: {enabled: true, lam: 1e-3}
+  smoothness: { enabled: true, lam: 1e-3 }
   band_priors:
     enabled: true
     bands: [[130,145],[190,205]]   # index ranges
@@ -157,90 +183,80 @@ loss:
   symbolic:
     enabled: true
     rules:
-      - {name: nonneg_mu,     target: mu,    expr: 'x >= 0',   weight: 1.0}
-      - {name: bounded_sigma, target: sigma, expr: 'abs(x) < 5.0', weight: 0.1}
+      - { name: nonneg_mu,     target: mu,    expr: 'x >= 0',        weight: 1.0 }
+      - { name: bounded_sigma, target: sigma, expr: 'abs(x) < 5.0',  weight: 0.1 }
 ```
 
 ---
 
 ## 🔬 Diagnostics
 
-* **Inject** synthetic signals (e.g. CO₂ bands, white-light drift).
-* **Recover** : verify detection/neutralization in predictions.
-* **Report** : HTML dashboard → `artifacts/reports/diagnostics_dashboard.html`.
+* **Inject** synthetic signals; **recover** expected effects.
+* **Report**: `artifacts/diagnostics/report.html`.
 
 ```bash
-spectramind diagnose report --out artifacts/reports/diagnostics_dashboard.html
-pytest -q tests/diagnostics
+spectramind diagnose report --out artifacts/diagnostics/report.html
+pytest -q -m "not slow"
 ```
 
 ---
 
 ## 🧪 Metric & Notes
 
-* Competition metric: **Gaussian Log-Likelihood (GLL)** on 283 bins (FGS1 “white-light” bin carries high weight).
-* Penalizes over-confident σ → **calibrate** predicted uncertainties (`diagnose calibration`).
+* Competition metric: **GLL** over 283 bins. Over-confident σ is penalized → tune/calibrate σ.
+* FGS1 “white-light” handling is pivotal; verify pipeline settings in preprocess configs.
 
 ---
 
 ## 📦 Submission
 
-Schema-checked and reproducible packaging:
+Schema-checked, reproducible packaging with manifest:
 
 ```bash
 spectramind submit --config-name submit \
-  inputs.pred_path=artifacts/predictions/mu.csv \
-  inputs.sigma_path=artifacts/predictions/sigma.csv
+  inputs.pred_path=artifacts/predictions/preds.csv
 bash scripts/validate_submission.sh dist/submission.json
 ```
-
-**Bundle includes** config snapshot, checksums, and manifest for audit.
-
----
-
-## 🧭 Principles
-
-* **Reproducible** : seeds, Hydra snapshots, DVC lineage, checksums.
-* **Physics-aware** : smoothness, non-negativity, band coherence, symbolic rules.
-* **Kaggle-ready** : slim deps, ≤ 9h runtime, no internet.
-* **Auditable** : JSONL logs, SBOM in CI, schema-valid submissions.
 
 ---
 
 ## 🛠️ Make Targets
 
 ```bash
-make dev     # install dev deps
-make test    # pytest
-make bench   # quick ablation / nightly CI
-make docs    # MkDocs build
-make clean   # clear caches/artifacts
+make dev            # venv + dev deps + pre-commit
+make check          # precommit + lint + type + tests
+make preprocess.*   # fast | nominal | strict (SPLIT, OVERRIDES supported)
+make docs           # MkDocs (renders Mermaid first if scripts present)
+make scan           # SBOM + pip-audit + linters (local, non-failing)
+make clean          # caches/builds
 ```
+
+> Preset shortcuts accept `OVERRIDES="k=v k=v"` for Hydra keys:
+> `make preprocess.nominal SPLIT=train OVERRIDES="io.format=npz preprocess/window.center_transit=false"`
 
 ---
 
 ## 📝 Kaggle Notes
 
-* Always set `+env=kaggle +data=kaggle`; outputs write to `/kaggle/working`.
-* Use `requirements-kaggle.txt` (no extras).
-* Prefer `spectramind predict` + light diagnostics; disable heavy FFT/UMAP in competition runs.
-* Respect **9h GPU** wallclock / **30 GB** RAM.
+* Use `+env=kaggle +data=kaggle` profiles; outputs write to `/kaggle/working`.
+* Prefer `spectramind predict` + light diagnostics; turn off heavy FFT/UMAP in comp runs.
+* Respect **≤9h GPU** wallclock and **≤30 GB** RAM.
 
 ---
 
 ## 🧯 Troubleshooting
 
-* **OOM during train** → reduce `data.loader.num_workers`, batch size, or enable gradient checkpointing in `configs/model/*`.
-* **DVC missing remote** → run `dvc remote list` and `dvc remote add -d <name> <url>`; then `dvc push`.
-* **Non-determinism** → set `+env=<profile>` that forces cudnn deterministic kernels; ensure cudatoolkit matches driver.
-* **Slow GLL** → verify σ calibration and disable over-tight priors; check FGS1 handling.
+* **OOM during train** → reduce workers, batch size; enable grad-checkpointing in model config.
+* **DVC remote missing** → `dvc remote list`, then `dvc remote add -d <name> <url>` and `dvc push`.
+* **Drift/instability** → use `preprocess/strict.yaml` and check `normalize` stats + `window` phase alignment.
+* **σ too sharp** → run `diagnose calibration` or relax symbolic bounds.
 
 ---
 
 ## 🤝 Contributing
 
-* PRs welcome. Run `make test` locally and keep docs/code in sync.
-* Style: `ruff + black`, type hints where public.
+* PRs welcome. Run `make check` locally; keep docs and configs in sync.
+* Style: Ruff + Black, NumPy docstrings, type hints on public APIs.
 * Add/update Hydra schemas + example configs for new features.
 
 ---
@@ -248,7 +264,7 @@ make clean   # clear caches/artifacts
 ## 🔐 Security
 
 * No dynamic code exec in configs.
-* All submissions validated via JSON schema + checksum manifest.
+* Submissions validated by JSON schema + checksum manifest.
 * SBOM generated in CI; pinned deps in `requirements*.txt`.
 
 ---
@@ -259,8 +275,8 @@ MIT (see `LICENSE`).
 
 ---
 
-## 🗺️ Acknowledgements
+## 🙏 Acknowledgements
 
-Thanks to the Ariel community and the broader OSS ecosystem (Hydra, DVC, Typer, PyTorch) that makes mission-grade research pipelines possible.
+Thanks to the Ariel community and the OSS stack (Hydra, DVC, Typer, PyTorch).
 
----
+```
