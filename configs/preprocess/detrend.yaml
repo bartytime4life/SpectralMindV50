@@ -1,0 +1,13 @@
+# DETREND — remove slow trends in time for each channel
+
+mode: "poly"                 # 'poly'|'savgol'|'none'
+poly:
+  order: 1
+savgol:
+  window: 31
+  polyorder: 2
+apply_to:
+  fgs1: true
+  airs: false                # usually detrend AIRS later via model/priors
+preserve_mean: true
+per_sample: true
