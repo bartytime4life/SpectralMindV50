@@ -1,7 +1,3 @@
-Here’s a hardened, cross-wired **`CODE_OF_CONDUCT.md`** you can drop at the repo root. It keeps the Contributor Covenant core (v2.1) and adds SpectraMind-specific guardrails for **reproducibility, competition fairness, Kaggle safety, and security**. It also links to your **SECURITY.md** and **CONTRIBUTING.md** so the whole governance mesh is connected.
-
----
-
 # 🌌 SpectraMind V50 — Code of Conduct
 
 This project follows the **Contributor Covenant Code of Conduct v2.1**, extended with principles of **scientific reproducibility**, **mission-grade integrity**, and **competition fairness**.
