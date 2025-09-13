@@ -4,7 +4,7 @@
 # Stages: calibrate → preprocess → train → predict → diagnose → submit
 # Notes:
 #   • Use `params:` to trigger stage reproduction; avoid ${params.*} in `cmd`.
-#   • Switch profiles with DVC Experiments (Hydra overrides), e.g.:
+#   • Switch profiles with DVC Experiments / Hydra overrides, e.g.:
 #       dvc exp run \
 #         -S hydra.env=kaggle \
 #         -S hydra.model=v50 \
@@ -32,7 +32,7 @@ stages:
         persist: true
 
   preprocess:
-    desc: "CALIBRATED → PROCESSED; detrend/normalize/bin/features"
+    desc: "CALIBRATED → PROCESSED; mask/detrend/normalize/bin/window/pack/tokenize/export"
     cmd: >
       spectramind preprocess run data/calibrated
     deps:
@@ -65,11 +65,9 @@ stages:
       - hydra.loss
       - hydra.logger
     outs:
-      # Checkpointed model artifact for iterative/exp runs
-      - path: artifacts/ckpt.pt
+      - path: artifacts/ckpt.pt        # checkpointed model for iterative runs
         checkpoint: true
-      # Keep a lightweight metrics JSON under cache for diffs
-      - path: artifacts/metrics.json
+      - path: artifacts/metrics.json   # tiny metrics blob (kept in cache for diffs)
         cache: true
     outs_no_cache:
       - logs/train
@@ -77,10 +75,10 @@ stages:
       - artifacts/metrics.json:
           type: json
           xpath: .
-          cache: false  # metrics are tracked by DVC; no need to cache
+          cache: false   # metrics tracked by DVC; no need to also cache
 
   predict:
-    desc: "Run inference on processed data → predictions CSV"
+    desc: "Inference on processed data → predictions CSV"
     cmd: >
       spectramind predict run artifacts/ckpt.pt --out-csv artifacts/predictions/preds.csv
     deps:
@@ -121,7 +119,7 @@ stages:
           type: json
           xpath: .
           cache: false
-    # Optional live logging (DVC Studio/HTML). Enable in CLI as needed:
+    # Optional DVC live logging (enable in CLI if desired)
     # live:
     #   artifacts/diagnostics/live:
     #     summary: true
@@ -138,7 +136,7 @@ stages:
     outs:
       - path: dist/submission.zip
         cache: true
-    # If you want this to always rebuild (e.g., embeds timestamps), uncomment:
+    # If the bundle embeds timestamps and you want forced rebuilds:
     # always_changed: true
 
   package-precalibrated:
