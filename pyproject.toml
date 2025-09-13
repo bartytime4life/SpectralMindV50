@@ -17,15 +17,18 @@ name = "spectramind-v50"
 version = "0.1.0"  # kept static; Makefile syncs this from VERSION
 description = "SpectraMind V50 — NeurIPS 2025 Ariel Data Challenge pipeline"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"       # align with setup.cfg (mypy/pytest target = 3.11)
 license = { file = "LICENSE" }
 authors = [{ name = "SpectraMind V50 Team" }]
+keywords = [
+  "exoplanet", "spectroscopy", "Ariel", "machine-learning",
+  "pytorch", "hydra", "dvc", "kaggle", "neuro-symbolic"
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering",
@@ -44,7 +47,7 @@ dependencies = [
   "packaging==24.2",
 
   # Core scientific stack
-  "numpy==1.26.4",
+  "numpy==1.26.4",         # stable on Kaggle base images
   "scipy==1.11.4",
   "pandas==2.2.3",
   "polars==1.5.0",
@@ -52,7 +55,7 @@ dependencies = [
 
   # Logging / progress / viz
   "tqdm==4.66.4",
-  "rich==13.7.1",   # DVC<4 requires rich<14 in mixed envs
+  "rich==13.7.1",          # DVC<4 prefers rich<14 in mixed envs
   "matplotlib==3.8.4",
   "seaborn==0.13.2",
   "umap-learn==0.5.6",
@@ -60,7 +63,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# GPU stack: install on local/dev or CI. In Kaggle, prefer the boot script (wheels tied to CUDA).
+# GPU stack: install on local/dev or CI. On Kaggle, prefer the boot script.
 gpu = [
   "torch==2.2.2",
   "torchvision==0.17.2",
@@ -76,7 +79,7 @@ analysis = [
   "statsmodels==0.14.2",
   "sympy==1.13.1",
   "numba==0.59.1",
-  "llvmlite==0.42.0",  # explicit pair for numba 0.59.x (prevents resolver drift/builds)
+  "llvmlite==0.42.0",      # pinned pair for numba 0.59.x
 ]
 
 # Dev/test/typing/linting (tool configs live in setup.cfg).
