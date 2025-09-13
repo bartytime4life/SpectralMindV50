@@ -1,4 +1,15 @@
-# CPU-only bring-up / sanity (e.g., cloud CI without GPUs)
+# ==============================================================================
+# SpectraMind V50 — Profile: CPU Sanity (GPU-less CI)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/cpu_sanity]'
+#
+# Purpose:
+#   - Bring-up / smoke on CPU-only runners (GitHub Actions, plain VMs)
+#   - Force FP32, no AMP/TF32, deterministic loaders
+#   - Tiny slices for quick feedback
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -8,6 +19,7 @@ defaults:
   - /training/optimizer: optimizer
   - /training/scheduler: scheduler
 
+# Trainer: CPU-only, short, deterministic
 trainer:
   accelerator: "cpu"
   devices: 1
@@ -15,10 +27,35 @@ trainer:
   max_epochs: 2
   limit_train_batches: 0.1
   limit_val_batches: 0.1
+  deterministic: true
+  benchmark: false
+  enable_progress_bar: false
+  log_every_n_steps: 10
 
+# Global precision / backend controls (explicit on CPU too)
+precision:
+  mode: "32-true"
+  tf32:
+    allow: false
+    cudnn_allow: false
+  # matmul.precision only affects CUDA; left unspecified on CPU
+
+# DataLoader: fully deterministic & lightweight
 data_loader:
   num_workers: 0
+  persistent_workers: false
+  prefetch_factor: 2
   pin_memory: false
 
+# Seed for reproducibility
+seed: 123
+
+# Optional extra clamps if you need even faster CI:
+#limits:
+#  train_batches: 16
+#  val_batches: 8
+#  test_batches: 8
+
 experiment:
-  tags: ["profile:cpu"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "cpu-sanity"}
+  tags: ${oc.env:SM_TAGS, ["profile:cpu","precision=fp32","deterministic","epochs=2"]}
