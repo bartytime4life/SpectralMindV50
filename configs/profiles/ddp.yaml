@@ -1,4 +1,18 @@
-# Multi-GPU DDP (single node). Use torchrun or PL launchers.
+# ==============================================================================
+# SpectraMind V50 — Profile: Single-Node DDP (Multi-GPU)
+# ------------------------------------------------------------------------------
+# Launch examples:
+#   torchrun --standalone --nproc_per_node=4 -m spectramind train \
+#     +defaults='[/profiles/ddp_single_node]'
+#   # or with PL built-in launcher:
+#   python -m spectramind train +defaults='[/profiles/ddp_single_node]'
+#
+# Notes:
+#  - Set SM_DEVICES to GPU count (e.g., 2,4,8) or a list like "0,1,3".
+#  - Precision/AMP is controlled by the shared /training/precision schema.
+#  - Keep dataset shuffle=True; PL wires DistributedSampler automatically.
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -11,17 +25,52 @@ defaults:
 
 trainer:
   accelerator: "gpu"
-  devices: ${oc.env:SM_DEVICES, 2}
-  strategy: "ddp"
+  devices: ${oc.env:SM_DEVICES, 2}       # e.g. 4 for 4 GPUs
+  num_nodes: 1
+  strategy:
+    class_path: ddp                      # shorthand keeps PL defaults sane
+    init_method: "env://"                # torchrun-friendly
+    process_group_backend: "nccl"
+    find_unused_parameters: false        # avoid comm overhead; set true only if needed
+    gradient_as_bucket_view: true        # perf: reduce copies in DDP buckets
+    broadcast_buffers: false             # typical speedup; enable if BN buffers must sync
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 60}
-  # PL handles Dist. Samplers; keep shuffle true in data_loader.train
+  # Repro/perf toggles (tune per run)
+  deterministic: false                   # set true for strict reproducibility
+  benchmark: true                        # cuDNN autotune → speed
+  enable_progress_bar: true
+  log_every_n_steps: 50
 
+# Precision policy (inherits from /training/precision; override here if needed)
+precision:
+  mode: ${oc.env:SM_PRECISION, "bf16-mixed"}   # or "32-true"
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, true}
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, true}
+  matmul:
+    precision: ${oc.env:SM_MATMUL_PRECISION, "high"}
+
+# DataLoader: DDP-safe & performant
 data_loader:
+  # PL will set DistributedSampler when multiple devices; keep shuffle=True in your dataset
+  use_distributed_sampler: "auto"
   num_workers: ${oc.env:SM_WORKERS, 4}
   persistent_workers: true
   prefetch_factor: 4
   pin_memory: true
-  use_distributed_sampler: "auto"
+  pin_memory_device: "cuda"
+
+# Optional: gradient accumulation (helps large global batch without OOM)
+#accumulate:
+#  grad_batches: ${oc.env:SM_ACCUM, 1}
+
+# Optional: gradient clipping for stability on large scale
+#callbacks:
+#  gradient_clip_val: ${oc.env:SM_CLIP_VAL, 0.0}
+
+# Seed for reproducibility (DDP broadcasts rank0 seed if deterministic=true)
+seed: ${oc.env:SM_SEED, 123}
 
 experiment:
-  tags: ["profile:ddp"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "ddp-single-node"}
+  tags: ${oc.env:SM_TAGS, ["profile:ddp","node=1","launcher=torchrun|pl"]}
