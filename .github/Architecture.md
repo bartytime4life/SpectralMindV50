@@ -34,13 +34,14 @@ flowchart TD
     J[Run manifests<br/>(JSONL)]
   end
 
-  B -.-> H
-  C -.-> H
-  D -.-> H
-  E -.-> H
-  F -.-> H
-  D -.-> I
-  E -.-> J
+  B --> H
+  C --> H
+  D --> H
+  E --> H
+  F --> H
+  D --> I
+  E --> J
+
 ```
 
 **Stages (DVC):** `calibrate → preprocess → train → predict → diagnose → submit`.
