@@ -4,31 +4,50 @@
 .PHONY: version
 version:
 	@set -euo pipefail; \
-	ver="$$(cat VERSION | tr -d '[:space:]')"; \
-	if [ -z "$$ver" ]; then \
-		echo "❌ ERROR: VERSION file is empty"; exit 1; \
+	ver="$$(tr -d '[:space:]' < VERSION)"; \
+	if [ -z "$$ver" ]; then echo "❌ ERROR: VERSION file is empty"; exit 1; fi; \
+	pep_re='^[0-9]+(\.[0-9]+){2}([abrc][0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$$'; \
+	if ! printf '%s' "$$ver" | grep -Eq "$$pep_re"; then \
+	  echo "⚠️  VERSION '$$ver' is not a strict PEP 440 form (e.g., 0.1.0, 1.2.3rc1, 1.2.3.post1, 1.2.3.dev1)"; \
 	fi; \
-	echo "🔄 Setting version to $$ver"; \
 	pyproject="pyproject.toml"; \
-	if [ ! -f "$$pyproject" ]; then \
-		echo "❌ ERROR: $$pyproject not found"; exit 1; \
-	fi; \
-	# Update version in pyproject.toml (PEP 621 compliant)
-	sed -i.bak -E "s/^(version\s*=\s*\").*(\")/\1$$ver\2/" "$$pyproject"; \
-	rm -f "$$pyproject.bak"; \
-	echo "✅ pyproject.toml version -> $$ver"; \
+	if [ ! -f "$$pyproject" ]; then echo "❌ ERROR: $$pyproject not found"; exit 1; fi; \
+	echo "🔄 Setting version to $$ver"; \
+	python - "$$pyproject" "$$ver" <<'PY' || { echo "❌ ERROR: failed to update pyproject.toml"; exit 1; }
+import io, re, sys
+path, new = sys.argv[1], sys.argv[2]
+with io.open(path, "r", encoding="utf-8") as f:
+    lines = f.readlines()
+in_project = False
+found = False
+for i, line in enumerate(lines):
+    if line.strip().startswith("["):
+        in_project = line.strip() == "[project]"
+    if in_project and re.match(r'^\s*version\s*=\s*".*"\s*$', line):
+        old = line.strip()
+        lines[i] = re.sub(r'^\s*version\s*=\s*".*"\s*$', f'version = "{new}"', line)
+        print(f"   previous: {old}")
+        print(f"   updated : {lines[i].strip()}")
+        found = True
+        break
+if not found:
+    sys.stderr.write("version key not found under [project]\n")
+    sys.exit(2)
+with io.open(path, "w", encoding="utf-8", newline="") as f:
+    f.writelines(lines)
+PY
 	# Stage changes
-	git add VERSION "$$pyproject"; \
+	git add VERSION pyproject.toml; \
 	# Commit if needed
 	if ! git diff --cached --quiet; then \
-		git commit -m "chore: set version $$ver"; \
+	  git commit -m "chore: set version $$ver"; \
 	else \
-		echo "ℹ️  No changes to commit"; \
+	  echo "ℹ️  No changes to commit"; \
 	fi; \
-	# Create tag (annotated, signed if GPG configured)
+	# Create annotated tag if missing
 	if git rev-parse "v$$ver" >/dev/null 2>&1; then \
-		echo "⚠️  Tag v$$ver already exists"; \
+	  echo "⚠️  Tag v$$ver already exists"; \
 	else \
-		git tag -a "v$$ver" -m "Release v$$ver"; \
-		echo "🏷️  Created tag v$$ver"; \
+	  git tag -a "v$$ver" -m "Release v$$ver" || { echo "❌ ERROR: failed to create tag"; exit 1; }; \
+	  echo "🏷️  Created tag v$$ver"; \
 	fi
