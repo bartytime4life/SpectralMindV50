@@ -1,13 +1,106 @@
-# Preprocessing before model
-features:
-  use_fgs1: true
-  use_airs: true
-  standardize_airs: true
-  clip_sigma: 5.0
-  impute: median
+# Preprocessing before model (upgraded)
+# - Backward-compatible with your keys
+# - Plays nicely with configs/preprocess/method/*
 
+features:
+  use:
+    fgs1: true           # old: use_fgs1
+    airs: true           # old: use_airs
+
+  # Standardization / scaling
+  standardize:
+    airs:
+      enable: true       # old: standardize_airs
+      strategy: "zscore" # 'zscore'|'robust'|'minmax'
+      eps: 1.0e-6
+      per_channel: true
+    fgs1:
+      enable: false      # usually keep FGS1 raw; it is the anchor
+
+  # Robust clipping in standardized space
+  clip:
+    enable: true
+    sigma: 5.0           # old: clip_sigma
+    ref: "airs"          # 'airs'|'fgs1'|'both' (where clipping policy applies)
+    hard: false          # if true, clamp values post-clip; else mask them
+
+  # Imputation for masked values
+  impute:
+    strategy: "median"   # old: impute (accepts 'median'|'mean'|'zero'|'ffill')
+    scope: "masked_only" # 'masked_only'|'all'
+    ffill_limit: 0       # if strategy='ffill', max steps to forward fill
+    apply_to:
+      fgs1: false        # keep FGS1 pristine by default
+      airs: true
+
+  # Export scaling stats for deterministic inference
+  export_stats:
+    enable: true
+    dir: ${io.features_root}/scaler
+    namespace: "pre_features"   # keeps separate from normalize step if both exist
+
+# Train-time augmentations (physics-friendly)
 aug:
-  enabled: true
-  fgs1_jitter_pct: 0.01
-  airs_gauss_std: 0.002
-  dropout_channels_pct: 0.0
+  enable: true              # old: aug.enabled
+  master_prob: 1.0
+  max_ops_per_sample: 2
+  guardrails:
+    preserve_fgs1_anchor: true   # always keep FGS1 baseline semantics
+    preserve_transit_shape: true # forbid warping ingress/egress curvature
+    never_on_eval: true
+    never_on_test: true
+
+  # Op order & per-op controls
+  order: ["time_shift", "gauss_noise", "dropout_channels", "jitter_amp"]
+
+  time_shift:
+    enable: true
+    prob: 0.5
+    max_shift: 4                    # old: fgs1_jitter_pct maps to jitter_amp below, not here
+    align_to_phase: true
+    preserve_labels: true
+
+  gauss_noise:
+    enable: true
+    prob: 0.5
+    std_fgs1: 0.0                   # old: fgs1_jitter_pct never adds noise to FGS1 by default
+    std_airs: 0.002                 # old: airs_gauss_std
+    scale_to_stats: true            # scale by per-channel std from scaler if available
+    max_sigma_factor: 0.25
+
+  dropout_channels:
+    enable: ${oc.decode:${aug.dropout_channels_pct,0.0}>0.0}  # activates if pct>0
+    prob: 0.25
+    p: ${aug.dropout_channels_pct,0.0}    # old: dropout_channels_pct (0..1)
+    mask_consistent: true                 # set mask=0 where dropped
+    apply_to:
+      fgs1: false
+      airs: true
+
+  jitter_amp:
+    enable: ${oc.decode:${aug.fgs1_jitter_pct,0.0}>0.0}       # activates if pct>0
+    prob: 0.25
+    # multiplicative jitter: x <- x * (1 + U[-scale, +scale])
+    scale:
+      fgs1: ${aug.fgs1_jitter_pct,0.0}    # old: fgs1_jitter_pct (0..1); guardrails may cap/disable
+      airs: 0.0
+    center_around_one: true
+    clamp_min: null
+    clamp_max: null
+
+# -----------------------------
+# Backward-compatibility aliases
+# -----------------------------
+# These let your existing code read the old flat keys if needed.
+compat_aliases:
+  use_fgs1: ${features.use.fgs1}
+  use_airs: ${features.use.airs}
+  standardize_airs: ${features.standardize.airs.enable}
+  clip_sigma: ${features.clip.sigma}
+  impute: ${features.impute.strategy}
+
+  aug:
+    enabled: ${aug.enable}
+    fgs1_jitter_pct: ${aug.jitter_amp.scale.fgs1}
+    airs_gauss_std: ${aug.gauss_noise.std_airs}
+    dropout_channels_pct: ${aug.dropout_channels.p}
