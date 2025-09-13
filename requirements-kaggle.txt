@@ -4,13 +4,13 @@
 # Runtime-only deps for Kaggle kernels & DVC stages (no dev/lint/test).
 # Torch/TV/PyG are installed by bin/kaggle-boot.sh to match CUDA wheels.
 #
-# Tested against: Python 3.10/3.11 on Kaggle, NumPy 1.26.x (pre-NumPy 2).
-#
-# Tips:
-# • Keep this lean; prefer packages with manylinux wheels.
-# • Avoid deps that force source builds (slow / impossible offline).
-# • DVC<4 requires rich<14 — keep rich 13.x here.
+# Tested: Python 3.10/3.11 on Kaggle, NumPy 1.26.x (pre–NumPy 2).
+# Policy : Prefer manylinux wheels (no source builds), stable minor pins.
 # ==============================================================================
+
+# Pip behavior (must be first)
+--only-binary=:all:
+--prefer-binary
 
 # --- CLI & Config ---
 typer[all]==0.12.5
@@ -40,22 +40,23 @@ loguru==0.7.3
 matplotlib==3.8.4
 seaborn==0.13.2
 umap-learn==0.5.6
+pynndescent==0.5.12     # stability pin for umap-learn on numba 0.59.x
 networkx==3.2.1
 
 # --- Model Utils (non-Torch) ---
-scikit-learn==1.5.1     # works with numpy<3.0 and scipy>=1.11
+scikit-learn==1.5.1
 joblib==1.4.2
 statsmodels==0.14.2
 
 # --- Symbolic / Physics-informed ---
 sympy==1.13.1
 numba==0.59.1
-llvmlite==0.42.0        # explicit pin for numba 0.59.x on NumPy 1.26.x
+llvmlite==0.42.0        # exact pair for numba 0.59.x on NumPy 1.26.x
 
 # --- DVC (core only; no remote extras for Kaggle) ---
-dvc==3.51.2
+dvc==3.55.2
 
 # ------------------------------------------------------------------------------
 # Torch stack handled by bin/kaggle-boot.sh to match Kaggle CUDA wheels:
-#   torch==2.3.x / 2.4.x (per image), torchvision paired, PyG via data.pyg.org
+#   torch / torchvision paired (cu121/… per image), PyG via data.pyg.org
 # ------------------------------------------------------------------------------
