@@ -1,14 +1,139 @@
-# TOKENIZE — positional encodings
+# ==============================================================================
+# SpectraMind V50 — Preprocess Method: TOKENIZE (Positional Encodings)
+# File: configs/preprocess/method/tokenize.yaml
+# ------------------------------------------------------------------------------
+# Produces positional embeddings for:
+#   • time axis (FGS1/AIRS sequences)
+#   • spectral axis (AIRS bins)
+#
+# Notes
+# • Shape-safe: aligns with ${preprocess.shapes.time_len} and bins
+# • Mask-aware: never "unmasks" data; PEs can be concatenated or emitted separately
+# • Backend-agnostic: sinusoid (Transformer), rotary (RoPE), or learned tables
+# ==============================================================================
 
+# ------------------------------------------------------------------------------
+# Global switch
+# ------------------------------------------------------------------------------
+enable: true
+
+# ------------------------------------------------------------------------------
+# Time PE (sequence axis)
+#   mode:
+#     - 'sinusoid'  : classic Vaswani
+#     - 'rotary'    : RoPE params only (rotation angles; model applies)
+#     - 'learned'   : static table initialized xavier_uniform
+#     - 'none'      : disable
+# ------------------------------------------------------------------------------
 time_pe:
-  mode: "sinusoid"         # 'sinusoid'|'none'
+  mode: "sinusoid"               # 'sinusoid'|'rotary'|'learned'|'none'
   d_model: 32
-  base: 10000.0
+  base: 10000.0                  # sinusoid base
+  # Rotary (only if mode='rotary')
+  rotary:
+    theta: 10000.0               # RoPE θ
+    interleave: true             # pairwise dims (even-odd)
+  # Learned (only if mode='learned')
+  learned:
+    init: "xavier_uniform"
+    scale: 1.0
+  # Indexing
+  start_index: 0                 # offset PE positions if windows are strided
+  # Output control
+  dtype: "float32"
+  normalize_pe: false            # optionally L2-normalize PE vectors
 
+# ------------------------------------------------------------------------------
+# Spectral PE (AIRS spectral bins)
+#   Applies along spectral axis (wavelength-ordered bins)
+#   If FGS1 has no spectral axis, we only emit for AIRS
+# ------------------------------------------------------------------------------
 spec_pe:
-  mode: "sinusoid"         # spectral PE for AIRS bins
+  mode: "sinusoid"               # 'sinusoid'|'rotary'|'learned'|'none'
   d_model: 16
   base: 10000.0
+  rotary:
+    theta: 10000.0
+    interleave: true
+  learned:
+    init: "xavier_uniform"
+    scale: 1.0
+  # Wavelength indexing policy
+  index:
+    strategy: "bin_index"        # 'bin_index'|'wavelength_nm'
+    wavelength_nm: ${data.channels.airs.wavelengths,null}  # optional vector
+    start_index: 0
+  dtype: "float32"
+  normalize_pe: false
 
-concat_to_inputs: false     # if true, append PE to inputs; else export separately
-broadcast_spec_pe: true
+# ------------------------------------------------------------------------------
+# Packing / emission
+# ------------------------------------------------------------------------------
+emit:
+  # If true, concatenate PEs onto inputs; else emit as separate keys
+  concat_to_inputs: false
+  # When concatenating, concat along the feature/channel dimension
+  # Shapes (after window/pack):
+  #   fused input x : [T, C, B] or [C, T, B] depending on your model loader
+  # This method assumes downstream knows how to align dims; see `layout`.
+  broadcast_spec_pe: true         # broadcast spec PE across time steps
+  keys:
+    time_pe: "pe.time"
+    spec_pe: "pe.spec"
+    # If concatenating:
+    concat_key: "x"               # overwrite fused tensor key (see pack.layout.fused_key)
+
+# ------------------------------------------------------------------------------
+# Layout hints (no tensor ops here; for the packer/loader to honor)
+# ------------------------------------------------------------------------------
+layout:
+  time_dim: "T"                   # symbolic (T for time)
+  spec_dim: "B"                   # symbolic (B for spectral bins)
+  feat_dim: "C"                   # symbolic (C for channels/features)
+  fused_order: ["fgs1", "airs"]   # must match pack.layout.order
+  # If your model expects [T, C, B], concatenation adds (d_time + d_spec) to C.
+
+# ------------------------------------------------------------------------------
+# Mask interaction (read-only)
+# ------------------------------------------------------------------------------
+mask:
+  preserve: true                  # never clear masks when emitting/concatenating PEs
+  pe_mask_key: null               # optionally emit a PE mask; null keeps it empty
+
+# ------------------------------------------------------------------------------
+# Validation & assertions
+# ------------------------------------------------------------------------------
+validate:
+  expect_time: ${preprocess.shapes.time_len}
+  expect_bins: ${preprocess.shapes.bins}
+  enforce_shapes: true
+  # Guardrail: prevent huge accidental d_model growth when concat_to_inputs=true
+  max_concat_dim_increase: 96     # (d_time + d_spec) must not exceed this
+  fail_fast: true
+
+# ------------------------------------------------------------------------------
+# Caching (for learned tables or repeated sinusoid builds)
+# ------------------------------------------------------------------------------
+cache:
+  enable: true
+  dir: ${paths.cache}/tokenize
+  reuse_across_splits: true       # safe for fixed shapes
+
+# ------------------------------------------------------------------------------
+# Reporting / diagnostics
+# ------------------------------------------------------------------------------
+report:
+  enable: true
+  log_every_n: ${runtime.log_every_n}
+  include:
+    - "time_pe.mode"
+    - "time_pe.d_model"
+    - "spec_pe.mode"
+    - "spec_pe.d_model"
+    - "emit.concat_to_inputs"
+  sample_limit: ${oc.env:SM_TOK_REPORT_SAMPLES,64}
+
+# ------------------------------------------------------------------------------
+# Determinism
+# ------------------------------------------------------------------------------
+seed: ${preprocess.seed}
