@@ -2,128 +2,200 @@
 
 Mission-critical guardrails for a research-grade, competition-safe pipeline.
 
+> TL;DR
+>
+> * Report privately to **[security@spectramind-v50.org](mailto:security@spectramind-v50.org)** (don’t open issues).
+> * Use **pinned deps** and **offline** Kaggle kernels.
+> * Generate an **SBOM** and run **`make scan`** before releases.
+> * No secrets in repo. Use CI/Kaggle secrets.
+
 ---
 
 ## 📌 Supported Versions
 
-We actively maintain the **latest `main` branch** and all tagged releases.
+We actively maintain the latest **`main`** branch and tagged releases (`0.x` is active dev).
 
 | Version | Supported                                |
-|--------:|:-----------------------------------------|
-| `main`  | ✅                                        |
-| `0.x`   | ✅ (active dev; breaking changes allowed) |
-| `<0.x`  | ❌                                        |
+| ------: | :--------------------------------------- |
+|  `main` | ✅                                        |
+|   `0.x` | ✅ (active dev; breaking changes allowed) |
+|  `<0.x` | ❌                                        |
 
-> **Kaggle submissions** must use **pinned dependencies** from `requirements-kaggle.txt` for reproducibility and supply-chain safety.
+> **Kaggle**: Submissions **must** use `requirements-kaggle.txt` and **disable internet**.
 
 ---
 
 ## 🛡️ Reporting a Vulnerability
 
-If you believe you’ve found a security issue:
+**Do not** open a public issue. Contact us privately:
 
-1. **Do not open a public GitHub Issue.**
-2. Contact us privately:
-   - Email: **security@spectramind-v50.org**
-   - or use GitHub **Security Advisories** on this repository
-3. Please include:
-   - Affected commit/tag (`git rev-parse --short HEAD`)
-   - Reproduction steps / PoC (minimal)
-   - Expected vs. actual behavior
-   - Impact assessment (confidentiality/integrity/availability)
-   - Any logs, stack traces, or screenshots that help triage
+* Email: **[security@spectramind-v50.org](mailto:security@spectramind-v50.org)**
+* or open a **Private Security Advisory** in GitHub (Security → Advisories → New draft)
+
+Please include:
+
+* Affected commit/tag (`git rev-parse --short HEAD`)
+* Repro steps / minimal PoC
+* Expected vs. actual behavior
+* Impact (confidentiality / integrity / availability)
+* Any logs, stack traces, screenshots
 
 **Response targets**
-- Acknowledgement **≤ 72 hours**
-- Initial remediation plan **≤ 30 days** (severity-dependent)
-- Credit in release notes (opt-in), unless anonymity requested
 
-Optional: if you prefer encryption, ask for our PGP key in your initial email.
+* Acknowledgement: **≤ 72h**
+* Initial remediation plan: **≤ 30 days** (severity-dependent)
+* Credit in release notes (opt-in), unless anonymity requested
+  (PGP available on request for encrypted follow-ups)
 
 ---
 
 ## 🔒 Security Principles
 
-### Dependency Hygiene
-- Runtime pins in `requirements-kaggle.txt` (offline kernels; no `pip install` at runtime)
-- Dev/CI pins in `requirements-dev.txt`; optional `constraints.txt` for resolver stability
-- Automated checks in CI: **pip-audit** and Dependabot (PRs grouped & reviewed)
+### 1) Dependency Hygiene
 
-### Supply Chain Protection
-- **SBOM** generation (CycloneDX/SPDX) via Syft; optional Grype scan
-- Reproducible builds: pinned Python, pinned wheels where feasible
-- Shell scripts run with `bash -Eeuo pipefail`; no unpinned curl|bash patterns
+* **Runtime pins** for Kaggle in `requirements-kaggle.txt`; no ad-hoc `pip install` at runtime.
+* **Dev/CI pins** in `requirements-dev.txt` (or `pyproject.toml` + lockfile if you standardize).
+* Optional `constraints.txt` for resolver stability.
+* Automated checks:
 
-### Code Quality & Safety
-- Type checks: **mypy** (strict for core, relaxed for CLI/tests)
-- Linters: **ruff** (Black-compatible), **flake8** plug-ins as needed
-- Tests cover error paths and misuse of CLI flags
-- **No secrets** in repo; use `.env` (git-ignored), CI secrets, or Kaggle secrets
+  * `pip-audit` (**CVE**s)
+  * Dependabot (grouped PRs; reviewed & pinned)
+  * **SBOM** produced per release (`make sbom`)
 
-### Execution Environments
-- **Kaggle** kernels: **offline**, ≤ **9h** GPU wallclock, ≤ **30 GB** RAM; outputs to `/kaggle/working`
-- **Local/CI**: reproducible via Hydra + DVC; deterministic seeds; JSONL logs
-- **Docker**: minimal base, non-root runtime; GPU optional; pinned OS packages when installed
+### 2) Supply Chain Protection
+
+* **SBOM** (CycloneDX/SPDX) via Syft → track in `artifacts/sbom.json`.
+* Optional Grype/Trivy scans for packages/containers.
+* Reproducible builds:
+
+  * Pinned **Python** minor version (3.11)
+  * Pinned wheels where feasible
+* Shell scripts: `bash -Eeuo pipefail`, no `curl | bash`, pinned SHAs for tools.
+
+### 3) Code Quality & Safety
+
+* **mypy** strict in core; relaxed in CLI/tests (see `setup.cfg`).
+* **ruff/flake8** + recommended plugins (docstrings, bugbear, annotations).
+* Tests cover:
+
+  * misuse of CLI flags, invalid inputs
+  * schema validation errors (submissions)
+* **No secrets**: `.env` (git-ignored), CI secrets, or Kaggle secrets only.
+
+### 4) Execution Environments
+
+* **Kaggle**:
+
+  * **Offline** kernels
+  * ≤ **9h** GPU wallclock, ≤ **30 GB** RAM
+  * Inputs: `/kaggle/input/...`
+  * Outputs: `/kaggle/working/...`
+  * Use **pre-packaged calibrated data** when available to save time/budget.
+
+* **Local/CI**:
+
+  * Reproducible via **Hydra + DVC**
+  * Deterministic seeds
+  * JSONL/TOML manifests recorded to `artifacts/`
+
+* **Docker (optional)**:
+
+  * Minimal base, non-root runtime
+  * GPU runtime optional
+  * Pinned OS packages
 
 ---
 
 ## 🛰️ Scope of Protection
 
-This repository processes **scientific challenge data** (FGS1 photometry + AIRS spectroscopy). We protect:
+Scope: **challenge data** processing and produced artifacts.
 
-- 🔒 **Dataset confidentiality** (competition rules & licenses)
-- 📑 **Traceability** of configs & calibration (Hydra snapshots; DVC lineage)
-- 🧪 **Integrity** of results (schema-checked submissions; manifest checksums)
-- 🔄 **Provenance** of artifacts (manifests, `scaler/` stats, and run metadata)
+We protect:
 
-Out of scope (unless they materially affect safety): typos, stylistic nits, non-security doc issues.
+* 🔒 **Dataset confidentiality** (per rules/licenses)
+* 📑 **Traceability** of configs & calibration (Hydra snapshots; DVC lineage)
+* 🧪 **Integrity** of results (schema-checked submissions; manifest checksums)
+* 🔄 **Provenance** of artifacts (manifests, scaler stats, run metadata)
+
+Out of scope (unless they materially affect safety): typos, style nits, non-security docs.
 
 ---
 
 ## 🛠️ Security Tooling (CI/CD)
 
-- **CodeQL** (static analysis for Python)
-- **Trivy** (filesystem & IaC scanning; optional container image scan)
-- **Syft + Grype** (SBOM + vulnerability scan)
-- **pip-audit** (Python dependency CVEs)
-- **Ruff / flake8** (lint, import safety)
-- **pre-commit** (YAML lint, secrets scan, notebook output stripping)
+**CI checks** (suggested jobs):
 
-Run locally:
+* **CodeQL**: static analysis (Python)
+* **Trivy**: filesystem / IaC scans (and container images if used)
+* **Syft + Grype**: SBOM + vuln scan
+* **pip-audit**: Python dependency CVEs
+* **Ruff / flake8**: lint / import safety
+* **pre-commit**: YAML lint, secrets scan, notebook output strip
+
+**Local helpers**
 
 ```bash
-make scan     # SBOM + pip-audit + basic linters (non-failing locally)
-make sbom     # SBOM → artifacts/sbom.json
-````
+make sbom   # create CycloneDX SBOM → artifacts/sbom.json
+make scan   # pip-audit + basic lint (non-failing locally)
+make check  # pre-commit, lint, types, tests (strict; matches CI)
+```
 
 ---
 
-## 🤝 Responsible Disclosure
+## 🔧 Reproducibility & Artifact Integrity
 
-We follow coordinated disclosure practices:
+* **Hydra**: strict mode; per-stage deterministic `hydra.run.dir` (see `dvc.yaml`) so DVC caches properly.
+* **DVC**: reproducible pipeline (calibrate → preprocess → train → predict → diagnose → submit), deterministic artifact paths (no timestamps in data paths).
+* **Submission**:
 
-* **Low-risk** issues (docs, warnings) → patched silently in `main`
-* **Moderate/Critical** → out-of-band patch release + advisory
-* CVSS scoring used internally to prioritize
-* Fixes tie back to commit hashes and (when applicable) DVC data versions
-* We credit reporters (if desired) in release notes
+  * Validate with `bin/validate_submission.sh` (header order, table schema, numeric types, physics sanity).
+  * Package with `bin/sm_submit.sh`, which validates prior to zipping.
+* **Manifests**:
+
+  * Store run metadata (config hashes, data versions, model ckpt SHA) in `artifacts/*/manifest.json`.
+  * Optionally add file checksums for `submission.csv`.
 
 ---
 
 ## ✅ Best Practices for Contributors
 
-* Run `make check` before pushing (pre-commit, lint, types, tests)
-* Use `make sbom` and `make scan` to sanity-check dependencies
-* Never commit `.env` or real secrets; rely on CI/Kaggle secrets
-* Kaggle notebooks should **only** read from `/kaggle/input/...` and write to `/kaggle/working`
-* Keep CLI (I/O) separate from core logic (clean architecture)
-* Document notable runs in `artifacts/` (e.g., `events.jsonl`, `manifest.json`) for auditability
+* Run `make check` before pushing (pre-commit, lint, types, tests).
+* Use `make sbom` & `make scan` to sanity-check dependencies.
+* Never commit `.env` or real secrets; use CI/Kaggle secrets.
+* Kaggle notebooks:
+
+  * **only** read `/kaggle/input/...` and write `/kaggle/working/...`
+  * use pre-calibrated zip datasets to avoid runtime calibration where possible.
+* Keep CLI (I/O) separate from core logic (clean architecture):
+
+  * `src/spectramind/cli/…` is a thin shell; heavy lifting in `src/spectramind/*`.
+* Document notable runs in `artifacts/` (e.g., `events.jsonl`, `manifest.json`) for auditability.
+
+---
+
+## 🔁 Versioning, Tags & Backports
+
+* Bump version via `make version` (syncs `VERSION → pyproject.toml`, commits & tags).
+* Security fixes land on `main`, then are **cherry-picked** to the latest stable tag when applicable.
+* No guaranteed backports to `<0.x` unless severity warrants.
+
+---
+
+## 🤝 Responsible Disclosure
+
+We follow coordinated disclosure:
+
+* **Low-risk**: patch silently in `main`
+* **Moderate/Critical**: out-of-band patch + advisory
+* CVSS scoring used internally to prioritize
+* Fixes tie back to commit hashes and (when applicable) DVC data versions
+* Reporters credited (if desired) in release notes
 
 ---
 
 ## 📬 security.txt (optional)
 
-Consider publishing a `.well-known/security.txt` in your project site or org:
+Publish on your project/org site (e.g., GitHub Pages or org domain):
 
 ```
 Contact: mailto:security@spectramind-v50.org
@@ -134,16 +206,20 @@ Acknowledgements: https://github.com/<OWNER>/<REPO>/releases
 
 ---
 
-## 🧭 Versioning & Backports
+## 📄 License & Legal
 
-* Security fixes land on `main`, then are **cherry-picked** to the latest stable tag if applicable.
-* We do **not** guarantee backports to `<0.x` unless severity warrants.
+* Licensed under **MIT**. Submissions must comply with challenge rules and dataset licenses.
+* By reporting vulnerabilities, you agree to act in good faith and avoid privacy violations or data exfiltration.
 
 ---
 
-## 📄 License & Legal
+### Quick Checklist (copy into PR templates)
 
-* Licensed under **MIT**. Submissions must comply with competition rules and dataset licenses.
-* By reporting vulnerabilities, you agree to act in good faith and avoid privacy violations or data exfiltration.
+* [ ] Pinned deps only (`requirements-kaggle.txt` for Kaggle; no runtime installs).
+* [ ] `make check` and `make scan` clean.
+* [ ] SBOM regenerated (`make sbom`) and attached to release artifacts.
+* [ ] No secrets committed; CI/Kaggle secrets used.
+* [ ] Submission validated (`bin/validate_submission.sh`) before `submit`.
+* [ ] DVC stages produce deterministic paths; no timestamped directories in data/ artifacts.
 
 ---
