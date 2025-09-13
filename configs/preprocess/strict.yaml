@@ -1,19 +1,38 @@
+# ==============================================================================
 # SpectraMind V50 — Preprocess preset: strict (research-grade)
+# File: configs/preprocess/presets/strict.yaml
+# ------------------------------------------------------------------------------
+# Goals:
+# • Highest scientific rigor; maximal checks & provenance
+# • Overlapping windows for denser supervision / smoother statistics
+# • Parquet exports (columnar, typed, Arrow/Polars-friendly)
+# • Deterministic, mask-aware, split-safe normalization and assertions
+# ==============================================================================
 
 preset: strict
+version: 1
 seed: 9
 
+# ------------------------------------------------------------------------------
+# I/O — delegated to active data profile
+# ------------------------------------------------------------------------------
 io:
   calibrated_root: ${data.exports.calibrated_root}
   features_root:   ${data.exports.features_root}
   overwrite: false
-  format: "parquet"
+  format: "parquet"                # 'npz' | 'parquet'
 
+# ------------------------------------------------------------------------------
+# Runtime — workstation/HPC friendly; env-overridable
+# ------------------------------------------------------------------------------
 runtime:
-  num_workers: 8
-  pin_memory: true
+  num_workers: ${oc.env:SM_NUM_WORKERS,8}
+  pin_memory:  ${oc.env:SM_PIN_MEMORY,true}
   log_every_n: 50
 
+# ------------------------------------------------------------------------------
+# Stage selection — full chain with research checks
+# ------------------------------------------------------------------------------
 enable:
   load: true
   mask: true
@@ -23,9 +42,12 @@ enable:
   window: true
   pack: true
   tokenize: true
-  augment: true        # train-only; light physics-safe augs
+  augment: true                    # train-only; physics-safe
   export: true
 
+# ------------------------------------------------------------------------------
+# Method routing — centralized in preprocess.method.*
+# ------------------------------------------------------------------------------
 load:        ${preprocess.method.load}
 mask:        ${preprocess.method.mask}
 detrend:     ${preprocess.method.detrend}
@@ -37,10 +59,135 @@ tokenize:    ${preprocess.method.tokenize}
 augment:     ${preprocess.method.augment}
 export:      ${preprocess.method.export}
 
+# ------------------------------------------------------------------------------
+# Shapes — longer T and 50% overlap for richer supervision
+# ------------------------------------------------------------------------------
 shapes:
   time_len: 640
-  stride:   320             # 50% overlap for denser supervision
+  stride:   320
   bins: ${data.channels.airs.bins}
 
+# ------------------------------------------------------------------------------
+# Research-grade defaults (safe, but can be overridden by profiles)
+# ------------------------------------------------------------------------------
+detrend:
+  mode: "savgol"                   # 'poly'|'savgol'|'none'
+  poly:
+    order: 2
+  savgol:
+    window: 51                     # wider than nominal for smoother baseline
+    polyorder: 3
+  apply_to:
+    fgs1: true
+    airs: true                     # stricter: detrend AIRS as well (pre-normalize)
+
+normalize:
+  strategy: "robust"               # median/MAD; mask-aware in method config
+  scope: "per-channel"
+  clip:
+    enable: true
+    low_q: 0.10                    # tighter tails than nominal
+    high_q: 99.90
+  eps: 1.0e-8
+
+binning:
+  strategy: "calib_strict"         # requires calibration table; else fail
+  fixed:
+    bins: ${shapes.bins}
+  fgs1:
+    method: "phase_aware_sum"
+    require_trace: true
+    reject_out_of_window: true     # drop flux outside target windows
+
+window:
+  kind: "hann"                     # tapering reduces edge effects
+  size: ${shapes.time_len}
+  hop:  ${shapes.stride}
+  center: false
+  pad: false
+
+tokenize:
+  scheme: "none"                   # keep continuous tensors for research
+
+augment:
+  enable: ${enable.augment}
+  train_only: true
+  # Gentle, physics-aware augs; reproducible via seed in runner
+  noise:
+    prob: 0.20
+    std: 0.0075
+  jitter_time:
+    prob: 0.10
+    max_shift: 1
+  dropout_time:
+    prob: 0.08
+    max_span: 4
+  spectral_smooth:
+    prob: 0.25
+    kernel: 7
+
+# ------------------------------------------------------------------------------
+# Export — Parquet with strong provenance
+# ------------------------------------------------------------------------------
+export:
+  format: ${io.format}
+  compress:
+    npz: "zip"
+    parquet: "zstd"                # denser than snappy; great for archives
+  paths:
+    root: ${io.features_root}
+    train_dir: ${io.features_root}/train
+    val_dir:   ${io.features_root}/val
+    test_dir:  ${io.features_root}/test
+  manifest:
+    enable: true
+    filename: manifest.json
+    include:
+      - preset
+      - version
+      - seed
+      - shapes
+      - detrend.mode
+      - detrend.savgol.window
+      - normalize.strategy
+      - normalize.scope
+      - binning.strategy
+      - window.kind
+      - runtime.num_workers
+  flush_secs: 5
+  overwrite: ${io.overwrite}
+
+# ------------------------------------------------------------------------------
+# Split policy — delegated to data profile
+# ------------------------------------------------------------------------------
 splits:
   source: ${data.splits.config}
+
+# ------------------------------------------------------------------------------
+# Reporting — deeper diagnostics in strict mode
+# ------------------------------------------------------------------------------
+report:
+  enable: true
+  log_every_n: ${runtime.log_every_n}
+  histograms: true
+  sample_limit: ${oc.env:SM_STRICT_REPORT_SAMPLES,256}
+
+# ------------------------------------------------------------------------------
+# Assertions — stricter gates to catch drift early
+# ------------------------------------------------------------------------------
+assertions:
+  require_calibrated_root: true
+  require_features_root:   true
+  expect_bins: ${shapes.bins}
+  # Post-mask coverage limits (stricter than nominal)
+  max_mask_coverage:
+    fgs1: 0.50
+    airs: 0.50
+  # Require consistent time alignment after windowing
+  require_time_alignment: true
+  require_bin_alignment:  true
+  # Enforce presence of normalization stats before apply
+  require_norm_stats: true
+  # Fail if calibration-based binning cannot be resolved
+  require_calibration_binning: true
+  fail_fast: true
