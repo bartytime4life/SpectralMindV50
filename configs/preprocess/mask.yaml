@@ -1,15 +1,146 @@
-# MASK — build boolean masks & apply hard masks to tensors
+# ==============================================================================
+# SpectraMind V50 — Preprocess Method: MASK
+# File: configs/preprocess/method/mask.yaml
+# ------------------------------------------------------------------------------
+# Builds boolean masks for NaN/Inf, saturation, spikes (cosmic rays), and
+# basic range/SNR checks; applies a hard mask to tensors with safe gap fill.
+# • Deterministic, fast defaults for Kaggle/CI
+# • Channel-aware thresholds (FGS1 vs AIRS)
+# • Exports optional mask artifacts for auditability
+# ==============================================================================
 
-nan:
-  action: "mask"             # 'mask'|'drop' (drop removes frames; risky)
-  fill: 0.0
+# ------------------------------------------------------------------------------
+# Global behavior
+# ------------------------------------------------------------------------------
+global:
+  apply_hard_mask: true          # when true, masked samples get `fill_value`
+  output_bool_mask: true         # emit per-channel boolean masks
+  union_logic: "or"              # "or" | "and" to combine sub-masks
+  dilate:
+    enable: true                 # expand small masked islands → stability
+    radius: 1                    # 1 = 3x3 (time x spectral) neighborhood
+  min_run_length:
+    enable: true
+    length: 2                    # drop isolated singletons from masks
+  fill_value: 0.0                # used when apply_hard_mask=true
 
-saturation:
+# ------------------------------------------------------------------------------
+# NaN / Inf sanitization
+# ------------------------------------------------------------------------------
+nan_inf:
   enable: true
-  threshold: 0.98            # fraction of full-scale (post-ADC)
+  action: "mask"                 # "mask" | "drop" (drop removes frames; risky)
+
+# ------------------------------------------------------------------------------
+# Numeric sanity (out-of-range guard)
+# ------------------------------------------------------------------------------
+range_check:
+  enable: true
+  min: -1.0e6
+  max:  1.0e6
   action: "mask"
 
+# ------------------------------------------------------------------------------
+# Saturation (post-ADC, after calibration; fraction of full scale)
+# ------------------------------------------------------------------------------
+saturation:
+  enable: true
+  # If data are already normalized to [0,1], this is the exact threshold.
+  # Otherwise, `full_scale` can be inferred from calibration metadata.
+  threshold: 0.98                # default; channel overrides below
+  action: "mask"
+
+# ------------------------------------------------------------------------------
+# Spike / cosmic ray detector (robust sigma-clip on temporal axis)
+# ------------------------------------------------------------------------------
 cosmic:
   enable: true
-  sigma: 7.0
+  method: "sigma_clip"           # "sigma_clip" | "mad_clip"
+  sigma: 7.0                     # default; channel overrides below
   max_iter: 1
+  window: 5                      # temporal median window (odd, >=3)
+  action: "mask"
+
+# ------------------------------------------------------------------------------
+# Optional SNR gate (kept off in fast runs; useful for research profiles)
+# ------------------------------------------------------------------------------
+snr:
+  enable: false
+  floor_db: 5.0                  # mask when estimated SNR < floor_db
+  estimate: "local"              # "local" (rolling) | "global"
+
+# ------------------------------------------------------------------------------
+# Known-bad pixels/time indices from calibration maps (optional)
+# ------------------------------------------------------------------------------
+defects:
+  enable: false
+  dead_pixel_map: ${data.calib.dead_pixel_map,null}  # boolean array or index list
+  bad_time_map:   ${data.calib.bad_time_map,null}
+
+# ------------------------------------------------------------------------------
+# Channel-specific overrides (FGS1 vs AIRS)
+# ------------------------------------------------------------------------------
+channel:
+  fgs1:
+    saturation:
+      threshold: 0.995           # photometry often near full scale
+    cosmic:
+      sigma: 8.0
+      window: 7
+  airs:
+    saturation:
+      threshold: 0.98            # spectroscopy typically has more headroom
+    cosmic:
+      sigma: 7.0
+      window: 5
+
+# ------------------------------------------------------------------------------
+# Post-mask gap fill (only for masked samples; never invents unmasked data)
+# ------------------------------------------------------------------------------
+gap_fill:
+  enable: true
+  method: "linear"               # "linear" | "nearest" | "none"
+  max_gap: 8                     # consecutive masked steps allowed to fill
+  per_channel: true
+  only_masked: true
+
+# ------------------------------------------------------------------------------
+# Reporting / audit (cheap; CI-safe)
+# ------------------------------------------------------------------------------
+report:
+  enable: true
+  log_every_n: ${runtime.log_every_n}
+  histogram_bins: 20
+  sample_limit: ${oc.env:SM_MASK_REPORT_SAMPLES,128}
+  include:
+    - "nan_inf.count"
+    - "range_check.count"
+    - "saturation.count"
+    - "cosmic.count"
+    - "snr.count"
+    - "final_mask.coverage"      # % masked per channel
+
+# ------------------------------------------------------------------------------
+# Export masks to artifacts for reproducibility (off by default for speed)
+# ------------------------------------------------------------------------------
+export_masks:
+  enable: false
+  dir: ${io.features_root}/_masks
+  format: "npz"                  # 'npz' | 'parquet'
+  overwrite: ${io.overwrite}
+
+# ------------------------------------------------------------------------------
+# Safety switches (fail fast on pathological inputs)
+# ------------------------------------------------------------------------------
+assertions:
+  max_mask_coverage:
+    enable: true
+    fgs1: 0.60                   # abort if >60% of frames masked
+    airs: 0.60
+  require_any_signal:
+    enable: true                 # ensure non-constant unmasked region exists
+
+# ------------------------------------------------------------------------------
+# Determinism
+# ------------------------------------------------------------------------------
+seed: ${preprocess.seed}
