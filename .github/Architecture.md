@@ -44,26 +44,25 @@ graph TD
 
 ## 📂 Repository Topography
 
-```text
-spectramind-v50/
-├─ src/spectramind/        # library & CLI entry
-│  ├─ cli.py               # Typer app
-│  ├─ data/                # datamodules, loaders
-│  ├─ calib/               # calibration ops
-│  ├─ preprocess/          # tensorization, masks
-│  ├─ models/              # fgs1_encoder, airs_encoder, fusion, decoder
-│  ├─ losses/              # gll, smoothness, nonneg, coherence
-│  ├─ diagnose/            # fft, umap, shap, reports
-│  └─ utils/               # io, hashing, schema, seed
-├─ configs/                # Hydra configs
-│  ├─ train.yaml, predict.yaml, diagnose.yaml, submit.yaml
-│  ├─ env/{local,kaggle}.yaml
-│  ├─ data/, calib/, model/, training/, loss/, logger/
-├─ dvc.yaml                # pipeline stages
-├─ ADR/                    # architecture decision records
-├─ .github/workflows/      # CI/CD
-├─ assets/diagrams/        # Mermaid pipeline & ADR graphs
-└─ outputs/                # DVC-tracked artifacts
+flowchart TD
+  A["Raw inputs<br/>FGS1 + AIRS"] --> B["Calibrate<br/>ADC, dark, flat, trace, phase"]
+  B --> C["Preprocess<br/>tensor packs, binning, splits"]
+  C --> D["Train<br/>dual encoders + physics loss"]
+  D --> E["Predict<br/>μ, σ (283 bins)"]
+  E --> F["Diagnose<br/>FFT, UMAP, SHAP"]
+  E --> G["Submit<br/>CSV + ZIP"]
+
+  %% DVC fan-in
+  B --> H["DVC cache/remotes"]
+  C --> H
+  D --> H
+  E --> H
+  F --> H
+
+  %% Lineage
+  D --> I["Hydra<br/>config snapshots"]
+  E --> J["Run manifests<br/>(JSONL)"]
+
 ```
 
 ---
