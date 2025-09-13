@@ -43,7 +43,7 @@ spectramind train +defaults='[/profiles/ablation_priors_off]'
 | `low_vram`            | `16-mixed`         | warmup on                             | `batch=16`, `workers=1`          | default            | Adds `accumulate_grad_batches=4` |
 | `cpu`                 | `32-true`          | short                                 | workers=0, no pin                | default            | CPU-only bring-up                |
 | `ddp`                 | inherit            | multi-GPU (single node)               | `workers=4`, distributed sampler | default            | Launch with `torchrun`           |
-| `wandb_online`        | inherit            | inherit                               | inherit                          | **W\&B online**    | Safe to swap with `kaggle` off   |
+| `wandb_online`        | inherit            | inherit                               | inherit                          | **W\&B online**    | Disable on Kaggle                |
 | `mlflow`              | inherit            | inherit                               | inherit                          | **MLflow online**  | Requires `MLFLOW_TRACKING_URI`   |
 | `profiling`           | `bf16-mixed`       | short profile run                     | `workers=4`, pin, prefetch=4     | default            | `trainer.profiler=advanced`      |
 | `amp_off`             | `32-true`          | inherit                               | inherit                          | default            | Disable AMP to de-risk numerics  |
@@ -59,9 +59,9 @@ spectramind train +defaults='[/profiles/ablation_priors_off]'
 
 ---
 
-## Common environment overrides (SM\_\*)
+## Common environment overrides (`SM_*`)
 
-You can flip knobs without editing files:
+Flip knobs without editing files:
 
 ```bash
 # Precision & TF32
@@ -95,7 +95,7 @@ spectramind train +data_loader.batch_size=24 trainer.accumulate_grad_batches=4
 
 * **Profiles are overlays** — they should not redefine `_target_` blocks from scratch; keep those in `/training/*` factories and only adjust parameters.
 * **Mutually exclusive cadence** — if you set `ModelCheckpoint.every_n_train_steps`, keep `every_n_epochs: null` to avoid double writes.
-* **Determinism** — for investigations, prefer `profiles/amp_off` or `bf16_strict`; combine with `precision.determinism.*` from your `precision.yaml`.
+* **Determinism** — for investigations, prefer `profiles/amp_off` or `bf16_strict`; combine with determinism toggles in your `precision.yaml`.
 * **DDP** — use `profiles/ddp` and launch with `torchrun --nproc_per_node=N ...`. The DataModule should use a `DistributedSampler` when `strategy=ddp`.
 * **Kaggle** — prefer `profiles/kaggle` (offline logging, low workers, warmup on). Flip to `kaggle_submit` when producing artifacts.
 
@@ -143,14 +143,10 @@ spectramind train +defaults='[/profiles/ablation_priors_off]' \
 
 ## Troubleshooting
 
-* **“Missing monitored metric” on checkpoint/ES**
-  Ensure your validation step logs `${callbacks.model_checkpoint.monitor}` (default `val/loss`).
-* **W\&B/MLflow network errors on Kaggle**
-  Use `profiles/kaggle` (offline) or set `training.logger.offline=true`.
-* **Deadlocks with workers**
-  Use `num_workers: 0..2` and `persistent_workers: false` on Kaggle/CI; try `SM_MP_CTX=spawn`.
-* **Unstable AMP**
-  Switch to `profiles/amp_off` (pure FP32) or `bf16_strict` (no TF32). Check `precision.grad_scaler` settings for fp16.
+* **“Missing monitored metric” on checkpoint/ES** — ensure your validation step logs `${callbacks.model_checkpoint.monitor}` (default `val/loss`).
+* **W\&B / MLflow network errors on Kaggle** — use `profiles/kaggle` (offline) or set `training.logger.offline=true`.
+* **Deadlocks with workers** — use `num_workers: 0..2` and `persistent_workers: false` on Kaggle/CI; consider `SM_MP_CTX=spawn`.
+* **Unstable AMP** — switch to `profiles/amp_off` (pure FP32) or `bf16_strict` (no TF32). Check `precision.grad_scaler` settings for fp16.
 
 ---
 
@@ -160,12 +156,7 @@ spectramind train +defaults='[/profiles/ablation_priors_off]' \
   `ablation_priors_off.yaml`, `debug.yaml`, `overfit_small.yaml`, `low_vram.yaml`,
   `cpu.yaml`, `ddp.yaml`, `wandb_online.yaml`, `mlflow.yaml`, `profiling.yaml`,
   `amp_off.yaml`, `bf16_strict.yaml`, `resume.yaml`, `notebook.yaml`,
-
-
-…and continuing:
-
-```md
   `predict_only.yaml`, `diagnose.yaml`, `hyper_sweep.yaml`, `kaggle_submit.yaml`, and this `README.md`.
 
 > Add or tweak profiles freely—each should remain a thin overlay on `/training/*` without duplicating targets or factory wiring.
-```
+
