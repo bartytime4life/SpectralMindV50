@@ -63,11 +63,11 @@ package:
 # Kaggle parameters
 # ----------------------------------------------------------------------
 kaggle:
-  enabled: true
+  enabled: ${oc.env:KAGGLE_ENABLED, false}  # default off; enable explicitly
   competition: ${oc.env:KAGGLE_COMP, neurips-2025-ariel-data-challenge}
   title: ${oc.env:KAGGLE_TITLE, "SpectraMind V50 submission"}
   message: ${oc.env:KAGGLE_MSG, "Automated submission from SpectraMind V50 pipeline"}
-  dry_run: ${oc.env:KAGGLE_DRY_RUN, false}
+  dry_run: ${oc.env:KAGGLE_DRY_RUN, true}   # safer default
   no_upload: ${oc.env:KAGGLE_NO_UPLOAD, false}
   retries: 3
   backoff_seconds: 10
@@ -96,14 +96,21 @@ validate:
       unique: true
       nonempty: true
       prefix: null             # e.g. "sample_"; null disables
+      dtype: "string"
+      max_bytes: 128
     mu:
       bins: 283
       finite: true
+      dtype: "float"
+      min: 0.0                 # transit depths are non-negative (domain-aware)
+      max: 1.0                 # sanity bound; adjust if the challenge spec differs
     sigma:
       bins: 283
       finite: true
       nonnegative: true
       allow_zero: true
+      dtype: "float"
+      max: 1.0
     expected_rows: null        # set to an int to gate row count
     allow_nan: false
     allow_inf: false
