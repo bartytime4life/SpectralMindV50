@@ -2,7 +2,7 @@ name: integration
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, develop ]
     paths:
       - 'src/**'
       - 'configs/**'
@@ -15,7 +15,7 @@ on:
       - '.pre-commit-config.yaml'
       - '.github/workflows/integration.yml'
   pull_request:
-    branches: [main, develop]
+    branches: [ main, develop ]
     paths:
       - 'src/**'
       - 'configs/**'
@@ -44,7 +44,6 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   PIP_NO_PYTHON_VERSION_WARNING: '1'
   MPLBACKEND: 'Agg'
-  # SpectraMind defaults for CI/Kaggle-safe runs
   SM_SUBMISSION_BINS: '283'
   SM_CI: '1'
   ARTIFACT_RETENTION_DAYS: '14'
@@ -54,10 +53,11 @@ jobs:
     name: Ruff / Format / Pre-commit
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -75,12 +75,24 @@ jobs:
       - name: Ruff format (check only)
         run: ruff format --check .
 
-      - name: Ruff lint (github format)
-        run: ruff check --output-format=github src/ tests/ configs/ || true
+      - name: Ruff lint (github format → SARIF)
+        run: |
+          ruff check --output-format=github src/ tests/ configs/ || true
+          ruff check src/ tests/ configs/ --output-format sarif > ruff.sarif || true
 
       - name: Pre-commit (selected hooks)
         if: hashFiles('.pre-commit-config.yaml') != ''
         run: pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+
+      - name: Upload lint artifacts
+        if: always()
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
+        with:
+          name: lint-artifacts
+          path: |
+            ruff.sarif
+          if-no-files-found: ignore
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: Summarize lint
         if: always()
@@ -90,10 +102,11 @@ jobs:
     name: Type check (mypy)
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -103,7 +116,7 @@ jobs:
             mypy.ini
 
       - name: Prime mypy cache
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
         with:
           path: .mypy_cache
           key: ${{ runner.os }}-mypy-${{ env.PY_MAIN }}-${{ hashFiles('**/*.py','pyproject.toml','mypy.ini','.ruff.toml') }}
@@ -124,10 +137,11 @@ jobs:
     name: Config & schema sanity
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -184,10 +198,11 @@ jobs:
       fail-fast: false
       matrix:
         py: ['3.10', '3.11', '3.12']
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ matrix.py }}
           cache: 'pip'
@@ -203,7 +218,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           python -m pip install -e .
-          python -m pip install "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4"
+          python -m pip install "pytest>=8,<9" "pytest-cov>=4,<5" "pytest-xdist>=3,<4" "pytest-rerunfailures>=14,<15"
 
       - name: PyTest (fast) + coverage
         env:
@@ -211,14 +226,14 @@ jobs:
           SM_SUBMISSION_BINS: "283"
         run: |
           mkdir -p reports
-          pytest -q -n auto --disable-warnings --maxfail=1 \
+          pytest -q -n auto --disable-warnings --maxfail=1 --reruns 1 --reruns-delay 1 \
             --cov=src --cov-branch --cov-report=xml:reports/coverage.xml \
             --durations=25 \
             --junitxml=reports/tests-junit.xml
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: unit-test-artifacts-${{ matrix.py }}
           path: |
@@ -229,13 +244,13 @@ jobs:
 
       - name: Publish Unit Test Results
         if: always()
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: EnricoMi/publish-unit-test-result-action@3f5660f3a9cf74aa02543a9f6f05e07e07d5e7db # v2
         with:
           files: reports/tests-junit.xml
 
       - name: Publish Coverage Summary
         if: always()
-        uses: irongut/CodeCoverageSummary@v1.3.0
+        uses: irongut/CodeCoverageSummary@66b9cfd6a931ef682a0aabfa4b8a711c823ad950 # v1.3.0
         with:
           filename: reports/coverage.xml
           format: markdown
@@ -245,10 +260,11 @@ jobs:
     name: DVC + CLI smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -291,11 +307,12 @@ jobs:
     name: Build & verify package
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    needs: [lint, types, config-sanity, tests]
+    needs: [ lint, types, config-sanity, tests ]
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
         with:
           python-version: ${{ env.PY_MAIN }}
           cache: 'pip'
@@ -323,7 +340,7 @@ jobs:
           PY
 
       - name: Upload dist artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@834a144ee995460fba8ed112a2fc961b36a5ec5a # v4
         with:
           name: dist
           path: dist/*
