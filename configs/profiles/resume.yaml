@@ -1,14 +1,61 @@
-# Resume from the latest/best checkpoint path provided via env
+# ==============================================================================
+# SpectraMind V50 — Profile: Resume from Checkpoint
+# ------------------------------------------------------------------------------
+# Usage examples:
+#   # Resume from explicit path
+#   SM_RESUME_CKPT="artifacts/models/last.ckpt" \
+#   python -m spectramind train +defaults='[/profiles/resume]'
+#
+#   # Point to a directory; your launcher can resolve "latest" or "best" inside it
+#   SM_CKPT_DIR="artifacts/models" \
+#   python -m spectramind train +defaults='[/profiles/resume]'
+#
+# Notes:
+#   - Lightning (>=2.x): pass ckpt_path=paths.resume_ckpt into Trainer.fit(...) when non-empty.
+#   - In DDP, only rank0 should resolve/validate the path; pass same ckpt_path to all ranks.
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
 
+# Trainer horizon (ignored if ckpt is at the end already)
 trainer:
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 60}
+  # If your stack exposes these, keep restarts stable:
+  # deterministic: ${oc.env:SM_DETERMINISTIC, false}
+  # benchmark: ${oc.env:SM_BENCHMARK, true}
 
+# Pathing & resume options
 paths:
-  ckpt_dir: ${oc.env:SM_CKPT_DIR,artifacts/models}
-  resume_ckpt: ${oc.env:SM_RESUME_CKPT,""}     # e.g., artifacts/models/last.ckpt
+  # Directory where checkpoints live (used by your launcher if it needs to pick "latest"/"best")
+  ckpt_dir: ${oc.env:SM_CKPT_DIR, artifacts/models}
+  # Absolute or repo-relative file path to the exact checkpoint; when non-empty, use as Trainer.fit(..., ckpt_path=...)
+  resume_ckpt: ${oc.env:SM_RESUME_CKPT, ""}
+  # Optional: if your launcher supports it, let it choose "latest" or "best" file under ckpt_dir
+  resume_policy: ${oc.env:SM_RESUME_POLICY, "latest"}   # "latest" | "best" | "none"
 
-# Your launcher/Trainer factory should pass ckpt_path=paths.resume_ckpt when non-empty.
+# Loader/weight-restore safety knobs (honored by your Trainer/model factory as applicable)
+resume:
+  # Strict state_dict loading (set false to allow renamed keys / minor arch changes)
+  strict: ${oc.env:SM_RESUME_STRICT, true}
+  # Ignore optimizer/scheduler state when resuming only weights (fresh LR schedule)
+  weights_only: ${oc.env:SM_RESUME_WEIGHTS_ONLY, false}
+  # Fail early if checkpoint missing/corrupt
+  fail_if_missing: ${oc.env:SM_RESUME_FAIL, true}
+  # Validate that model hyperparams/config match the checkpoint metadata (if your code supports it)
+  validate_hparams: ${oc.env:SM_RESUME_VALIDATE, true}
+
+# DDP-friendly hints (no-op if single-GPU/CPU)
+ddp:
+  # Ensure all ranks use the same ckpt path; resolve on rank0 then broadcast
+  rank_zero_resolve: ${oc.env:SM_RANK0_RESOLVE, true}
+
+# Your launcher/Trainer factory should:
+# 1) If paths.resume_ckpt != "", pass ckpt_path=paths.resume_ckpt to Trainer.fit(...)
+# 2) Else, if resume_policy != "none", resolve ckpt_path from ckpt_dir per policy, then pass it
+# 3) Honor resume.strict / weights_only as loader flags in your restore logic if applicable
+
 experiment:
-  tags: ["profile:resume"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "resume-run"}
+  tags: ${oc.env:SM_TAGS, ["profile:resume","ckpt"]}
+
