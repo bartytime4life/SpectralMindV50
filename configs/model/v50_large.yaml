@@ -1,0 +1,49 @@
+# SpectraMind V50 — Larger capacity (ablations / research)
+
+name: v50_large
+bins: ${data.channels.airs.bins}
+fgs1_index: 0
+
+fgs1:
+  _target_: spectramind.models.fgs1.SSMEncoder
+  d_model: 192
+  n_layers: 4
+  ssm:
+    step_rank: 32
+    conv_kernel: 7
+  dropout: 0.10
+  norm: "layernorm"
+  positional_encoding: "learned"
+
+airs:
+  _target_: spectramind.models.airs.SpectralConvEncoder
+  d_model: 256
+  n_blocks: 5
+  conv:
+    kernel: 5
+    dilation: [1, 2, 4, 8, 16]
+  spectral_pe: "sinusoid"
+  dropout: 0.10
+  norm: "layernorm"
+
+fusion:
+  _target_: spectramind.models.fusion.CrossAttentionFusion
+  d_model: 256
+  n_heads: 8
+  n_layers: 3
+  mlp_ratio: 2.0
+  dropout: 0.10
+  norm: "layernorm"
+  gate_fgs1: true
+
+decoder:
+  _target_: spectramind.models.decode.HeteroSpectralDecoder
+  d_model: 256
+  hidden: [512, 256]
+  activation: "gelu"
+  dropout: 0.10
+  spectral_norm: true
+  sigma:
+    activation: "softplus"
+    eps: 1.0e-6
+  project_bins: ${model.bins}
