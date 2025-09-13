@@ -1,4 +1,14 @@
-# Squeeze into 8–12GB: more accumulation, fewer workers, conservative prefetch
+# ==============================================================================
+# SpectraMind V50 — Profile: Low VRAM (8–12GB)
+# ------------------------------------------------------------------------------
+# Intent:
+#   - Squeeze training into smaller GPUs (8–12 GB)
+#   - Mixed precision + grad accumulation to cut memory
+#   - Fewer workers & conservative prefetch to trim host/GPU RAM
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/low_vram]'
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -9,21 +19,46 @@ defaults:
   - /training/scheduler: scheduler
   - /training/accumulate: accumulate
 
-accumulate_grad_batches: 4
+# Trainer mirrors precision mode to keep PL & Hydra in sync
+trainer:
+  precision: ${precision.mode}
+  # Optional: cap batches if memory is still tight
+  # limit_train_batches: ${oc.env:SM_LIMIT_TRAIN, 1.0}
+  # limit_val_batches:   ${oc.env:SM_LIMIT_VAL,   1.0}
+  # enable_progress_bar: true
 
+# Gradient accumulation (effective global batch = per_gpu_bs * accum * num_gpus)
+accumulate:
+  grad_batches: ${oc.env:SM_ACCUM, 4}
+
+# Mixed precision for memory savings (use bf16-mixed on Ampere if desired)
 precision:
-  mode: "16-mixed"
+  mode: ${oc.env:SM_PRECISION, "16-mixed"}     # "16-mixed" | "bf16-mixed" | "32-true"
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, true}       # harmless for mem; speed on Ampere
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, true}
+  matmul:
+    precision: ${oc.env:SM_MATMUL_PRECISION, "high"}
 
+# DataLoader: conservative to reduce RAM pressure
 data_loader:
-  batch_size: 16
-  num_workers: 1
-  prefetch_factor: 2
+  batch_size: ${oc.env:SM_BATCH_SIZE, 16}
+  num_workers: ${oc.env:SM_WORKERS, 1}
+  persistent_workers: false
+  prefetch_factor: ${oc.env:SM_PREFETCH, 2}
   pin_memory: true
+  pin_memory_device: "cuda"
 
+# Scheduler: brief warmup helps stability when using mixed precision/accum
 scheduler:
   warmup:
-    enabled: true
-    steps: 500
+    enabled: ${oc.env:SM_WARMUP, true}
+    steps: ${oc.env:SM_WARMUP_STEPS, 500}
+
+# (Optional) gradient clipping for stability at small VRAM / large accum
+#callbacks:
+#  gradient_clip_val: ${oc.env:SM_CLIP_VAL, 0.0}
 
 experiment:
-  tags: ["profile:low_vram"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "low-vram"}
+  tags: ${oc.env:SM_TAGS, ["profile:low_vram","mp=on","accum=4"]}
