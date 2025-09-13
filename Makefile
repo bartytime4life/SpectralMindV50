@@ -1,17 +1,13 @@
 # ==============================================================================
-# SpectraMind V50 — Mission-grade Makefile (Ultra-Upgraded)
-# ==============================================================================
-# One-command, reproducible DX for local dev, CI, and Kaggle
-# - Fast installs (uv if available), clean fallbacks
-# - Safety rails (clean git, version sync, schema checks)
-# - Rich targets for docs, diagrams, Docker, DVC, security, Kaggle
+# SpectraMind V50 — Mission-grade Makefile (Ultra-Upgraded, fixed)
 # ==============================================================================
 
-# Core shell hygiene
 SHELL := /usr/bin/env bash
 .ONESHELL:
 .SHELLFLAGS := -Eeuo pipefail -c
 MAKEFLAGS += --warn-undefined-variables --no-builtin-rules
+.DEFAULT_GOAL := help
+export PYTHONHASHSEED = 0
 
 # Colors (respect NO_COLOR/CI)
 ifeq ($(NO_COLOR)$(CI),)
@@ -32,98 +28,77 @@ notice  = @printf "$(C_INFO)» $(1)$(C_RESET)\n"
 # ------------------------------------------------------------------------------
 # Project / Python
 # ------------------------------------------------------------------------------
-PKG          ?= spectramind
-PY_MIN       ?= 3.11
-PY           ?= python3
-VENV         ?= .venv
-VENV_BIN     := $(VENV)/bin
-PIP          := $(VENV_BIN)/pip
-PYTHON       := $(VENV_BIN)/python
-PRECOMMIT    := $(VENV_BIN)/pre-commit
+PKG      ?= spectramind
+PY_MIN   ?= 3.11
+PY       ?= python3
+VENV     ?= .venv
+VENV_BIN := $(VENV)/bin
+PIP      := $(VENV_BIN)/pip
+PYTHON   := $(VENV_BIN)/python
+PRECOMMIT:= $(VENV_BIN)/pre-commit
 
-# Requirements (auto-detected if files exist)
-REQ_MAIN     ?= requirements.txt
-REQ_DEV      ?= requirements-dev.txt
-REQ_KAGGLE   ?= requirements-kaggle.txt
-REQ_LOCK     ?= requirements.lock.txt
+# Requirements (auto-detected)
+REQ_MAIN   ?= requirements.txt
+REQ_DEV    ?= requirements-dev.txt
+REQ_KAGGLE ?= requirements-kaggle.txt
+REQ_LOCK   ?= requirements.lock.txt
 
-# Optional: load .env into environment (no error if missing)
+# Optional .env export
 ifneq ("$(wildcard .env)","")
   export $(shell sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env)
 endif
 
 # ------------------------------------------------------------------------------
-# DVC
+# DVC / Release / Kaggle / Docker
 # ------------------------------------------------------------------------------
-DVC_REMOTE       ?= localcache
-DVC_REMOTE_PATH  ?= ./dvc-remote
+DVC_REMOTE      ?= localcache
+DVC_REMOTE_PATH ?= ./dvc-remote
 
-# ------------------------------------------------------------------------------
-# Release & versioning
-# ------------------------------------------------------------------------------
 VERSION_FILE ?= VERSION
 TAG          ?=
 GPG_SIGN     ?= 0
 TAG_MSG      ?= "Release $(TAG)"
 
-# ------------------------------------------------------------------------------
-# Kaggle bundle
-# ------------------------------------------------------------------------------
 ARTIFACTS_DIR     ?= artifacts
 SUBMISSION_DIR    ?= $(ARTIFACTS_DIR)
 SUBMISSION_ZIP    ?= $(SUBMISSION_DIR)/submission.zip
 SUBMISSION_SCHEMA ?= schemas/submission.schema.json
+EVENTS_SCHEMA     ?= schemas/events.schema.json
 
-# ------------------------------------------------------------------------------
-# Docker
-# ------------------------------------------------------------------------------
-IMAGE_NAME      ?= spectramind-v50
-IMAGE_TAG       ?= local
-INSTALL_EXTRAS  ?= gpu,dev
-DOCKER_BUILDKIT ?= 1
-GPU_FLAG        ?= $(shell (command -v nvidia-smi >/dev/null 2>&1 && echo "--gpus all") || echo "")
-UIDGID_FLAGS    ?= -u $$(id -u):$$(id -g)
+IMAGE_NAME        ?= spectramind-v50
+IMAGE_TAG         ?= local
+INSTALL_EXTRAS    ?= gpu,dev
+DOCKER_BUILDKIT   ?= 1
+GPU_FLAG          ?= $(shell (command -v nvidia-smi >/dev/null 2>&1 && echo "--gpus all") || echo "")
+UIDGID_FLAGS      ?= -u $$(id -u):$$(id -g)
+DOCKERFILE_RUNTIME?= Dockerfile.runtime.cuda
+DOCKERFILE_CPU    ?= Dockerfile.runtime.cuda
 
-# ------------------------------------------------------------------------------
-# Pipeline config for scripts/run_pipeline.sh
-# ------------------------------------------------------------------------------
+# Pipeline preset
 CFG ?= train
 
-# ------------------------------------------------------------------------------
 # Diagrams
-# ------------------------------------------------------------------------------
 DIAGRAMS_THEME ?= neutral
 DIAGRAMS_CONC  ?= 8
 
-# ------------------------------------------------------------------------------
-# Misc / defaults
-# ------------------------------------------------------------------------------
-export PYTHONHASHSEED = 0
-.DEFAULT_GOAL := help
-
-# Detection flags
+# Env flags
 IS_CI     := $(if $(CI),1,0)
 IS_KAGGLE := $(if $(wildcard /kaggle),1,0)
 IS_DOCKER := $(shell test -f /.dockerenv && echo 1 || echo 0)
 
 # ------------------------------------------------------------------------------
-# Phony
+# PHONY
 # ------------------------------------------------------------------------------
 .PHONY: help help-verbose about where env ensure-venv ensure-tools ensure-precommit \
-        dev precommit hooks sync-tools \
-        lint fmt-check format type test test-fast test-k coverage check \
-        docs docs-serve \
-        calibrate preprocess train predict diagnose submit pipeline \
-        dvc-setup dvc-repro dvc-push dvc-pull \
-        doctor cuda-parity \
+        dev precommit hooks sync-tools lint fmt-check format type test test-fast test-k coverage check \
+        docs docs-serve calibrate preprocess train predict diagnose submit pipeline \
+        dvc-setup dvc-repro dvc-push dvc-pull doctor cuda-parity \
         sbom pip-audit trivy scan licenses schema-check yaml-lint md-lint nb-clean \
         kaggle-boot kaggle-package kaggle-verify kaggle-clean kaggle \
         docker-build docker-build-cpu docker-run docker-shell \
-        build wheel sdist install develop uninstall \
-        version tag push-tag release bump ensure-clean freeze \
-        diagrams diagrams-dark diagrams-clean clean distclean ci \
-        preprocess.% preprocess.fast preprocess.nominal preprocess.strict \
-        preprocess.all clean.features
+        build wheel sdist install install-dev develop uninstall freeze \
+        version tag push-tag release bump ensure-clean diagrams diagrams-dark diagrams-clean clean distclean ci \
+        preprocess.% preprocess.all clean.features
 
 # ------------------------------------------------------------------------------
 # Help
@@ -133,7 +108,7 @@ help: ## List common targets
 	/^[a-zA-Z0-9_.\-]+:.*##/ { printf "  $(C_INFO)%-26s$(C_RESET) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 help-verbose: ## Show full Makefile header
-	@sed -n '1,160p' $(lastword $(MAKEFILE_LIST))
+	@sed -n '1,200p' $(lastword $(MAKEFILE_LIST))
 
 about: ## Show environment diagnostics
 	$(call notice,Repo   : $$([ -d .git ] && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "not-a-git-repo"))
@@ -162,14 +137,14 @@ ensure-venv: ## Create virtualenv if missing (guards Python ≥ $(PY_MIN))
 	@if [ ! -d "$(VENV)" ]; then echo ">> Creating venv: $(VENV)"; $(PY) -m venv "$(VENV)"; fi
 	@$(PIP) -q install -U pip wheel || true
 
-ensure-tools: ensure-venv ## Install deps (prefers uv; falls back to pip)
+ensure-tools: ensure-venv ## Install deps (prefers uv inside venv; falls back to pip)
 	@if command -v uv >/dev/null 2>&1; then \
-	  echo ">> Using uv for fast installs"; \
-	  uv pip install --system --python $(PYTHON) -U pip wheel || true; \
-	  [ -f $(REQ_MAIN) ]   && uv pip install --system --python $(PYTHON) -r $(REQ_MAIN)   || true; \
-	  [ -f $(REQ_DEV) ]    && uv pip install --system --python $(PYTHON) -r $(REQ_DEV)    || true; \
-	  [ -f $(REQ_KAGGLE) ] && uv pip install --system --python $(PYTHON) -r $(REQ_KAGGLE) || true; \
-	  uv pip install --system --python $(PYTHON) -e . || true; \
+	  echo ">> Using uv in venv"; \
+	  uv pip install --python $(PYTHON) -U pip wheel || true; \
+	  [ -f $(REQ_MAIN) ]   && uv pip install --python $(PYTHON) -r $(REQ_MAIN)   || true; \
+	  [ -f $(REQ_DEV) ]    && uv pip install --python $(PYTHON) -r $(REQ_DEV)    || true; \
+	  [ -f $(REQ_KAGGLE) ] && uv pip install --python $(PYTHON) -r $(REQ_KAGGLE) || true; \
+	  uv pip install --python $(PYTHON) -e . || true; \
 	else \
 	  [ -f $(REQ_MAIN) ]   && $(PIP) install -r $(REQ_MAIN)   || true; \
 	  [ -f $(REQ_DEV) ]    && $(PIP) install -r $(REQ_DEV)    || true; \
@@ -186,12 +161,12 @@ dev: env precommit ## Setup local dev env & run pre-commit (once)
 precommit: ## Run pre-commit on all files (if installed)
 	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) run -a || true; else echo "::warning::pre-commit not found"; fi
 
-hooks: ## Install all dev hooks (pre-commit + nbstripout if present)
+hooks: ## Install pre-commit + nbstripout hooks
 	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) install; fi
 	@if [ -x "$(VENV_BIN)/nbstripout" ]; then git ls-files '*.ipynb' | xargs -r $(VENV_BIN)/nbstripout --install; fi
 
-sync-tools: ## Update dev toolchain (ruff/mypy/mdformat/toml-sort)
-	@$(PIP) install -U ruff mypy mdformat toml-sort pip-tools || true
+sync-tools: ## Update dev toolchain
+	@$(PIP) install -U ruff mypy mdformat toml-sort pip-tools build || true
 	@if [ -x "$(PRECOMMIT)" ]; then $(PRECOMMIT) autoupdate || true; fi
 
 # ------------------------------------------------------------------------------
@@ -244,23 +219,12 @@ docs-serve: diagrams ## Serve docs locally (MkDocs @ 0.0.0.0:8000)
 # ------------------------------------------------------------------------------
 # Pipeline (CLI-first)
 # ------------------------------------------------------------------------------
-calibrate: ## Calibrate sensors/data
-	$(PYTHON) -m $(PKG) calibrate run
-
-preprocess: ## Preprocess calibrated → features
-	$(PYTHON) -m $(PKG) preprocess run
-
-train: ## Train model
-	$(PYTHON) -m $(PKG) train run
-
-predict: ## Predictions → artifacts/predictions
-	$(PYTHON) -m $(PKG) predict run
-
-diagnose: ## Diagnostics & HTML report
-	$(PYTHON) -m $(PKG) diagnose run
-
-submit: ## Build submission artifacts (ZIP)
-	$(PYTHON) -m $(PKG) submit package
+calibrate:  ; $(PYTHON) -m $(PKG) calibrate run     ## Calibrate sensors/data
+preprocess: ; $(PYTHON) -m $(PKG) preprocess run    ## Preprocess calibrated → features
+train:      ; $(PYTHON) -m $(PKG) train run         ## Train model
+predict:    ; $(PYTHON) -m $(PKG) predict run       ## Predictions → artifacts/predictions
+diagnose:   ; $(PYTHON) -m $(PKG) diagnose run      ## Diagnostics & HTML report
+submit:     ; $(PYTHON) -m $(PKG) submit package    ## Build submission artifacts (ZIP)
 
 pipeline: ## Run calibrate → train → predict → submit (CFG?=train)
 	@if [ -x scripts/run_pipeline.sh ]; then \
@@ -284,45 +248,30 @@ dvc-repro: ## Reproduce DVC pipeline (no-tty in CI/Kaggle)
 	  $(VENV_BIN)/dvc repro $$EXTRA || exit 1; \
 	else echo "::warning::dvc not installed"; fi
 
-dvc-push: ## Push DVC-tracked data
-	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc push; else echo "::warning::dvc not installed"; fi
-
-dvc-pull: ## Pull DVC-tracked data
-	@if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc pull; else echo "::warning::dvc not installed"; fi
+dvc-push: ;  @if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc push; else echo "::warning::dvc not installed"; fi  ## Push DVC-tracked data
+dvc-pull: ;  @if [ -x "$(VENV_BIN)/dvc" ]; then $(VENV_BIN)/dvc pull; else echo "::warning::dvc not installed"; fi  ## Pull DVC-tracked data
 
 # ------------------------------------------------------------------------------
 # System / parity checks
 # ------------------------------------------------------------------------------
-doctor: ## Quick dependency checks (IO, DVC, OmegaConf)
-	$(PYTHON) -m $(PKG) sys doctor
-
+doctor: ;      $(PYTHON) -m $(PKG) sys doctor  ## Quick dependency checks
 cuda-parity: ## Enforce CUDA parity with Kaggle (fails on mismatch)
-	@if [ -x "$(PYTHON)" ]; then \
-	  $(PYTHON) -m $(PKG) sys doctor || true; \
-	  $(PYTHON) -m $(PKG) doctor --cuda --fail-on-mismatch; \
-	else echo "::error::Python venv missing. Run 'make env'."; exit 1; fi
+	$(PYTHON) -m $(PKG) sys doctor || true
+	$(PYTHON) -m $(PKG) doctor --cuda --fail-on-mismatch
 
 # ------------------------------------------------------------------------------
 # Packaging / install
 # ------------------------------------------------------------------------------
-build: ## Build sdist+wheel into dist/
+build:  ## Build sdist+wheel into dist/
 	@$(PYTHON) -m build
 
-wheel: ## Build wheel only
-	@$(PYTHON) -m build --wheel
+wheel:  ; @$(PYTHON) -m build --wheel   ## Build wheel only
+sdist:  ; @$(PYTHON) -m build --sdist   ## Build source distribution only
 
-sdist: ## Build source distribution only
-	@$(PYTHON) -m build --sdist
-
-install: ## Install project into venv (non-editable)
-	@$(PIP) install .
-
-develop: ## Install project in editable mode
-	@$(PIP) install -e .
-
-uninstall: ## Uninstall package from venv
-	@$(PIP) uninstall -y $(PKG) || true
-
+install:     ; @$(PIP) install .        ## Install project into venv (non-editable)
+install-dev: ; @$(PIP) install -e ".[dev]" || $(PIP) install -e .  ## Editable + dev extras
+develop:     ; @$(PIP) install -e .     ## Editable install
+uninstall:   ; @$(PIP) uninstall -y $(PKG) || true   ## Uninstall
 freeze: ## Write fully resolved environment to $(REQ_LOCK)
 	@mkdir -p $(ARTIFACTS_DIR)
 	@$(PIP) freeze | tee $(REQ_LOCK) >/dev/null
@@ -331,7 +280,7 @@ freeze: ## Write fully resolved environment to $(REQ_LOCK)
 # ------------------------------------------------------------------------------
 # Security / Supply Chain
 # ------------------------------------------------------------------------------
-licenses: ## Export 3rd-party license manifest (pip-licenses)
+licenses: ## Export license manifest (pip-licenses)
 	@mkdir -p "$(ARTIFACTS_DIR)"
 	@if [ -x "$(VENV_BIN)/pip-licenses" ]; then \
 	  $(VENV_BIN)/pip-licenses --format=json --with-authors --with-urls > $(ARTIFACTS_DIR)/licenses.json; \
@@ -347,35 +296,29 @@ sbom: ## Generate SBOM (Syft preferred; CycloneDX fallback)
 	else echo "::warning::No SBOM tool available; skipping SBOM."; fi
 	@echo "::notice::SBOM -> $(ARTIFACTS_DIR)/sbom.json"
 
-pip-audit: ## Audit Python deps (pip-audit)
+pip-audit: ## Audit Python deps
 	@if [ -x "$(VENV_BIN)/pip-audit" ]; then \
 	  [ -f $(REQ_MAIN) ]   && $(VENV_BIN)/pip-audit -r $(REQ_MAIN)   || true; \
 	  [ -f $(REQ_DEV) ]    && $(VENV_BIN)/pip-audit -r $(REQ_DEV)    || true; \
 	  [ -f $(REQ_KAGGLE) ] && $(VENV_BIN)/pip-audit -r $(REQ_KAGGLE) || true; \
 	else echo "::warning::pip-audit not installed"; fi
 
-yaml-lint: ## Lint YAML (yamllint)
-	@if [ -x "$(VENV_BIN)/yamllint" ]; then $(VENV_BIN)/yamllint . || true; fi
+yaml-lint: ; @if [ -x "$(VENV_BIN)/yamllint" ]; then $(VENV_BIN)/yamllint . || true; fi        ## Lint YAML
+md-lint:   ; @if [ -x "$(VENV_BIN)/mdformat" ]; then $(VENV_BIN)/mdformat --check . || true; fi ## Lint Markdown
+nb-clean:  ; @if [ -x "$(VENV_BIN)/nbstripout" ]; then git ls-files '*.ipynb' | xargs -r $(VENV_BIN)/nbstripout; else echo "::warning::nbstripout not installed"; fi ## Strip notebook outputs
 
-md-lint: ## Lint Markdown (mdformat check)
-	@if [ -x "$(VENV_BIN)/mdformat" ]; then $(VENV_BIN)/mdformat --check . || true; fi
-
-schema-check: ## Validate JSON files against schemas (check-jsonschema)
+schema-check: ## Validate JSON files against schemas
 	@if [ -x "$(VENV_BIN)/check-jsonschema" ]; then \
-	  echo ">> Run schema checks where mappings exist (submission/events)"; \
+	  echo ">> Schema checks (submission/events)"; \
 	  for j in $$(git ls-files '*.json'); do \
 	    case "$$j" in \
-	      *submission*.json|*events*.json) \
-	        echo "  - $$j"; \
-	        "$(VENV_BIN)/check-jsonschema" --schemafile "$(SUBMISSION_SCHEMA)" "$$j" || true ;; \
+	      *submission*.json) sc="$(SUBMISSION_SCHEMA)" ;; \
+	      *events*.json)     sc="$(EVENTS_SCHEMA)" ;; \
+	      *)                 sc="" ;; \
 	    esac; \
+	    if [ -n "$$sc" ]; then echo "  - $$j ↦ $$sc"; "$(VENV_BIN)/check-jsonschema" --schemafile "$$sc" "$$j" || exit 1; fi; \
 	  done; \
 	else echo "::warning::check-jsonschema not installed"; fi
-
-nb-clean: ## Strip outputs from notebooks (nbstripout)
-	@if [ -x "$(VENV_BIN)/nbstripout" ]; then git ls-files '*.ipynb' | xargs -r $(VENV_BIN)/nbstripout; else echo "::warning::nbstripout not installed"; fi
-
-scan: pip-audit sbom yaml-lint md-lint schema-check licenses trivy ## Run all security/quality scans
 
 trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	if command -v trivy >/dev/null 2>&1; then \
@@ -383,10 +326,12 @@ trivy: ## Scan repo & Dockerfile (Trivy; requires Docker)
 	  trivy config --exit-code 0 . || true; \
 	else echo "::warning::Trivy not installed; skipping scan."; fi
 
+scan: pip-audit sbom yaml-lint md-lint schema-check licenses trivy ## Security/quality scans
+
 # ------------------------------------------------------------------------------
-# Kaggle helper targets
+# Kaggle helpers
 # ------------------------------------------------------------------------------
-kaggle-boot: ## Bootstrap Kaggle kernel (bin/kaggle-boot.sh)
+kaggle-boot: ## Bootstrap Kaggle kernel
 	@if [ -x bin/kaggle-boot.sh ]; then bash bin/kaggle-boot.sh --quiet || true; else echo "::warning::bin/kaggle-boot.sh not found"; fi
 
 kaggle-package: ## Build Kaggle submission bundle -> artifacts/submission.zip
@@ -418,20 +363,16 @@ kaggle-verify: ## Verify submission bundle integrity
 	else echo ">> No schema provided; basic verification only."; fi
 	@echo "::notice::Kaggle bundle verified."
 
-kaggle-clean: ## Remove local Kaggle bundle
-	rm -f "$(SUBMISSION_ZIP)"
-
+kaggle-clean: ; rm -f "$(SUBMISSION_ZIP)"  ## Remove local Kaggle bundle
 kaggle: kaggle-boot kaggle-package kaggle-verify ## Bootstrap + package + verify
 
 # ------------------------------------------------------------------------------
-# Diagrams (Mermaid via scripts/render_diagrams.sh)
+# Diagrams (Mermaid)
 # ------------------------------------------------------------------------------
 diagrams: ## Render Mermaid diagrams -> SVG
 	@if [ -x scripts/render_diagrams.sh ]; then ./scripts/render_diagrams.sh -t "$(DIAGRAMS_THEME)" -c "$(DIAGRAMS_CONC)"; else echo "::warning::scripts/render_diagrams.sh not found"; fi
-
 diagrams-dark: ## Render diagrams with dark theme + PNGs
 	@if [ -x scripts/render_diagrams.sh ]; then ./scripts/render_diagrams.sh -t dark -p -o assets/diagrams/out -c "$(DIAGRAMS_CONC)"; else echo "::warning::scripts/render_diagrams.sh not found"; fi
-
 diagrams-clean: ## Remove generated diagram images
 	-find assets/diagrams -type f \( -name '*.svg' -o -name '*.png' \) -delete || true
 	-find docs/diagrams    -type f \( -name '*.svg' -o -name '*.png' \) -delete || true
@@ -440,12 +381,15 @@ diagrams-clean: ## Remove generated diagram images
 # Docker (GPU + CPU)
 # ------------------------------------------------------------------------------
 docker-build: ## Build CUDA image (INSTALL_EXTRAS=$(INSTALL_EXTRAS))
-	@echo ">> Building $(IMAGE_NAME):$(IMAGE_TAG) with extras=$(INSTALL_EXTRAS)"
-	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build --build-arg INSTALL_EXTRAS=$(INSTALL_EXTRAS) -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	@echo ">> Building $(IMAGE_NAME):$(IMAGE_TAG) with extras=$(INSTALL_EXTRAS) using $(DOCKERFILE_RUNTIME)"
+	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build -f $(DOCKERFILE_RUNTIME) \
+	  --build-arg INSTALL_EXTRAS=$(INSTALL_EXTRAS) \
+	  -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
-docker-build-cpu: ## Build CPU-only image (target=cpu in Dockerfile)
-	@echo ">> Building CPU image $(IMAGE_NAME):$(IMAGE_TAG)-cpu"
-	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build --target cpu -t $(IMAGE_NAME):$(IMAGE_TAG)-cpu .
+docker-build-cpu: ## Build CPU-only image (target=cpu)
+	@echo ">> Building CPU image $(IMAGE_NAME):$(IMAGE_TAG)-cpu using $(DOCKERFILE_CPU) (target=cpu)"
+	DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build -f $(DOCKERFILE_CPU) --target cpu \
+	  -t $(IMAGE_NAME):$(IMAGE_TAG)-cpu .
 
 docker-run: ## Run container (GPU if available) -> spectramind --help
 	@if docker info >/dev/null 2>&1; then \
@@ -516,7 +460,7 @@ tag: ensure-clean ## Create annotated/signed tag (TAG=vX.Y.Z, GPG_SIGN=0|1)
 
 push-tag: ## Push tag to origin (triggers GH release)
 	@if [ -z "$(TAG)" ]; then echo >&2 "::error::TAG is required"; exit 1; fi
-	git push origin "$(TAG)"
+	git push --follow-tags origin "$(TAG)"
 	@echo "::notice::Pushed tag $(TAG)"
 
 release: tag push-tag ## Full release flow
@@ -549,44 +493,22 @@ distclean: clean ## Remove venv and artifacts
 ci: doctor cuda-parity check docs diagrams ## Local CI parity
 
 # ------------------------------------------------------------------------------
-# Preprocess preset shortcuts (Hydra)
+# Preprocess presets (Hydra) — fixed recursion
 # ------------------------------------------------------------------------------
-# Usage:
-#   make preprocess.fast   SPLIT=train
-#   make preprocess.nominal SPLIT=val OVERRIDES="io.format=npz preprocess/window.center_transit=false"
-#   make preprocess.strict SPLIT=test
 SPLIT ?= train
-PY ?= python
 ENTRY ?= -m $(PKG) preprocess
-DEFAULTS_PREFIX ?= +defaults='[/preprocess/presets
 OVERRIDES ?=
-
-_preprocess-run:
-	@command -v $(PY) >/dev/null 2>&1 || { echo "Python not found: $(PY)"; exit 1; }
-	@echo ">> PRESET=$(PRESET)  SPLIT=$(SPLIT)"
-	@echo ">> OVERRIDES=$(OVERRIDES)"
-	@$(PY) $(ENTRY) $(DEFAULTS) split=$(SPLIT) $(OVERRIDES)
+# Usage:
+#   make preprocess.fast     SPLIT=train
+#   make preprocess.nominal  SPLIT=val   OVERRIDES="io.format=npz preprocess/window.center_transit=false"
+#   make preprocess.strict   SPLIT=test
 
 preprocess.%: ## Run preprocess with preset (fast|nominal|strict)
-	@preset="$*"; \
-	case "$$preset" in \
-		fast|nominal|strict) DEFAULTS="$(DEFAULTS_PREFIX)/$$preset]'" ;; \
-		*) echo "Unknown preset: $$preset (expected fast|nominal|strict)"; exit 2 ;; \
-	esac; \
-	$(MAKE) _preprocess-run PRESET="$$preset" DEFAULTS="$$DEFAULTS"
-
-preprocess.fast:    ; @$(MAKE) preprocess.fast.S
-preprocess.nominal: ; @$(MAKE) preprocess.nominal.S
-preprocess.strict:  ; @$(MAKE) preprocess.strict.S
-
-preprocess.fast.S:
-	@$(MAKE) preprocess.fast SPLIT="$(SPLIT)" OVERRIDES="$(OVERRIDES)"
-
-preprocess.nominal.S:
-	@$(MAKE) preprocess.nominal SPLIT="$(SPLIT)" OVERRIDES="$(OVERRIDES)"
-
-preprocess.strict.S:
-	@$(MAKE) preprocess.strict SPLIT="$(SPLIT)" OVERRIDES="$(OVERRIDES)"
+	@preset="$*"; case "$$preset" in fast|nominal|strict) : ;; *) echo "Unknown preset: $$preset"; exit 2 ;; esac; \
+	DEFAULTS="+defaults='[/preprocess/presets/$$preset]'"; \
+	echo ">> PRESET=$$preset  SPLIT=$(SPLIT)"; \
+	echo ">> OVERRIDES=$(OVERRIDES)"; \
+	$(PYTHON) $(ENTRY) $$DEFAULTS split=$(SPLIT) $(OVERRIDES)
 
 PRESET ?= nominal
 preprocess.all: ## Run preprocess for all splits (PRESET=nominal)
