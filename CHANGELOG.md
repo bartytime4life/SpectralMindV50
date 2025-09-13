@@ -10,7 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### 🚀 Added
 - **Submission Table Schema**
-  - `schemas/submission.tableschema.sample_id.json` — Frictionless Table Schema with `sample_id` as canonical key; `mu_000..mu_282` required; `sigma_000..sigma_282` required (with `minimum: 0`); strict `dialect` and `encoding` for reproducible CSV I/O.
+  - `schemas/submission.tableschema.sample_id.json` — Frictionless Table Schema with `sample_id` as canonical key; `mu_000..mu_282` and `sigma_000..sigma_282` required (with `minimum: 0`); strict `dialect` and `encoding` for reproducible CSV I/O.
   - `schemas/submission_header.csv` — one-line header template enforcing column order for Kaggle submissions.
 - **Preprocess presets** (Hydra)
   - `configs/preprocess/presets/fast.yaml` — CI/Kaggle budget; robust normalize; no detrend/binning/augment; NPZ export.
@@ -22,13 +22,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - `normalize.yaml` — train-fit/apply-everywhere; mask-aware; per-sensor scope; exported stats (`scaler/`); manifest.
   - `window.yaml` — phase-aware centering with tolerance + sliding fallback; overlap-safe; label alignment; boundary mask dilation.
   - `pack.yaml` — fused + per-sensor tensors; union/per-sensor masks; metadata passthrough + coverage metrics; strict shape/bin checks.
-  - `tokenize.yaml` — time & spectral positional encodings (sinusoid / rotary / learned), concat-guardrails, broadcast options.
+  - `tokenize.yaml` — time & spectral positional encodings (sinusoid/rotary/learned), concat-guardrails, broadcast options.
   - `export.yaml` — compact NPZ/Parquet + `manifest.json` (key knobs captured).
 - **Docs**
-  - `configs/preprocess/ARCHITECTURE.md` — end-to-end stage contracts, shapes, schemas, CLI patterns, safety gates (Mermaid diagram).
+  - `configs/preprocess/ARCHITECTURE.md` — stage contracts, shapes, schemas, CLI patterns, safety gates (Mermaid diagram).
   - `configs/preprocess/README.md` — quickstart, env knobs, outputs, troubleshooting.
 - **Makefile (mission-grade)**
-  - Preset shortcuts: `make preprocess.fast|nominal|strict SPLIT=… OVERRIDES="k=v"`.
+  - Preset shortcuts: `make preprocess.{fast,nominal,strict} SPLIT=… OVERRIDES="k=v"`.
   - Security bundle: `make scan` (SBOM, pip-audit, YAML/MD lint, licenses, Trivy).
   - Release flow: `make bump|version|tag|push-tag|release`.
 - **Integration tests**
@@ -85,10 +85,22 @@ Initial public baseline of **SpectraMind V50** with CLI-first pipeline, Hydra co
 
 ## Release Links
 
-> ⚠️ Replace `OWNER/REPO` with your repository path (e.g., `bartytime4life/SpectraMindV50`), and adjust tags when you cut releases.
-
-[Unreleased]: https://github.com/OWNER/REPO/compare/v0.1.0...HEAD  
-[0.1.0]: https://github.com/OWNER/REPO/releases/tag/v0.1.0
+[Unreleased]: https://github.com/bartytime4life/SpectralMindV50/compare/v0.1.0...HEAD  
+[0.1.0]: https://github.com/bartytime4life/SpectralMindV50/releases/tag/v0.1.0
 
 [ADR-0002]: docs/adr/0002-composite-physics-informed-loss.md  
 [ADR-0004]: docs/adr/0004-dual-encoder-fusion-fgs1-airs.md
+```
+
+**Optional guardrail (nice-to-have):** add a pre-commit “changelog has release links” check:
+
+```yaml
+# .pre-commit-config.yaml (append)
+- repo: local
+  hooks:
+    - id: changelog-links
+      name: changelog links present
+      language: system
+      entry: bash -c 'grep -qE "^\[Unreleased\]:" CHANGELOG.md && grep -qE "^\[0\.[0-9]+\.[0-9]+\]:" CHANGELOG.md'
+      files: ^CHANGELOG\.md$
+```
