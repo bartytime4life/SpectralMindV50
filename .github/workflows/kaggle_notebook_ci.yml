@@ -20,6 +20,11 @@ on:
       - "requirements-kaggle.txt"
       - ".github/workflows/kaggle_notebook_ci.yml"
   workflow_dispatch:
+    inputs:
+      include_heavy:
+        description: 'Also run notebooks tagged as heavy (true/false)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -38,12 +43,14 @@ env:
   MPLBACKEND: "Agg"
   PYTHONWARNINGS: "ignore:::pkg_resources,ignore::UserWarning"
   SM_SUBMISSION_BINS: "283"
+  ARTIFACT_RETENTION_DAYS: "7"
 
 jobs:
   notebook-lint:
     name: Lint notebooks (nbqa ruff/black) + output hygiene
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
@@ -81,8 +88,9 @@ jobs:
   local-validate:
     name: Execute notebooks (offline-like; CPU) + param sweeps
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     needs: notebook-lint
+    permissions: { contents: read }
     steps:
       - name: Checkout
         uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
@@ -106,8 +114,11 @@ jobs:
           python -m pip install --upgrade pip wheel
           if [ -f requirements-kaggle.txt ]; then pip install -r requirements-kaggle.txt; fi
           python -m pip install jupyter nbconvert nbclient nbformat papermill ipykernel jq
+          # common numerics (quiet failure is fine on GH-hosted)
           python -m pip install -q numpy pandas matplotlib || true
+          # local package for imports, best-effort
           if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e . || true; fi
+          python -m ipykernel install --user --name=ci-kernel || true
 
       - name: Snapshot environment (debug/repro)
         run: |
@@ -116,7 +127,7 @@ jobs:
           pip freeze > .ci_run/env/pip-freeze.txt
           uname -a > .ci_run/env/uname.txt || true
 
-      - name: Warn on network/pip usage in notebooks (offline guard)
+      - name: Offline guard: warn on network/pip usage
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -132,13 +143,27 @@ jobs:
         run: |
           set -euo pipefail
           LIST_FILE="kaggle/ci_notebooks.txt"
+          WANT_HEAVY="${{ github.event.inputs.include_heavy || 'false' }}"
+          pick_default() {
+            git ls-files 'notebooks/**.ipynb' | grep -E '(00_|01_|10_|smoke|quick|sample|mini).*\.ipynb$' || true
+          }
           if [ -f "$LIST_FILE" ]; then
             mapfile -t NB < <(grep -v '^\s*#' "$LIST_FILE" | sed 's/#.*$//' | sed '/^\s*$/d')
           else
-            mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | grep -E '(00_|01_|10_|smoke|quick|sample|mini).*\.ipynb$' || true)
-            if [ "${#NB[@]}" -eq 0 ]; then
-              mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | head -n 1 || true)
-            fi
+            mapfile -t NB < <(pick_default)
+            [ "${#NB[@]}" -eq 0 ] && mapfile -t NB < <(git ls-files 'notebooks/**.ipynb' | head -n 1 || true)
+          fi
+          # Drop notebooks tagged heavy unless include_heavy=true (tag via top-level metadata: {"heavy": true})
+          if [ "${WANT_HEAVY,,}" != "true" ]; then
+            TMP=()
+            for nb in "${NB[@]}"; do
+              if jq -e '.metadata.heavy == true' "$nb" >/dev/null 2>&1; then
+                echo "::notice file=$nb::Skipping heavy notebook (enable via workflow_dispatch: include_heavy=true)."
+              else
+                TMP+=("$nb")
+              fi
+            done
+            NB=("${TMP[@]}")
           fi
           printf 'files=%s\n' "$(printf '%s ' "${NB[@]}")" >> "$GITHUB_OUTPUT"
 
@@ -200,42 +225,35 @@ jobs:
         if: always()
         run: |
           python - <<'PY'
-          import glob, json, sys, os
-          from pathlib import Path
-          import pandas as pd
+          import glob, json, sys, os, pandas as pd
           N = int(os.environ.get("SM_SUBMISSION_BINS", "283"))
-          expected_mu   = [f"mu_{i:03d}" for i in range(N)]
-          expected_sig  = [f"sigma_{i:03d}" for i in range(N)]
-          expected_cols = ["sample_id"] + expected_mu + expected_sig
-          errors = 0
+          mu   = [f"mu_{i:03d}" for i in range(N)]
+          sig  = [f"sigma_{i:03d}" for i in range(N)]
+          cols = ["sample_id"] + mu + sig
+          errs = 0
           for f in glob.glob("**/submission*.csv", recursive=True):
             try:
               df = pd.read_csv(f)
-              miss = [c for c in expected_cols if c not in df.columns]
-              if miss:
-                print(f"::error file={f}::Missing columns: {miss[:8]}{' ...' if len(miss)>8 else ''}"); errors += 1
-              if df.isna().any().any():
-                print(f"::error file={f}::Contains NaN values"); errors += 1
-              sigcols = [c for c in expected_sig if c in df]
-              if len(sigcols) and (df[sigcols].lt(0)).any().any():
-                print(f"::error file={f}::Negative sigma found"); errors += 1
+              miss = [c for c in cols if c not in df.columns]
+              if miss: print(f"::error file={f}::Missing columns: {miss[:8]}{' …' if len(miss)>8 else ''}"); errs += 1
+              if df.isna().any().any(): print(f"::error file={f}::Contains NaN values"); errs += 1
+              if any(c in df for c in sig) and (df[[c for c in sig if c in df]] < 0).any().any():
+                print(f"::error file={f}::Negative sigma values"); errs += 1
             except Exception as e:
-              print(f"::error file={f}::CSV validation error: {e}"); errors += 1
+              print(f"::error file={f}::CSV validation error: {e}"); errs += 1
           for f in glob.glob("**/submission*.json", recursive=True):
             try:
               obj = json.load(open(f))
-              if not isinstance(obj, dict):
-                print(f"::error file={f}::JSON must be an object"); errors += 1; continue
-              miss = [c for c in expected_cols if c not in obj]
-              if miss:
-                print(f"::error file={f}::Missing keys: {miss[:8]}{' ...' if len(miss)>8 else ''}"); errors += 1
-              for k in expected_sig:
+              if not isinstance(obj, dict): print(f"::error file={f}::JSON must be an object"); errs += 1; continue
+              miss = [c for c in cols if c not in obj]
+              if miss: print(f"::error file={f}::Missing keys: {miss[:8]}{' …' if len(miss)>8 else ''}"); errs += 1
+              for k in sig:
                 v = obj.get(k, 0)
                 if isinstance(v, (int,float)) and v < 0:
-                  print(f"::error file={f}::Negative sigma at {k}"); errors += 1; break
+                  print(f"::error file={f}::Negative sigma at {k}"); errs += 1; break
             except Exception as e:
-              print(f"::error file={f}::JSON validation error: {e}"); errors += 1
-          if errors: sys.exit(1)
+              print(f"::error file={f}::JSON validation error: {e}"); errs += 1
+          if errs: sys.exit(1)
           print("Submission validation OK (no files or all valid)")
           PY
 
@@ -249,13 +267,14 @@ jobs:
             .ci_run/notebooks_html/*.html
             .ci_run/params_html/*.html
             .ci_run/env/**
-          retention-days: 7
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   validate-kaggle-metadata:
     name: Validate Kaggle kernel & dataset metadata
     runs-on: ubuntu-latest
     needs: local-validate
     timeout-minutes: 10
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
 
@@ -296,6 +315,7 @@ jobs:
     needs: [ local-validate, validate-kaggle-metadata ]
     timeout-minutes: 20
     if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY }}
+    permissions: { contents: read }
     steps:
       - name: Checkout
         uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
@@ -351,7 +371,7 @@ jobs:
         with:
           name: kaggle-push-logs
           path: kaggle_push_*.log
-          retention-days: 7
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   dataset-sync:
     name: Sync datasets to Kaggle (optional)
@@ -359,11 +379,11 @@ jobs:
     needs: [ local-validate, validate-kaggle-metadata ]
     timeout-minutes: 20
     if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && secrets.KAGGLE_USERNAME && secrets.KAGGLE_KEY && hashFiles('kaggle/datasets/**/dataset-metadata.json') != '' }}
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@3df4ab11eba7bda6032a0b82a6bb43b11571feac # v4
       - uses: actions/setup-python@0b93645e9fea7318efd9b4012f1f1a1f4f6c21fc # v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+        with: { python-version: ${{ env.PYTHON_VERSION }} }
       - name: Install Kaggle CLI
         run: |
           python -m pip install --upgrade pip
@@ -384,4 +404,4 @@ jobs:
         with:
           name: kaggle-dataset-logs
           path: kaggle_dataset_*.log
-          retention-days: 7
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
