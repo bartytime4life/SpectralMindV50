@@ -68,14 +68,14 @@ Each ADR documents context, decision, consequences, and compliance gates.
 ## ADR Dependency Graph
 
 ```mermaid
-- ADR-0001 — Hydra + DVC
-  - ADR-0005 — CLI-First Orchestration
-    - ADR-0006 — Reproducibility Standards
-      - ADR-0007 — Submission Schema and Validation
-  - ADR-0002 — Physics-Informed Losses
-    - ADR-0004 — Dual Encoder Fusion
-  - ADR-0003 — CI to CUDA Parity
-    - ADR-0006 — Reproducibility Standards
+| Parent ADR | Depends On / Leads To                  |
+|------------|----------------------------------------|
+| ADR-0001   | ADR-0005, ADR-0002, ADR-0003          |
+| ADR-0005   | ADR-0006                               |
+| ADR-0006   | ADR-0007                               |
+| ADR-0002   | ADR-0004                               |
+| ADR-0003   | ADR-0006                               |
+
 ````
 
 ```
