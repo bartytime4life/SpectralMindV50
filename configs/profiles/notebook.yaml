@@ -1,4 +1,15 @@
-# Jupyter/Kaggle notebook ergonomics: quieter, progressive refresh, shorter runs
+# ==============================================================================
+# SpectraMind V50 — Profile: Notebook (quiet, progressive refresh, short runs)
+# ------------------------------------------------------------------------------
+# Usage:
+#   python -m spectramind train +defaults='[/profiles/notebook]'
+#
+# Intent:
+#   - Friendly in Jupyter/Kaggle: moderate logging, steady progress UI
+#   - Shorter epochs / mid-epoch validation → quicker feedback
+#   - Conservative DataLoader (no persistent workers) to avoid kernel churn
+# ==============================================================================
+
 defaults:
   - /training/lightning: lightning
   - /training/precision: precision
@@ -6,18 +17,43 @@ defaults:
   - /training/logger: logger
   - /training/callbacks: callbacks
 
+# Trainer: short schedule, moderate logging cadence, mid-epoch val
 trainer:
   max_epochs: ${oc.env:SM_MAX_EPOCHS, 8}
-  log_every_n_steps: 10
-  val_check_interval: 0.5
+  log_every_n_steps: ${oc.env:SM_LOG_EVERY, 10}
+  val_check_interval: ${oc.env:SM_VAL_INTERVAL, 0.5}
+  enable_progress_bar: true
+  profiler: ${oc.env:SM_PROFILER, null}       # set "simple" if you need quick hotspots
+  benchmark: false                            # keep startup predictable in notebook
+  deterministic: false
 
+# Precision: inherit repo default; stick with fp32 by default for simplicity
+precision:
+  mode: ${oc.env:SM_PRECISION, "32-true"}
+  tf32:
+    allow: ${oc.env:SM_TF32_ALLOW, false}
+    cudnn_allow: ${oc.env:SM_TF32_CUDNN, false}
+  safety:
+    detect_anomaly: ${oc.env:SM_DETECT_ANOMALY, false}
+
+# Logging: offline by default for Kaggle/notebooks; flip to false for online trackers
 training:
   logger:
-    offline: ${oc.env:SM_LOG_OFFLINE,true}
+    offline: ${oc.env:SM_LOG_OFFLINE, true}
 
+# DataLoader: lightweight & stable for notebook kernels
 data_loader:
-  num_workers: ${oc.env:SM_WORKERS,2}
-  persistent_workers: false
+  num_workers: ${oc.env:SM_WORKERS, 2}        # small worker count keeps RAM & CPU in check
+  persistent_workers: false                    # avoid zombie loaders on cell re-runs
+  prefetch_factor: ${oc.env:SM_PREFETCH, 2}
+  pin_memory: ${oc.env:SM_PIN_MEM, true}
+  pin_memory_device: "cuda"
+
+# Optional bite-sized epochs (uncomment if you want even faster feedback)
+#limits:
+#  train_batches: ${oc.env:SM_LIMIT_TRAIN, 0.5}
+#  val_batches:   ${oc.env:SM_LIMIT_VAL,   1.0}
 
 experiment:
-  tags: ["profile:notebook"]
+  name: ${oc.env:SM_EXPERIMENT_NAME, "notebook-run"}
+  tags: ${oc.env:SM_TAGS, ["profile:notebook","quiet","short"]}
