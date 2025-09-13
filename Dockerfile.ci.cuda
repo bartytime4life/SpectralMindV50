@@ -1,57 +1,104 @@
 # ==============================================================================
 # Dockerfile.ci.cuda — SpectraMind V50 (CI GPU image, Kaggle-aligned)
 # ------------------------------------------------------------------------------
-# • CUDA 12.1 + cuDNN 8 on Ubuntu 22.04 (matches Kaggle’s cu121 wheels)
-# • Uses a dedicated venv at /opt/venv (no system-site contamination)
-# • Installs Torch stack from PyTorch cu121 index
-# • Optionally installs runtime deps from requirements-kaggle.txt
+# • CUDA 12.1 + cuDNN 8 on Ubuntu 22.04 (matches PyTorch cu121 wheels)
+# • Python 3.11 by default (toggle PYVER=3.10 to mirror Kaggle notebooks)
+# • Isolated venv at /opt/venv (no system-site contamination)
+# • Deterministic Torch stack from cu121 index
+# • Lean apt footprint, non-root user, proper signal handling via tini
 # ==============================================================================
 
-# Pinned to Kaggle CUDA 12.1 + cuDNN 8, Ubuntu 22.04
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
+# ---- Build args (flip PYVER to 3.10 if you want Kaggle-Notebook parity) ----
+ARG PYVER=3.11
+
+# ---- Base env ----------------------------------------------------------------
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    FORCE_CUDA=1 \
     LC_ALL=C.UTF-8 \
     LANG=C.UTF-8 \
     VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:$PATH
+    PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
+    # Torch / NCCL stability knobs (safe defaults for CI)
+    CUDA_DEVICE_ORDER=PCI_BUS_ID \
+    NCCL_P2P_DISABLE=0 \
+    NCCL_IB_DISABLE=1
 
-# Base tools + Python
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-pip python3-venv python3-dev \
-      git curl ca-certificates build-essential jq pciutils \
-  && rm -rf /var/lib/apt/lists/*
+# Use bash for conditional RUNs
+SHELL ["/bin/bash", "-lc"]
 
-# Create an isolated venv and upgrade pip/setuptools/wheel
-RUN python3 -m venv "${VIRTUAL_ENV}" \
-  && "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip setuptools wheel
+# ---- System deps (pinned & minimal) ------------------------------------------
+RUN set -euxo pipefail \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git jq pciutils tini build-essential \
+      software-properties-common \
+ && rm -rf /var/lib/apt/lists/*
 
-# ---- PyTorch (CUDA 12.1) -----------------------------------------------------
-# Use the cu121 index; no need to append +cu121 in version pins.
-RUN pip install --index-url https://download.pytorch.org/whl/cu121 \
-      torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1
+# ---- Python install (3.11 default via deadsnakes; 3.10 uses system python) ---
+RUN set -euxo pipefail; \
+ if [[ "${PYVER}" == "3.10" ]]; then \
+   apt-get update && apt-get install -y --no-install-recommends \
+     python3 python3-venv python3-dev python3-pip && \
+   rm -rf /var/lib/apt/lists/* && \
+   PYBIN=python3; \
+ else \
+   add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && \
+   apt-get install -y --no-install-recommends \
+     "python${PYVER}" "python${PYVER}-venv" "python${PYVER}-dev" python3-pip && \
+   rm -rf /var/lib/apt/lists/* && \
+   PYBIN="python${PYVER}"; \
+ fi; \
+ "${PYBIN}" -m venv "${VIRTUAL_ENV}" && \
+ "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade --no-cache-dir pip==24.2 setuptools==72.2.0 wheel==0.44.0
 
-# ---- Optional: runtime deps (will usually be reinstalled in CI -e .) ----------
-# Keep this step non-fatal in case the file isn’t present at build-time.
+# ---- Torch stack (CUDA 12.1 channel) -----------------------------------------
+# Note: cu121 index implies CUDA 12.1 wheels — do not append +cu121 to versions.
+ARG TORCH_VER=2.3.1
+ARG TVISION_VER=0.18.1
+ARG TAUDIO_VER=2.3.1
+RUN set -euxo pipefail \
+ && pip install --upgrade --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cu121 \
+      "torch==${TORCH_VER}" "torchvision==${TVISION_VER}" "torchaudio==${TAUDIO_VER}"
+
+# ---- Optional runtime dependencies -------------------------------------------
+# Keep non-fatal if the requirements file isn't present at build-time.
 COPY requirements-kaggle.txt /tmp/requirements-kaggle.txt
-RUN [ -s /tmp/requirements-kaggle.txt ] && pip install -r /tmp/requirements-kaggle.txt || true
+RUN set -euxo pipefail; \
+ if [[ -s /tmp/requirements-kaggle.txt ]]; then \
+   pip install --no-cache-dir -r /tmp/requirements-kaggle.txt; \
+ else \
+   echo "No requirements-kaggle.txt found; skipping."; \
+ fi
 
-# Non-root user for CI
+# ---- Non-root user & workspace -----------------------------------------------
 RUN useradd -ms /bin/bash runner
 USER runner
 WORKDIR /workspace
 
-# Sanity print (build/runtime). Note: torch.cuda.is_available() requires GPU runtime.
+# ---- Labels for provenance ----------------------------------------------------
+LABEL org.opencontainers.image.title="SpectraMind V50 CI CUDA Image" \
+      org.opencontainers.image.description="CUDA 12.1 + cuDNN 8, Python ${PYVER}, Torch cu121" \
+      org.opencontainers.image.source="https://github.com/bartytime4life/SpectralMindV50" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# ---- Entry & health-friendly defaults ----------------------------------------
+# tini ensures signals reach Python, preventing zombie processes in CI.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Quick torch/cuDNN sanity print (GPU availability depends on runtime)
 CMD python - <<'PY'
-import torch, sys
+import sys, torch
+print("Python:", sys.version.split()[0])
 print("Torch:", torch.__version__, "CUDA build:", torch.version.cuda)
 try:
     import torch.backends.cudnn as cudnn
     print("cuDNN:", cudnn.version())
 except Exception:
     print("cuDNN: n/a")
-print("Python:", sys.version.split()[0])
+print("CUDA visible devices:", torch.cuda.device_count())
+print("CUDA available:", torch.cuda.is_available())
 PY
