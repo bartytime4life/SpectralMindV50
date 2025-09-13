@@ -1,0 +1,15 @@
+# LOAD — collect calibrated artifacts for a split
+
+sources:
+  # The dataloader resolves split members (train/val/test) from data.splits
+  calibrated_manifest: ${io.calibrated_root}/manifest.json
+  train_dir: ${io.calibrated_root}/train
+  val_dir:   ${io.calibrated_root}/val
+  test_dir:  ${io.calibrated_root}/test
+
+expect:
+  fgs1: "fgs1_*.parquet"     # or .npz; your loader should accept both
+  airs: "airs_*.parquet"
+  y:    "y_*.parquet"        # only for train/val
+fail_on_missing: true
+shuffle_seed: ${preprocess.seed}
